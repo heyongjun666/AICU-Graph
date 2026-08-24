@@ -1,238 +1,22 @@
 # AICU
 
-### Build dynamic AI agent organizations that collaborate to solve complex, long-running tasks.
+[English](README.md) | [简体中文](README_CN.md)
 
-**AICU (Agent Intelligent Collaboration Unit)** is a dynamic multi-agent collaboration platform that **builds and adapts AI agent organizations in real time** to solve complex, long-running, and evolving tasks.
+# Build dynamic AI agent organizations that collaborate to solve complex, long-running tasks.
 
-Instead of relying on a fixed workflow or a predefined chain of agents, AICU allows an organization of specialized AI agents to be formed around the task itself. Agents can work independently, collaborate when necessary, and adapt their organization as the task evolves.
+AICU (Agent Intelligent Collaboration Unit) is a dynamic multi-agent collaboration platform that enables AI agents to form, coordinate, and adapt organizations in real time to solve complex and evolving tasks.
 
-> **From single agents completing tasks to AI organizations completing tasks.**
+Unlike traditional agent frameworks that rely on predefined workflows or fixed agent teams, AICU allows AI organizations to be created around the task itself. Different specialized agents can be organized when needed, collaborate during execution, and adapt as the task changes.
+
+> From individual AI agents completing tasks to AI organizations completing tasks.
 
 ---
 
 ## Why AICU?
 
-Most agent systems work well when the workflow is known in advance:
+Most existing agent systems work well when the workflow is already known:
 
-```text
-Task
-  ↓
-Planner
-  ↓
-Agent A
-  ↓
-Agent B
-  ↓
-Agent C
-  ↓
-Result
 ```
-
-But many real-world tasks do not have a fixed workflow.
-
-A complex task may require different capabilities at different stages:
-
-```text
-                    Complex Task
-                         │
-                         ▼
-              Build an AI Organization
-                         │
-          ┌──────────────┼──────────────┐
-          ▼              ▼              ▼
-       Backend        Frontend        Designer
-          │              │              │
-          └──────────────┼──────────────┘
-                         ▼
-                      Testing
-                         │
-                         ▼
-                  New requirements
-                         │
-                         ▼
-                Organization adapts
-```
-
-AICU is designed for this kind of problem.
-
-The system does not require the complete organization or workflow to be known beforehand. It can **construct the organization needed for the current task and adapt it as new requirements, dependencies, failures, and discoveries emerge.**
-
----
-
-## Core Ideas
-
-### 🏗️ Dynamic Agent Organization
-
-AICU treats a group of agents as an **organization**, rather than simply a collection of independent agents.
-
-Given a complex task, the system can determine:
-
-* What capabilities are required
-* Which roles are needed
-* How agents should be organized
-* Which agents should work independently
-* Which agents need to collaborate
-* How the organization should evolve as the task progresses
-
-The organization is not necessarily fixed before execution.
-
----
-
-### 🧩 Roles & Skills
-
-Agents can be composed from reusable **Roles** and **Skills**.
-
-A Role represents a type of responsibility:
-
-```text
-Frontend Developer
-Backend Developer
-Tester
-Architect
-Technical Writer
-```
-
-Skills represent specific capabilities:
-
-```text
-React
-Django
-API Integration
-Database Design
-Security Testing
-```
-
-This allows the system to move from:
-
-```text
-Task → Fixed Agents
-```
-
-toward:
-
-```text
-Task
-  ↓
-Required Capabilities
-  ↓
-Roles + Skills
-  ↓
-Dynamic Agent Organization
-```
-
----
-
-### 🧠 Capability-Driven Organization
-
-AICU is designed to support a large and extensible capability universe.
-
-Instead of forcing a manager to consider every available role and skill, relevant capabilities can first be identified and retrieved for the current task.
-
-```text
-User Task
-   ↓
-Capability Retrieval
-   ↓
-Relevant Roles / Skills
-   ↓
-Organization Planning
-   ↓
-Agent Organization
-```
-
-This allows the system to scale to much larger collections of specialized capabilities.
-
----
-
-### 🔄 Event-Driven Collaboration
-
-Agents do not need to continuously communicate with each other.
-
-Most work can happen independently.
-
-When something happens that actually requires collaboration — such as a blocking issue, breaking change, important discovery, failed validation, or request for assistance — it can trigger collaboration between relevant agents.
-
-```text
-Agent A
-   │
-   │ important event
-   ▼
-Collaboration
-   │
-   ├──► Agent B
-   ├──► Agent C
-   └──► Agent D
-```
-
-This makes collaboration **event-driven and demand-driven**, rather than forcing every agent to participate in every step.
-
----
-
-### 🎯 Dynamic Routing
-
-AICU separates collaboration decisions from individual agents.
-
-When an event requires collaboration, the system determines which agents should receive or respond to it based on the current organization and task context.
-
-```text
-Event
-  ↓
-Routing
-  ↓
-Relevant Agents
-  ↓
-Collaboration
-```
-
-This allows the organization to remain loosely coupled while still supporting dynamic communication.
-
----
-
-### 📦 Shared Work & Artifacts
-
-Agents work toward a shared task outcome rather than exchanging their entire internal context with every other agent.
-
-Important results are represented through task state and artifacts:
-
-```text
-Agent
-  ↓
-Artifact / State
-  ↓
-Shared Task Environment
-  ↓
-Other Agents
-```
-
-This allows agents to collaborate without requiring every agent to carry the entire history of the organization.
-
----
-
-### ⚡ Long-Running Tasks
-
-AICU is designed for tasks that may take many steps and involve many agents.
-
-Examples include:
-
-* Building complete software systems
-* Large-scale refactoring
-* Research projects
-* Product development
-* Documentation projects
-* Complex data processing
-* Multi-stage engineering tasks
-
-The goal is not simply to generate a response.
-
-The goal is to **continuously move a complex task toward completion.**
-
----
-
-## AICU vs. Traditional Agent Workflows
-
-### Traditional workflow
-
-```text
 Task
  ↓
 Fixed Workflow
@@ -246,300 +30,375 @@ Agent C
 Result
 ```
 
-The organization and execution path are mostly predetermined.
+However, many real-world problems do not have a predefined solution path.
 
-### AICU
+Large engineering projects, research tasks, and complex automation problems often require:
 
-```text
-                 Task
-                  │
-                  ▼
-        Build Agent Organization
-                  │
-        ┌─────────┼─────────┐
-        ▼         ▼         ▼
-      Agent A   Agent B   Agent C
-        │         │         │
-        └───── collaboration ─────┐
-                                   │
-                                   ▼
-                            Task evolves
-                                   │
-                                   ▼
-                        Organization adapts
-                                   │
-                         ┌─────────┼─────────┐
-                         ▼         ▼         ▼
-                       Agent D   Agent E   Agent F
-```
+* Different expertise at different stages
+* New agents when unexpected problems appear
+* Dynamic collaboration between specialists
+* Continuous adaptation during execution
 
-The key difference is:
+AICU is designed for these scenarios.
 
-> **The organization itself becomes part of the task execution process.**
+Instead of defining a fixed team beforehand, AICU builds an AI agent organization around the current objective and allows that organization to evolve as the task progresses.
+
+<!-- TODO: Add hero image / demo GIF here
+
+Suggested content:
+- User provides a complex task
+- AICU creates an agent organization
+- Multiple agents collaborate
+- Task is completed
+
+Recommended:
+- GIF or short video
+- 800x450 or similar aspect ratio
+
+-->
 
 ---
 
-## Architecture
+# What is AICU?
 
-At a high level:
+AICU is a runtime for building and operating dynamic AI agent organizations.
 
-```text
-                         User Task
-                            │
-                            ▼
-                  ┌───────────────────┐
-                  │ Capability Layer  │
-                  └─────────┬─────────┘
-                            │
-                            ▼
-                  ┌───────────────────┐
-                  │ Organization      │
-                  │ Planning          │
-                  └─────────┬─────────┘
-                            │
-                            ▼
-                  ┌───────────────────┐
-                  │ Agent Organization │
-                  │      Graph        │
-                  └─────────┬─────────┘
-                            │
-              ┌─────────────┼─────────────┐
-              ▼             ▼             ▼
-           Agent A        Agent B        Agent C
-              │             │             │
-              └─────────────┼─────────────┘
-                            │
-                         Events
-                            │
-                            ▼
-                     Collaboration
-                            │
-                            ▼
-                  Organization evolves
-                            │
-                            └──────────────┐
-                                           │
-                                           ▼
-                                      Task Progress
+The core idea is:
+
+```
+Task
+ ↓
+Understand required capabilities
+ ↓
+Build an agent organization
+ ↓
+Agents execute specialized work
+ ↓
+Agents collaborate when needed
+ ↓
+Organization adapts
+ ↓
+Task completion
 ```
 
-AICU separates several concerns:
+AICU focuses on three major questions:
 
-| Layer        | Responsibility                                      |
-| ------------ | --------------------------------------------------- |
-| Capability   | Discover the capabilities required by a task        |
-| Organization | Build and adapt the Agent organization              |
-| Agent        | Perform specialized work                            |
-| Runtime      | Execute and manage agents                           |
-| Event        | Represent important changes and collaboration needs |
-| Routing      | Determine which agents need to collaborate          |
-| State        | Track task and agent progress                       |
-| Artifact     | Store concrete outputs of work                      |
+### 1. What capabilities are needed?
+
+A complex task may require many different abilities.
+
+AICU identifies required capabilities and organizes suitable agents around them.
+
+### 2. How should agents collaborate?
+
+Different agents may need different collaboration patterns depending on the task.
+
+AICU enables dynamic collaboration instead of forcing every task into a fixed workflow.
+
+### 3. How should the organization evolve?
+
+Long-running tasks often change during execution.
+
+New requirements, failures, discoveries, and dependencies may require the organization to adapt.
 
 ---
 
-## Example
+# Core Features
 
-Imagine the task:
+## 🏗️ Dynamic Agent Organization
 
-```text
+AICU creates agent teams dynamically based on the task.
+
+Instead of:
+
+```
+One task → predefined agents
+```
+
+AICU enables:
+
+```
+Task
+ ↓
+Required capabilities
+ ↓
+Agent organization
+ ↓
+Execution
+```
+
+The organization itself becomes part of the problem-solving process.
+
+---
+
+## 🧩 Capability-Driven Agents
+
+AICU separates capabilities from individual agents.
+
+Agents can be defined through reusable:
+
+* Roles
+* Skills
+* Capabilities
+
+Example:
+
+```
+Role:
+- Backend Developer
+
+Skills:
+- Python
+- Django
+- Database Design
+- API Development
+```
+
+This allows AICU to select and organize agents based on what they can do, rather than only their predefined identity.
+
+---
+
+## 🔄 Event-Driven Collaboration
+
+Agents do not need to constantly communicate.
+
+Instead, collaboration happens when meaningful events occur.
+
+Examples:
+
+* A dependency changes
+* A blocking issue appears
+* A review is required
+* A critical problem is discovered
+
+This enables efficient collaboration while reducing unnecessary communication.
+
+---
+
+## 🎯 Dynamic Coordination
+
+AICU separates task execution from coordination.
+
+Agents focus on completing their specialized work.
+
+The system coordinates collaboration based on the current task state and organization.
+
+---
+
+## 📦 Shared Workspace and Artifacts
+
+Agents collaborate through shared task outcomes.
+
+Important results are represented as artifacts and shared state instead of repeatedly transferring large conversation histories.
+
+This enables more scalable long-running execution.
+
+---
+
+## ⚡ Long-Running Task Execution
+
+AICU is designed for tasks that require many steps and multiple specialized agents.
+
+Examples:
+
+* Software development
+* Large-scale refactoring
+* Research workflows
+* Product development
+* Documentation generation
+* Complex automation
+
+---
+
+# How AICU Works
+
+High-level architecture:
+
+<!-- TODO: Add architecture diagram here
+
+Suggested diagram:
+
+User Task
+    ↓
+Capability Discovery
+    ↓
+Organization Planning
+    ↓
+Dynamic Agent Organization
+    ↓
+Agent Execution
+    ↓
+Collaboration Events
+    ↓
+Organization Adaptation
+    ↓
+Final Result
+
+The diagram should explain the concept, not implementation details.
+
+-->
+
+```
+                User Task
+                    |
+                    v
+          Build Agent Organization
+                    |
+       +------------+------------+
+       |            |            |
+       v            v            v
+    Agent A      Agent B      Agent C
+       |            |            |
+       +------------+------------+
+                    |
+              Collaboration
+                    |
+                    v
+          Organization Evolves
+                    |
+                    v
+              Task Completed
+```
+
+---
+
+# Example
+
+A user asks:
+
+```
 Build a complete blog platform.
 ```
 
-AICU does not require a fixed workflow such as:
+Instead of executing a fixed workflow, AICU can create an organization:
 
-```text
-Design → Backend → Frontend → Testing
+```
+                Project Goal
+                    |
+                    v
+              AI Organization
+                    |
+    +---------------+---------------+
+    |               |               |
+Architect      Backend         Frontend
+    |               |               |
+    +---------------+---------------+
+                    |
+                 Testing
 ```
 
-Instead, it can construct an organization around the task:
-
-```text
-                 Project Manager
-                       │
-          ┌────────────┼────────────┐
-          ▼            ▼            ▼
-      Architect      Backend      Frontend
-          │            │            │
-          │            ├─────┐      │
-          │            │     │      │
-          │            ▼     │      ▼
-          │          Database │   UI
-          │                  │
-          └──────────────────┼─────────┐
-                             ▼         ▼
-                           Testing   Security
-```
-
-During execution, new information can change what the organization needs.
+During execution, if new requirements appear, the organization can adapt.
 
 For example:
 
-```text
+```
 Backend discovers authentication complexity
-                    │
-                    ▼
-             New collaboration
-                    │
-                    ▼
-              Security Agent
-                    │
-                    ▼
-             Organization adapts
+
+        ↓
+
+Security capability is required
+
+        ↓
+
+New collaboration happens
+
+        ↓
+
+Organization adapts
 ```
 
-The system therefore evolves with the task instead of simply executing a predetermined pipeline.
+---
+
+# AICU Compared With Traditional Agent Workflows
+
+Traditional workflow:
+
+```
+Task
+ ↓
+Fixed Pipeline
+ ↓
+Agents
+ ↓
+Result
+```
+
+AICU:
+
+```
+Task
+ ↓
+Create Organization
+ ↓
+Agents Work
+ ↓
+Collaboration
+ ↓
+Adapt Organization
+ ↓
+Continue Execution
+ ↓
+Complete Task
+```
+
+The difference:
+
+> AICU treats the AI organization itself as a dynamic part of solving the problem.
 
 ---
 
-## Design Principles
+# Roadmap
 
-AICU is built around several principles:
+## Current Development
 
-### 1. Organization over workflow
-
-The system should organize capable agents around a goal rather than forcing every task into a fixed workflow.
-
-### 2. Dynamic over static
-
-The organization should be able to evolve as the task changes.
-
-### 3. Collaboration over conversation
-
-Agents collaborate to make progress. Communication itself is not the goal.
-
-### 4. Event-driven over continuous coordination
-
-Agents should communicate when collaboration provides value, rather than constantly exchanging messages.
-
-### 5. Capability over identity
-
-The system should select agents based on what they can do, rather than relying entirely on predefined agent identities.
-
-### 6. Execution over generation
-
-The objective is to complete real work and produce verifiable artifacts, not simply generate a final response.
-
----
-
-## Project Status
-
-AICU is currently under active development.
-
-The project is evolving toward a general-purpose runtime for dynamic AI agent organizations.
-
-Current development areas include:
-
-* Dynamic Agent Organization
-* Role / Skill / Capability system
-* Organization Graph
-* Event-driven collaboration
-* Dynamic routing
+* Dynamic agent organization
+* Role and skill system
+* Capability-driven planning
+* Event-based collaboration
+* Agent runtime
 * Shared workspace
 * Artifact management
-* Long-running task execution
-* Agent state management
-* Collaboration efficiency
-* Evaluation and reliability
 
-APIs and internal architecture may change during this stage.
+## Future
 
----
-
-## Roadmap
-
-### Organization
-
-* [x] Dynamic organization generation
-* [x] Role-based agents
-* [x] Skill-based capabilities
-* [ ] Large-scale capability retrieval
-* [ ] Dynamic organization adaptation
-
-### Collaboration
-
-* [x] Event-based collaboration
-* [x] Independent routing
-* [x] Agent inbox
-* [ ] Event aggregation
-* [ ] Cost-aware routing
-* [ ] More efficient asynchronous collaboration
-
-### Runtime
-
-* [x] Agent scheduling
-* [x] Agent state management
-* [x] Shared workspace
-* [x] Artifact management
-* [ ] Resumable long-running execution
-* [ ] Advanced observability
-
-### Ecosystem
-
-* [ ] More model providers
-* [ ] Agent-to-Agent interoperability
-* [ ] External Agent integration
-* [ ] Evaluation benchmarks
-* [ ] Community roles and skills
+* Large-scale capability ecosystem
+* More adaptive organization evolution
+* Advanced evaluation system
+* Agent interoperability
+* More efficient collaboration strategies
 
 ---
 
-## Getting Started
+# Documentation
 
-> Documentation and installation instructions are currently being prepared.
+Documentation is under development.
 
-The long-term goal is to make creating a dynamic AI organization as simple as defining the task:
+Future documentation will include:
 
-```text
-User
-  ↓
-AICU
-  ↓
-"Build a complete e-commerce platform."
-  ↓
-AICU creates the required organization
-  ↓
-Agents collaborate
-  ↓
-Artifacts are produced
-  ↓
-Task completed
-```
+* Architecture overview
+* Agent organization concepts
+* Capability system
+* Collaboration model
+* Runtime design
+* Examples and tutorials
 
 ---
 
-## Why "AICU"?
+# Contributing
 
-**AICU — Agent Intelligent Collaboration Unit**
+Contributions are welcome.
 
-The name reflects the project's core idea:
+Areas of interest:
 
-> An AICU is a computational unit in which multiple specialized AI agents can be organized and coordinated to accomplish a larger goal.
-
-The long-term vision is to move beyond individual AI assistants and toward **AI organizations capable of organizing themselves around complex objectives.**
-
----
-
-## Contributing
-
-AICU is an open-source project and contributions are welcome.
-
-Areas that are particularly interesting include:
-
-* Agent organization strategies
-* Role and skill design
 * Multi-agent collaboration
-* Dynamic routing
+* Agent organization design
+* Capability systems
 * Agent evaluation
-* Long-running agent systems
-* Agent communication protocols
-* Runtime reliability
-* Cost-efficient agent coordination
-
-Issues, discussions, experiments, and pull requests are welcome.
+* Runtime infrastructure
+* AI workflow research
 
 ---
 
-## License
+# License
 
-See [LICENSE](LICENSE) for details.
+See [LICENSE](LICENSE).

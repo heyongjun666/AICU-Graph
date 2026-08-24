@@ -1,0 +1,27 @@
+# =============================================================================
+# roles/system_role/default.yaml — 系统内部角色默认配置
+# =============================================================================
+# system_role 目录承载框架内部角色（非用户可选角色，不出现在 roles/Manager 或
+# roles/Worker 的可选角色列表中）。当前唯一用途：AICU Router（方案三）。
+#
+# 与 Manager/Worker 的差异：
+#   - 不参与 Manager 的角色选择（_build_available_roles_text 只扫 Manager/Worker）；
+#   - role_type="system_role" 时 role_md 走完整人格分支（不拼 Manager 组织构建者骨架）。
+#
+# 具体系统角色只需在 roles/system_role/ 下放 {name}.yaml，未覆盖字段从此文件继承。
+# =============================================================================
+
+# ---- AICU 初始化参数 ----
+num_ccs: 1                # 系统角色默认 solo（生成 + 自审）
+model: DeepSeek-V4-Flash
+cli_name: null
+audit_rounds: 2
+
+# ---- 产出文件 ----
+output_file: null
+final_file: plan_result
+modular_output: false
+deliverable_dir: null
+
+# ---- 兜底人格（具体角色应覆盖） ----
+role_md: "系统内部角色。具体人格由子角色 yaml 覆盖。"

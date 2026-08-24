@@ -1,0 +1,130 @@
+# =============================================================================
+# default.yaml — 角色配置的通用默认值
+# =============================================================================
+# 当某个角色的 {role}.yaml 中省略了某字段时，AICU 会回退到此文件的对应字段。
+# 显式写空字符串/空列表会覆盖默认（如 generate_instruction: "" 表示
+# question 已自带 prompt，AICU 不再追加生成指令）。
+#
+# 字段分两类：
+#   A. AICU 初始化参数 —— num_ccs/model/cli_name/audit_rounds
+#      调用方在 AICU(...) 中显式传参时用传入值，未传则用此文件默认值
+#   B. 角色配置字段 —— 控制 CC 各位置行为，按位置分组：
+#      生成位（CC-0/CC-1）   : generate_instruction
+#      修订位（CC-0）        : revise_instruction
+#      审查/融合/审计位      : review_checklist
+#      审查位（CC-1/CC-2）   : adversarial_role
+#      审计位（CC-3）        : audit_role, audit_angles
+#      产出文件              : output_file, final_file, modular_output
+#      AICU 人格（所有 CC）  : role_md
+#
+# 新增角色只需在 roles/ 下放一个 {name}.yaml，可以只写 role_md，
+# 其他字段自动从此文件继承。要定制某字段，在自己的 yaml 中显式写即可。
+# =============================================================================
+
+# ---- 角色选择结构化元数据（供 Manager 选角时的 available_roles 面板使用）----
+summary: "通用工程师，按任务要求完成各类编程与文档工作，为无专用角色匹配时的兜底选项"
+suitable_for:
+- 通用编程任务
+- 兜底角色(当其他专用角色都不匹配时最后使用)
+not_for:
+- (无特别排除项，作为兜底角色应尽量通用)
+
+# ---- AICU 初始化参数 ----
+# num_ccs: CC 数量，决定协作策略（1=solo, 2=pair, 3=triple, ≥4=full）
+num_ccs: 1
+
+# model: CC 调用使用的模型名
+model: DeepSeek-V4-Flash
+
+# cli_name: CLI 名称（internal/claude）；null 表示使用系统默认 CLI
+cli_name: null
+
+# audit_rounds: 对抗审查最大轮数
+audit_rounds: 2
+
+# skills_dir: skill 源目录（绝对路径，支持 ~ 表示家目录）。
+#   - skills 列表中的 skill 名称会从此目录下查找子目录
+#   - 默认 ~/.claude/skills（internal/claude 用户级 skill 安装位置）
+#   - 角色 yaml 可覆盖以使用自定义 skill 库（如项目内或共享盘的 skill）
+#   - 仅当 skills 非空时此字段才生效
+skills_dir: ~/.claude/skills
+
+# skills: 该角色 CC 可用的 skill 名称列表（从 skills_dir 中选取）
+#   - 空列表 [] 表示不启用任何 skill（CC 行为与未装 skill 完全一致）
+#   - 非空列表时，AICU 会在每个 CC workspace 下创建 .claude/skills/ 目录，
+#     软链接到列表中指定的 skill；并通过 --setting-sources project 限制
+#     CC 只加载这些 project-level skill，不加载用户级 skill
+#   - 例如: skills: [tdd, diagnosing-bugs, codegraph]
+skills:
+- codegraph
+
+# ---- 产出文件 ----
+# output_file: CC 生成结果写入的文件名（CC 自己负责写入）
+output_file: output
+
+# final_file: AICU 最终产出文件名（从最优 CC 复制而来）
+final_file: output
+
+# modular_output: 是否模块化多文件产出（True 时 CC 可生成多个 .py 文件，
+#                 output_file 通常设为 null；False 时 CC 写单个 output_file）
+modular_output: false
+
+# deliverable_dir: CC 交付物子目录（相对于 workspace），技能内部产物自然隔离
+deliverable_dir: deliverables
+
+# ---- 生成位（CC-0/CC-1）----
+# generate_instruction: 生成阶段 prompt 模板。
+#   - {output_file} 会被替换为 output_file 的值
+#   - {deliverable_dir} 会被替换为 deliverable_dir 的值
+#   - 显式设为 "" 时表示 question 已自带完整 prompt，AICU 不追加生成指令
+generate_instruction: |-
+  请回答以下问题，将完整结果写入 {deliverable_dir}/{output_file} 文件。
+  要求: 直接将结果写入 {deliverable_dir}/{output_file}，不需要额外说明。
+
+# ---- 修订位（CC-0）----
+# revise_instruction: 修订阶段 prompt 模板。
+#   - {output_path} 会被替换为产出文件的完整路径
+#   - 注意: modular_output=true 时此模板不进行 {output_path} 替换（多文件场景由 CC 自行决定）
+revise_instruction: |-
+  请逐个修复上述缺陷，然后用 Edit 或 Write 工具将修复后的内容写回 {output_path}。
+  保留原有方案的优点，不要引入新问题。
+
+# ---- 审查/融合/审计位（CC-1/CC-2/CC-3 共用）----
+# review_checklist: 评审检查清单，CC 按此逐项打分/找缺陷。
+#   - 每项是 [name, desc] 二元组（yaml 内是列表，无需引号）
+review_checklist:
+- - correctness
+  - 正确性：是否正确解决问题，逻辑是否成立
+- - completeness
+  - 完整性：是否覆盖所有要求，有无遗漏
+- - clarity
+  - 清晰度：表达是否清晰、结构是否合理
+
+# ---- 审查位（CC-1/CC-2）----
+# adversarial_role: 审查位的人格补充，注入 prompt 开头（"你是一个{adversarial_role}。"）
+adversarial_role: 严格的审查专家，负责找出方案中的缺陷
+
+# ---- 审计位（CC-3）----
+# audit_role: 审计位的人格补充，注入 prompt 开头（"你是一个{audit_role}，专门寻找..."）
+audit_role: 深度审计专家，负责发现方案中的隐含风险
+
+# audit_angles: 审计角度列表，追加到 review_checklist 之后供 CC-3 深入审查
+audit_angles:
+- 正确性与逻辑漏洞
+- 完整性与边界情况
+- 风险与潜在问题
+
+# ---- AICU 人格（所有 CC 共享）----
+# role_md: AICU 角色人格文本，写入每个 CC 的 CLAUDE.md。
+#   - 此字段为通用兜底人格；具体角色应在自己的 yaml 中显式覆盖
+#   - 描述 AICU 单元的身份/使命/工作流/产出/成功标准/失败模式
+role_md: |-
+  # 角色：通用工程师
+
+  你是一名通用工程师，负责按要求完成任务。
+
+  ## 核心原则
+  - 准确理解任务要求
+  - 产出完整可用的结果
+  - 必要时给出清晰说明
+

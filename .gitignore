@@ -1,0 +1,31 @@
+# Runtime data
+nodes/
+workspaces/
+runtime_sessions/
+events*
+*.log
+
+# Credentials and local configuration
+.env
+.env.*
+!.env.example
+api_keys.json
+config.local.*
+sessions.json
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Frontend
+node_modules/
+dist/
+frontend/node_modules/
+frontend/dist/
+
+# Local tooling and OS files
+.codegraph/
+.DS_Store

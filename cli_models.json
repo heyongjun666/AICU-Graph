@@ -1,0 +1,109 @@
+{
+  "internal": [
+    "auto-内部", "DeepSeek-V4-Flash-内部", "GLM-5.2-内部", "Kimi-K2.7-Code-内部",
+    "auto", "GLM-5.2", "GLM-5-Turbo", "Grok-4.5", "Grok-4.6",
+    "gpt-5.5", "gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.6-sol",
+    "Claude Haiku 4.5", "Claude Sonnet 4.6", "Claude Sonnet 5", "Opus 4.8", "Opus 5",
+    "Fable 5", "Kimi K2.6", "Kimi K3", "MiniMax-M3",
+    "DeepSeek-V4-Flash", "DeepSeek-V4-Pro"
+  ],
+  "all": [
+    "claude-opus-5", "claude-opus-4-8", "claude-opus-4-7", "claude-opus-4-6", "claude-opus-4-5",
+    "claude-sonnet-5", "claude-sonnet-4-6", "claude-sonnet-4-5", "claude-haiku-4-5",
+    "claude-fable-5", "claude-mythos-5",
+    "gpt-5.6", "gpt-5.6-cyber", "gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.6-sol", "gpt-5-4",
+    "kimi-k3", "kimi-k2.7-code", "kimi-k2.7-code-highspeed", "kimi-k2.6", "kimi-k2.5", "kimi-vision-model",
+    "grok-4.20", "grok-4.6", "grok-4.5", "grok-4.3",
+    "gemini-3.5", "gemini-3.7-flash", "gemini-3.1-pro", "gemini-3.1-flash-lite", "gemini-3",
+    "gemini-2.5-pro", "gemini-2.5-flash",
+    "deepseek-v4-flash", "deepseek-v4-pro",
+    "glm-5.2", "glm-5-turbo",
+    "MiniMax-M3",
+    "qwen3.8-max", "qwen3-coder-plus", "qwen3.7-plus"
+  ],
+  "provider_presets": [
+    {
+      "id": "openai",
+      "display_name": "OpenAI 官方 API",
+      "cli_name": "codex",
+      "model": "gpt-5.6",
+      "models": ["gpt-5.6", "gpt-5.6-mini", "gpt-5.6-cyber", "gpt-5.5", "gpt-5.4"],
+      "api_base_url": "https://api.openai.com/v1",
+      "api_key_env": "OPENAI_API_KEY",
+      "wire_api": "responses",
+      "available": true
+    },
+    {
+      "id": "deepseek",
+      "display_name": "DeepSeek 官方 API",
+      "cli_name": "codex",
+      "model": "deepseek-v4-flash",
+      "models": ["deepseek-v4-flash", "deepseek-v4-pro"],
+      "api_base_url": "https://api.deepseek.com/v1",
+      "api_key_env": "DEEPSEEK_API_KEY",
+      "wire_api": "responses",
+      "available": true,
+      "note": "已验证：Codex Responses API"
+    },
+    {
+      "id": "anthropic",
+      "display_name": "Anthropic 官方 API · Claude",
+      "cli_name": "claude",
+      "model": "claude-sonnet-4-6",
+      "models": ["claude-sonnet-4-6", "claude-opus-4-6", "claude-haiku-4-5"],
+      "api_base_url": "https://api.anthropic.com",
+      "api_key_env": "ANTHROPIC_API_KEY",
+      "wire_api": "messages",
+      "available": true,
+      "note": "使用 Claude Code 原生 CLI"
+    },
+    {
+      "id": "moonshot",
+      "display_name": "Moonshot 官方 API · Kimi",
+      "cli_name": "kimi",
+      "model": "kimi-k2.6",
+      "models": ["kimi-k2.6", "kimi-k2.5", "kimi-k3"],
+      "api_base_url": "https://api.moonshot.cn",
+      "api_key_env": "KIMI_API_KEY",
+      "wire_api": "chat",
+      "available": true,
+      "note": "使用 Kimi 原生 CLI"
+    },
+    {
+      "id": "aliyun",
+      "display_name": "阿里云百炼 API · Qwen",
+      "cli_name": "qwen",
+      "model": "qwen3-coder-plus",
+      "models": ["qwen3-coder-plus", "qwen3.8-max", "qwen3.7-plus"],
+      "api_base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+      "api_key_env": "BAILIAN_API_KEY",
+      "wire_api": "chat",
+      "available": true,
+      "note": "使用 Qwen Code 原生 CLI"
+    },
+    {
+      "id": "google",
+      "display_name": "Google 官方 API · Gemini",
+      "cli_name": "gemini",
+      "model": "gemini-3.1-pro-preview",
+      "models": ["gemini-3.1-pro-preview", "gemini-3.1-pro", "gemini-3", "gemini-2.5-flash"],
+      "api_base_url": null,
+      "api_key_env": "GEMINI_API_KEY",
+      "wire_api": "native",
+      "available": true,
+      "note": "使用 Gemini CLI 原生 API；自定义 Base URL 当前不支持"
+    },
+    {
+      "id": "xai",
+      "display_name": "xAI 官方 API · Grok（实验性）",
+      "cli_name": "grok",
+      "model": "grok-4.6",
+      "models": ["grok-4.6", "grok-4.5", "grok-4.3"],
+      "api_base_url": "https://api.x.ai/v1",
+      "api_key_env": "XAI_API_KEY",
+      "wire_api": "chat",
+      "available": false,
+      "note": "当前 grok adapter 的无头参数和认证方式未经实测，暂不启用"
+    }
+  ]
+}

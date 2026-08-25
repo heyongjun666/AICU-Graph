@@ -871,7 +871,7 @@ def test_agent_events_unknown_session_404(session_client):
 
 
 # ============================================================================
-# 凭据端点（/v1/config/api-key 与 /v1/config/internal-username）
+# API Key 凭据端点（/v1/config/api-key）
 # ============================================================================
 
 def test_api_key_save_and_echo_by_vendor(session_client):
@@ -932,23 +932,4 @@ def test_api_key_delete_by_vendor(session_client):
     assert session_client.get(
         "/v1/config/api-key", params={"model": "deepseek-v4-pro"}
     ).json()["api_key"] is None
-
-
-def test_internal_username_roundtrip(session_client):
-    """internal 账号名称：单值、持久化回显、空值删除。"""
-    assert session_client.get("/v1/config/internal-username").json() == {"username": None}
-
-    resp = session_client.put(
-        "/v1/config/internal-username", json={"username": "v_heyongjun01"}
-    )
-    assert resp.status_code == 200
-    assert resp.json() == {"username": "v_heyongjun01", "saved": True}
-    assert session_client.get("/v1/config/internal-username").json() == {
-        "username": "v_heyongjun01"
-    }
-
-    resp = session_client.put("/v1/config/internal-username", json={"username": ""})
-    assert resp.status_code == 200
-    assert resp.json() == {"username": None, "saved": False}
-    assert session_client.get("/v1/config/internal-username").json() == {"username": None}
 

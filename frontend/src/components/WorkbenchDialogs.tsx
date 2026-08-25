@@ -80,7 +80,7 @@ export const NewNodeDialog: React.FC<NodeDialogProps> = ({ open, nodes, candidat
   const [roles, setRoles] = useState<RoleInfo[]>([]);
   const [skills, setSkills] = useState<SkillInfo[]>([]);
   const [selectedSkills, setSelectedSkills] = useState<string[]>([]);
-  const [cliName, setCliName] = useState<NodeConfig['cli_name']>('internal');
+  const [cliName, setCliName] = useState<NodeConfig['cli_name']>('claude');
   const [model, setModel] = useState('');
   const [apiBaseUrl, setApiBaseUrl] = useState('');
   const [apiKeyEnv, setApiKeyEnv] = useState('');
@@ -95,7 +95,7 @@ export const NewNodeDialog: React.FC<NodeDialogProps> = ({ open, nodes, candidat
       setParentId(nodes[0]?.id || '');
       setDependencies([]);
       setSelectedSkills([]);
-      setCliName('internal');
+      setCliName('claude');
       setModel('');
       setApiBaseUrl('');
       setApiKeyEnv('');
@@ -171,7 +171,7 @@ export const NewNodeDialog: React.FC<NodeDialogProps> = ({ open, nodes, candidat
         </div>
         <div className="form-grid two-columns">
           <label>{t('dialog.parent')}<select value={parentId} onChange={(event) => setParentId(event.target.value)}><option value="">{t('dialog.noParent')}</option>{parentCandidates.map((candidate) => <option key={candidate.id} value={candidate.id}>{candidate.label}</option>)}</select></label>
-          <label>{t('dialog.cli')}<select value={cliName} onChange={(event) => setCliName(event.target.value as NodeConfig['cli_name'])}><option value="internal">internal</option><option value="claude">Claude Code</option></select></label>
+          <label>{t('dialog.cli')}<select value={cliName} onChange={(event) => setCliName(event.target.value as NodeConfig['cli_name'])}><option value="claude">Claude Code</option></select></label>
         </div>
         <label>{t('dialog.task')}<textarea autoFocus value={task} onChange={(event) => setTask(event.target.value)} rows={5} placeholder={t('dialog.taskPlaceholder')} /></label>
         <div className="node-dialog-section"><div className="node-dialog-section-title">{t('dialog.dependencies')}</div><div className="dependency-picker">{dependencyCandidates.length ? dependencyCandidates.map((candidate) => <label key={candidate.id}><input type="checkbox" checked={dependencies.includes(candidate.id)} onChange={(event) => toggleDependency(candidate.id, event.target.checked)} /><span>{candidate.label}</span></label>) : <span className="detail-empty">{t('dialog.noEligibleNodes')}</span>}</div></div>

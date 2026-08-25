@@ -91,7 +91,7 @@ const NodeInspector: React.FC = () => {
   const [reviseTask, setReviseTask] = useState('');
   const [task, setTask] = useState('');
   const [role, setRole] = useState('');
-  const [cliName, setCliName] = useState<NodeConfig['cli_name']>('internal');
+  const [cliName, setCliName] = useState<NodeConfig['cli_name']>('claude');
   const [model, setModel] = useState('');
   const [apiBaseUrl, setApiBaseUrl] = useState('');
   const [apiKeyEnv, setApiKeyEnv] = useState('');
@@ -105,7 +105,7 @@ const NodeInspector: React.FC = () => {
       const config = storeNode.config || {};
       setTask(storeNode.task || '');
       setRole(storeNode.role || 'default');
-      setCliName(config.cli_name || 'internal');
+      setCliName(config.cli_name || 'claude');
       setModel(config.model || '');
       setApiBaseUrl(config.api_base_url || '');
       setApiKeyEnv(config.api_key_env || '');
@@ -481,7 +481,7 @@ const NodeInspector: React.FC = () => {
       {editing && (
         <div className="inspector-editor">
           <div className="dialog-header"><h2>{t('inspector.editNode')}</h2><button className="icon-button" onClick={() => setEditing(false)}><X size={17} /></button></div>
-          <div className="form-grid two-columns"><label>{t('node.role')}<input value={role} onChange={(event) => setRole(event.target.value)} /></label><label>{t('dialog.cli')}<select value={cliName} onChange={(event) => setCliName(event.target.value as NodeConfig['cli_name'])}><option value="internal">internal</option><option value="claude">Claude Code</option></select></label></div>
+          <div className="form-grid two-columns"><label>{t('node.role')}<input value={role} onChange={(event) => setRole(event.target.value)} /></label><label>{t('dialog.cli')}<select value={cliName} onChange={(event) => setCliName(event.target.value as NodeConfig['cli_name'])}><option value="claude">Claude Code</option></select></label></div>
           <label>{t('dialog.task')}<textarea value={task} onChange={(event) => setTask(event.target.value)} rows={7} /></label>
           <div className="form-grid two-columns"><label>{t('dialog.model')}<input value={model} onChange={(event) => setModel(event.target.value)} placeholder={t('dialog.useSessionDefault')} /></label><label>{t('dialog.apiKeyEnv')}<input value={apiKeyEnv} onChange={(event) => setApiKeyEnv(event.target.value)} placeholder="ANTHROPIC_API_KEY" /></label><label className="full-field">{t('dialog.apiBaseUrl')}<input value={apiBaseUrl} onChange={(event) => setApiBaseUrl(event.target.value)} /></label><label className="full-field">{t('inspector.skillIds')}<input value={skillIds} onChange={(event) => setSkillIds(event.target.value)} placeholder="skill-one, focused-review" /></label></div>
           <label className="toggle-field"><input type="checkbox" checked={skipPermissions} onChange={(event) => setSkipPermissions(event.target.checked)} /><span>{t('dialog.runWithoutPerms')}</span></label>

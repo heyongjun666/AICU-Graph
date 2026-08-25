@@ -49,7 +49,7 @@ beforeEach(() => {
   vi.mocked(api.getGlobalConfig).mockResolvedValue({
     config: { workspace_root: null, cli_name: null, model: null, api_base_url: null, api_key_env: null },
     clis: [],
-    default_cli: 'internal',
+    default_cli: 'claude',
   });
   vi.mocked(api.getRoles).mockResolvedValue([]);
   vi.mocked(api.getSkills).mockResolvedValue([]);

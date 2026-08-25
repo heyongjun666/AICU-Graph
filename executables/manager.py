@@ -1017,7 +1017,7 @@ class Manager(Executable):
                         content = f.read()
                     plan_data = self._extract_plan_json(content)
                     if not plan_data:
-                        # 兜底1: LLM/internal 偶尔会少输出一个闭合 }，导致 JSON 不合法，
+                        # 兜底1: CLI 偶尔会少输出一个闭合 }，导致 JSON 不合法，
                         # 逐个追加 } 试探最多补 3 个大括号 — 这是高频已知问题。
                         candidate = content
                         for _ in range(3):

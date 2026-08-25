@@ -62,10 +62,6 @@ class ApiKeyRequest(BaseModel):
     api_key: Optional[str] = Field(default=None, max_length=4096)
 
 
-class InternalUsernameRequest(BaseModel):
-    username: Optional[str] = Field(default=None, max_length=200)
-
-
 class PauseGraphRequest(BaseModel):
     mode: Literal["drain", "immediate"] = "drain"
 
@@ -375,21 +371,6 @@ def create_session_app(
     @app.delete("/v1/config/api-key", status_code=204)
     def delete_api_key(vendor: str = Query(min_length=1, max_length=80)):
         session_manager.delete_api_key(vendor)
-
-    @app.get("/v1/config/internal-username")
-    def get_internal_username():
-        """回显 internal 账号名。"""
-        return {"username": session_manager.get_internal_username()}
-
-    @app.put("/v1/config/internal-username")
-    def put_internal_username(body: InternalUsernameRequest):
-        """保存 internal 账号名；空值视为删除。"""
-        name = (body.username or "").strip()
-        if name:
-            session_manager.set_internal_username(name)
-            return {"username": name, "saved": True}
-        session_manager.delete_internal_username()
-        return {"username": None, "saved": False}
 
     @app.get("/v1/sessions")
     def list_sessions():

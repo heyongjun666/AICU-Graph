@@ -1,6 +1,6 @@
 """多终端 Agent CLI 适配层。
 
-把 Claude Code 协议（internal / claude）与其它终端 Agent CLI（codex / kimi / qwen /
+把 Claude Code 协议与其它终端 Agent CLI（codex / kimi / qwen /
 antigravity / grok）的协议差异抽象为 CliAdapter 策略，供
 claude_code_agent.ClaudeCodeAgent 编排逻辑调用。
 
@@ -18,7 +18,7 @@ claude_code_agent.ClaudeCodeAgent 编排逻辑调用。
 各 CLI 的已知模型清单（供前端下拉候选）集中维护在 cli_models.json。
 
 flags 依据（截至 2026-08）：
-  - internal / claude：Claude Code 协议（本仓库既有实现）
+  - claude：Claude Code 协议
   - kimi：官方命令参考 https://moonshotai.github.io/kimi-cli/en/reference/kimi-command
   - qwen：官方文档 https://qwenlm.github.io/qwen-code-docs（headless 页）已核实
   - opencode / pi / codebuddy / gemini / cursor：官方文档已核实（见各 adapter docstring）
@@ -35,7 +35,6 @@ from typing import Optional
 
 from runtime.credentials import (
     api_key_env_for_vendor,
-    resolve_internal_username,
     resolve_sk_for_model,
     vendor_of_model,
 )
@@ -246,11 +245,8 @@ class CliAdapter:
     def known_models(self) -> list[str]:
         """已知模型清单（供前端下拉候选）。
 
-        internal 返回网关 display name（聚合全厂商）；其余 CLI 返回 ``all`` 全厂商
-        官方名并集，使每个 CLI 都能像 internal 一样列出全部厂商的模型。
+        所有公开 CLI 返回 ``all`` 中的官方模型名并集，供前端下拉候选。
         """
-        if self.id == "internal":
-            return KNOWN_MODELS.get("internal", [])
         return KNOWN_MODELS.get("all", [])
 
     # 可选同名冲突甄别：(探测 argv, 必须含子串, 必须排除子串)。None 表示只用 which。
@@ -316,7 +312,7 @@ class CliAdapter:
     ) -> None:
         """预写该 CLI 的第三方模型配置（默认 no-op）。
 
-        只有 api_base_url 非空（指向第三方端点）时才需要预写；internal/claude/kimi
+        只有 api_base_url 非空（指向第三方端点）时才需要预写；部分 CLI
         走环境变量，无需写配置文件。codex/qwen 覆盖此方法把端点注册进各自的
         配置文件（config.toml / settings.json），使运行时 ``--model <id>`` 能命中。
         """
@@ -332,10 +328,7 @@ class CliAdapter:
 
 
 class ClaudeCodeAdapter(CliAdapter):
-    """Claude Code 协议（internal / claude 共用）。
-
-    与旧 claude_code_agent.py 内嵌逻辑逐字节一致；internal 额外带 --username。
-    """
+    """Claude Code CLI 协议适配器。"""
 
     api_key_env = "ANTHROPIC_API_KEY"
 
@@ -350,15 +343,6 @@ class ClaudeCodeAdapter(CliAdapter):
         cmd = [self.command]
         if model:
             cmd.extend(["--model", model])
-        # 多账号环境：internal 要求显式指定 --username，否则报错。
-        # 优先取 UI 保存的账号名（凭据存储），回退环境变量 INTERNAL_USERNAME / CC_USERNAME。
-        username = (
-            resolve_internal_username()
-            or os.environ.get("INTERNAL_USERNAME")
-            or os.environ.get("CC_USERNAME")
-        )
-        if username and self.id == "internal":
-            cmd.extend(["--username", username])
         if skip_permissions:
             # root 用户下 --dangerously-skip-permissions 被禁止，
             # 用 --allowedTools 只开放必要的文件操作工具
@@ -488,7 +472,7 @@ class CodexAdapter(CliAdapter):
     核实；本环境无法访问该站（connection refused），内容由用户提供。
 
     注意：本机 /usr/bin/codex 是同名的无关工具（与 OpenAI Codex
-    同名冲突），探测时 internal 优先级在前，默认仍选 internal。
+    同名冲突），探测时按适配器列表顺序选择默认 CLI。
 
     关键约定：
       - ``codex exec``（简写 ``codex e``）为无头/CI 模式子命令
@@ -516,7 +500,7 @@ class CodexAdapter(CliAdapter):
         if model:
             cmd.extend(["--model", model])
         if skip_permissions:
-            # 等价于 internal/claude 的 skip_permissions；文档警示仅在专用沙箱 VM 内使用
+            # 等价于 Claude Code 的 skip_permissions；文档警示仅在专用沙箱 VM 内使用
             cmd.append("--dangerously-bypass-approvals-and-sandbox")
         # codex 无 project-level skill 概念，enable_project_skills 忽略
         return cmd
@@ -1200,7 +1184,7 @@ class GeminiAdapter(CliAdapter):
         if model:
             cmd.extend(["--model", model])
         if skip_permissions:
-            # --yolo 自动批准所有操作（含工具调用），等价于 internal/claude 的 skip_permissions
+            # --yolo 自动批准所有操作（含工具调用），等价于 Claude Code 的 skip_permissions
             cmd.append("--yolo")
         # Gemini headless 模式还要求显式信任当前工作目录。
         cmd.append("--skip-trust")
@@ -1318,9 +1302,8 @@ class CursorAdapter(CliAdapter):
         return {"result": text, "session_id": None, "subtype": None, "errors": []}
 
 
-# 优先级顺序即默认选择顺序（internal > claude > codebuddy > codex > kimi > qwen > opencode > pi > gemini > cursor > antigravity > grok）
-_ADAPTERS: list[CliAdapter] = [
-    ClaudeCodeAdapter("internal", "Internal", "internal"),
+# 优先级顺序即默认选择顺序
+_ADAPTERS = [
     ClaudeCodeAdapter("claude", "Claude Code", "claude"),
     # CodeBuddy Code（腾讯）：Claude Code 协议克隆，复用 ClaudeCodeAdapter，仅覆盖认证 env
     CodeBuddyAdapter(),
@@ -1357,9 +1340,8 @@ def detect_default() -> str:
         if adapter.is_installed():
             return adapter.id
     raise RuntimeError(
-        "未找到可用的 CLI 工具，请安装 internal 或 claude\n"
-        "  internal:  内部 Claude Code 封装\n"
-        "  claude: 官方 Claude Code CLI (npm install -g @anthropic-ai/claude-code)"
+        "未找到可用的 CLI 工具，请安装一个受支持的 AI Coding CLI\n"
+        "  详情:  见 cli_adapters.py 和 docs/INSTALL.md"
     )
 
 

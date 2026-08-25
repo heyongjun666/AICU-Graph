@@ -10,7 +10,7 @@ from runtime.credentials import resolve_sk_for_model
 
 
 class CCExecutionError(RuntimeError):
-    """internal/claude 返回 error_during_execution 时的专用异常"""
+    """Claude Code CLI 返回 error_during_execution 时的专用异常"""
     pass
 
 
@@ -22,7 +22,6 @@ def detect_cli() -> str:
 class ClaudeCodeAgent:
     """
     Claude Code 的编程式封装类，支持多轮对话 + 父子 Agent 编排
-    兼容 internal 和 claude 两种 CLI
     """
 
     def __init__(self,
@@ -42,7 +41,7 @@ class ClaudeCodeAgent:
         :param instruction_md_path: 角色说明 MD 文件路径（可选），内容会写入 workspace/CLAUDE.md
         :param model: 使用的模型
         :param skip_permissions: 是否跳过权限确认（自动化时设为 True）
-        :param cli_name: 指定 CLI 名称（"internal" 或 "claude"），为 None 时自动检测
+        :param cli_name: 指定 CLI 名称，为 None 时自动检测
         :param enable_project_skills: 是否启用 project-level skill 加载。
             True 时命令追加 --setting-sources project，使 CC 只加载 workspace
             下 .claude/skills/ 中的 skill，不加载用户级 ~/.claude/skills/。
@@ -73,7 +72,7 @@ class ClaudeCodeAgent:
         self.cli_name = self.adapter.id
 
         # 第三方端点（api_base_url）需预写 CLI 的 provider 配置（codex/qwen），
-        # 使运行时 --model 能命中；internal/claude/kimi 走环境变量，provision 为 no-op。
+        # 使运行时 --model 能命中；部分 CLI 走环境变量，provision 为 no-op。
         self.adapter.provision(
             api_base_url=self.api_base_url,
             api_key_env=self.api_key_env,
@@ -84,7 +83,7 @@ class ClaudeCodeAgent:
         self.workspace.mkdir(parents=True, exist_ok=True)
 
         # 如果传入了 MD 文件，将其内容写入 workspace/CLAUDE.md
-        # Claude Code / internal 会自动读取 CLAUDE.md 作为项目指令
+        # Claude Code 会自动读取 CLAUDE.md 作为项目指令
         if instruction_md_path:
             md_file = Path(instruction_md_path).resolve()
             if not md_file.exists():
@@ -163,14 +162,12 @@ class ClaudeCodeAgent:
             api_base_url=self.api_base_url,
             api_key_env=self.api_key_env,
         )
-        # 非 internal CLI：把 UI 保存的 sk（按模型厂商）注入到该 CLI 的认证环境变量，
-        # 覆盖环境变量中的同名值。internal 走账号认证（--username），不注入 sk。
-        if self.cli_name != "internal":
-            sk = resolve_sk_for_model(self.model)
-            if sk:
-                env_name = self.adapter.api_key_env_for_model(self.model)
-                if env_name:
-                    env[env_name] = sk
+        # 将 UI 保存的 API Key 按模型厂商注入到 CLI 的认证环境变量。
+        sk = resolve_sk_for_model(self.model)
+        if sk:
+            env_name = self.adapter.api_key_env_for_model(self.model)
+            if env_name:
+                env[env_name] = sk
         return env
 
     def chat(self, prompt: str, max_turns: Optional[int] = None, timeout: int = 36000) -> str:
@@ -203,7 +200,7 @@ class ClaudeCodeAgent:
         print(f"[CC] 执行命令: {' '.join(cmd)} (prompt via {prompt_mode}, {len(prompt)} chars)")
 
         # 用 Popen + start_new_session=True 创建独立进程组，
-        # 超时时用 os.killpg kill 整个进程组，避免 internal fork 的 claude-go 成为孤儿进程
+        # 超时时用 os.killpg kill 整个进程组，避免 CLI 子进程成为孤儿进程
         proc = subprocess.Popen(
             cmd,
             stdin=subprocess.PIPE,
@@ -222,7 +219,7 @@ class ClaudeCodeAgent:
             else:
                 stdout, stderr = proc.communicate(input=prompt_input, timeout=timeout)
         except subprocess.TimeoutExpired:
-            # 超时：kill 整个进程组（包括 internal 和它 fork 的 claude-go）
+            # 超时：kill 整个进程组，避免子进程残留
             try:
                 os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
             except ProcessLookupError:
@@ -261,7 +258,7 @@ class ClaudeCodeAgent:
         if output is None:
             return result_stdout.strip()
 
-        # 检测 error_during_execution：internal 内部出错但进程未崩溃
+        # 检测 error_during_execution：CLI 内部出错但进程未崩溃
         subtype = output.get("subtype", "")
         if subtype == "error_during_execution":
             errors = output.get("errors") or []
@@ -307,7 +304,7 @@ class ClaudeCodeAgent:
 
     def interactive(self):
         """
-        开启交互式会话（相当于直接敲 `internal` / `claude`）
+        开启交互式会话（相当于直接运行 CLI）
         注意：这会阻塞当前进程，直到用户退出
         """
         cmd = self._build_base_command()

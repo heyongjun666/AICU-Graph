@@ -27,7 +27,6 @@ from runtime.credentials import CredentialStore, set_credential_store
 
 class TestRegistry:
     def test_get_adapter_known(self):
-        assert isinstance(get_adapter("internal"), ClaudeCodeAdapter)
         assert isinstance(get_adapter("claude"), ClaudeCodeAdapter)
         assert isinstance(get_adapter("codebuddy"), CodeBuddyAdapter)
         assert isinstance(get_adapter("codex"), CodexAdapter)
@@ -46,7 +45,7 @@ class TestRegistry:
 
     def test_priority_order_excludes_copilot(self):
         ids = [a.id for a in cli_adapters._ADAPTERS]
-        assert ids[0] == "internal"
+        assert ids[0] == "claude"
         assert "copilot" not in ids
 
 
@@ -60,7 +59,7 @@ class TestDetect:
 
     def test_detect_installed_filters(self, monkeypatch):
         def fake_which(command):
-            return "/usr/bin/x" if command in {"internal", "codex"} else None
+            return "/usr/bin/x" if command in {"claude", "codex"} else None
 
         monkeypatch.setattr(cli_adapters.shutil, "which", fake_which)
         # codex 的 is_installed 需额外甄别 --help；此处让其通过（OpenAI Codex 特征含 exec）
@@ -68,7 +67,7 @@ class TestDetect:
             cli_adapters.subprocess, "run",
             lambda *a, **k: types.SimpleNamespace(stdout="exec", stderr=""),
         )
-        assert detect_installed() == ["internal", "codex"]
+        assert detect_installed() == ["claude", "codex"]
 
     def test_detect_default_none_raises(self, monkeypatch):
         monkeypatch.setattr(cli_adapters.shutil, "which", lambda command: None)
@@ -77,18 +76,18 @@ class TestDetect:
 
 
 class TestClaudeAdapter:
-    def test_base_command_internal(self):
-        adapter = get_adapter("internal")
+    def test_base_command_claude(self):
+        adapter = get_adapter("claude")
         cmd = adapter.build_base_command(
-            model="gpt-5.6-luna", skip_permissions=True, enable_project_skills=True
+            model="claude-sonnet-4-6", skip_permissions=True, enable_project_skills=True
         )
-        assert cmd[0] == "internal"
-        assert "--model" in cmd and "gpt-5.6-luna" in cmd
+        assert cmd[0] == "claude"
+        assert "--model" in cmd and "claude-sonnet-4-6" in cmd
         assert "--allowedTools" in cmd and "--permission-mode" in cmd
         assert "--setting-sources" in cmd
 
     def test_base_command_claude_no_username(self, monkeypatch):
-        monkeypatch.setenv("INTERNAL_USERNAME", "someone")
+        monkeypatch.setenv("CLAUDE_CODE_USERNAME", "someone")
         adapter = get_adapter("claude")
         cmd = adapter.build_base_command(
             model=None, skip_permissions=False, enable_project_skills=False
@@ -528,39 +527,12 @@ class TestGenericAdapter:
 class TestApiKeyEnv:
     def test_api_key_env_declared_per_cli(self):
         """每个 CLI adapter 都声明其认证环境变量名（供 sk 注入复用）。"""
-        assert get_adapter("internal").api_key_env == "ANTHROPIC_API_KEY"
         assert get_adapter("claude").api_key_env == "ANTHROPIC_API_KEY"
         assert get_adapter("codex").api_key_env == "OPENAI_API_KEY"
         assert get_adapter("kimi").api_key_env == "KIMI_API_KEY"
         assert get_adapter("qwen").api_key_env == "BAILIAN_API_KEY"
         assert get_adapter("antigravity").api_key_env == "GEMINI_API_KEY"
         assert get_adapter("grok").api_key_env == "XAI_API_KEY"
-
-
-class TestInternalUsername:
-    def test_internal_username_from_store(self, tmp_path):
-        """UI 保存的 internal 账号名经凭据存储注入 --username（优先于环境变量）。"""
-        store = CredentialStore(str(tmp_path / "api_keys.json"))
-        store.set_username("v_heyongjun01")
-        set_credential_store(store)
-        try:
-            cmd = get_adapter("internal").build_base_command(
-                model=None, skip_permissions=False, enable_project_skills=False
-            )
-            assert "--username" in cmd
-            assert cmd[cmd.index("--username") + 1] == "v_heyongjun01"
-        finally:
-            set_credential_store(None)
-
-    def test_internal_no_username_when_store_empty(self, monkeypatch):
-        """无保存账号且无环境变量 → internal 不带 --username。"""
-        monkeypatch.delenv("INTERNAL_USERNAME", raising=False)
-        monkeypatch.delenv("CC_USERNAME", raising=False)
-        set_credential_store(None)
-        cmd = get_adapter("internal").build_base_command(
-            model=None, skip_permissions=False, enable_project_skills=False
-        )
-        assert "--username" not in cmd
 
 
 class TestKnownModels:
@@ -579,14 +551,8 @@ class TestKnownModels:
         "qwen3.8-max", "qwen3-coder-plus", "qwen3.7-plus",
     ]
 
-    def test_internal_uses_gateway_display_names(self):
-        assert "Claude Sonnet 4.6" in get_adapter("internal").known_models
-        assert "gpt-5.6-luna" in get_adapter("internal").known_models
-        # internal 用网关 display name，非官方 API 名
-        assert "claude-sonnet-4-6" not in get_adapter("internal").known_models
-
-    def test_all_non_internal_clis_share_full_model_set(self):
-        # 每个非 internal CLI 都返回全厂商官方名并集（像 internal 一样支持全厂商）
+    def test_all_public_clis_share_full_model_set(self):
+        # 每个公开 CLI 都返回全厂商官方名并集
         for cli_id in ["claude", "codebuddy", "codex", "kimi", "qwen", "opencode", "pi", "gemini", "cursor", "antigravity", "grok"]:
             assert get_adapter(cli_id).known_models == self.ALL, f"{cli_id} 未返回全厂商模型集"
 
@@ -595,7 +561,6 @@ class TestKnownModels:
         by_id = {item["id"]: item for item in clis}
         for cli_id in ["claude", "codebuddy", "codex", "kimi", "qwen", "opencode", "pi", "gemini", "cursor", "antigravity", "grok"]:
             assert by_id[cli_id]["models"] == self.ALL, f"{cli_id} 模型清单不完整"
-        assert "gpt-5.6-luna" in by_id["internal"]["models"]
         assert "models" in by_id["grok"]
         assert by_id["claude"]["priority"] < by_id["codex"]["priority"]
 
@@ -698,7 +663,7 @@ class TestProvision:
 
     def test_provision_default_noop_for_env_clis(self, monkeypatch, tmp_path):
         monkeypatch.setattr(cli_adapters.Path, "home", lambda: tmp_path)
-        get_adapter("internal").provision(api_base_url="https://x/v1", api_key_env="K", model="m")
+        get_adapter("claude").provision(api_base_url="https://x/v1", api_key_env="K", model="m")
         get_adapter("kimi").provision(api_base_url="https://x/v1", api_key_env="K", model="m")
         assert not (tmp_path / ".codex" / "config.toml").exists()
         assert not (tmp_path / ".qwen" / "settings.json").exists()

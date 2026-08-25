@@ -85,7 +85,7 @@ class AICU:
         【AICU 初始化参数】（均支持 None-sentinel：调用方传 None 则从 yaml 取）
         - num_ccs: CC 数量，决定协作策略（1=solo, 2=pair, 3=triple, ≥4=full）
         - model: CC 调用使用的模型名
-        - cli_name: CLI 名称（internal/claude）；null 表示使用系统默认
+        - cli_name: CLI 名称；null 表示使用系统默认
         - audit_rounds: 对抗审查最大轮数
         - output_file: CC 产出文件名（modular_output=True 时通常设为 None）
         - final_file: AICU 最终产出文件名
@@ -168,7 +168,7 @@ class AICU:
         :param num_ccs: CC 数量（默认从 default.yaml 的 num_ccs 取）
         :param parent_workspace: 工作目录（必须提供）
         :param model: 模型名称（默认从 default.yaml 的 model 取）
-        :param cli_name: CLI 名称 internal/claude（默认从 default.yaml 的 cli_name 取）
+        :param cli_name: CLI 名称（默认从 default.yaml 的 cli_name 取）
         :param audit_rounds: 对抗审查最大轮数（默认从 default.yaml 的 audit_rounds 取）
         :param role: 角色名称（字符串，必须）。AICU 根据 role_type 加载对应子目录下的
                      default.yaml 作为基础配置，再用 {role}.yaml 覆盖。

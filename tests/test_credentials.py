@@ -4,7 +4,6 @@ import os
 
 from runtime.credentials import (
     CredentialStore,
-    resolve_internal_username,
     resolve_sk_for_model,
     set_credential_store,
     vendor_of_model,
@@ -32,13 +31,6 @@ class TestVendorOfModel:
         assert vendor_of_model("qwen3.7-plus") == "aliyun"
         assert vendor_of_model("Qwen3-Coder-Plus") == "aliyun"
 
-    def test_internal_display_names_exact_match(self):
-        assert vendor_of_model("Claude Sonnet 4.6") == "anthropic"
-        assert vendor_of_model("Claude Haiku 4.5") == "anthropic"
-        assert vendor_of_model("Opus 5") == "anthropic"
-        assert vendor_of_model("Kimi K2.6") == "moonshot"
-        assert vendor_of_model("Kimi K3") == "moonshot"
-
     def test_internal_models_return_none(self):
         assert vendor_of_model("auto") is None
         assert vendor_of_model("auto-内部") is None
@@ -63,23 +55,13 @@ class TestCredentialStore:
         assert store.get("deepseek") is None
         assert store.vendors() == []
 
-    def test_username_set_get_delete(self, tmp_path):
-        store = CredentialStore(str(tmp_path / "api_keys.json"))
-        assert store.get_username() is None
-        store.set_username("v_heyongjun01")
-        assert store.get_username() == "v_heyongjun01"
-        store.delete_username()
-        assert store.get_username() is None
-
     def test_persistence_across_instances(self, tmp_path):
         path = str(tmp_path / "api_keys.json")
         store = CredentialStore(path)
         store.set("openai", "sk-openai")
-        store.set_username("alice")
 
         reloaded = CredentialStore(path)
         assert reloaded.get("openai") == "sk-openai"
-        assert reloaded.get_username() == "alice"
 
     def test_file_is_written_with_0600_permissions(self, tmp_path):
         path = tmp_path / "api_keys.json"
@@ -90,13 +72,11 @@ class TestCredentialStore:
 
     def test_missing_or_corrupt_file_returns_empty(self, tmp_path):
         missing = CredentialStore(str(tmp_path / "missing.json"))
-        assert missing.get_username() is None
         assert missing.vendors() == []
 
         bad = tmp_path / "bad.json"
         bad.write_text("{not json", encoding="utf-8")
         corrupt = CredentialStore(str(bad))
-        assert corrupt.get_username() is None
         assert corrupt.vendors() == []
 
 
@@ -104,7 +84,6 @@ class TestResolveSingletons:
     def test_resolve_returns_none_when_store_unset(self):
         set_credential_store(None)
         assert resolve_sk_for_model("deepseek-v4-pro") is None
-        assert resolve_internal_username() is None
 
     def test_resolve_sk_by_model_vendor(self, tmp_path):
         store = CredentialStore(str(tmp_path / "api_keys.json"))
@@ -116,14 +95,5 @@ class TestResolveSingletons:
             assert resolve_sk_for_model("gpt-5.6") is None
             # 内部模型返回 None
             assert resolve_sk_for_model("auto-内部") is None
-        finally:
-            set_credential_store(None)
-
-    def test_resolve_internal_username_from_store(self, tmp_path):
-        store = CredentialStore(str(tmp_path / "api_keys.json"))
-        store.set_username("v_heyongjun01")
-        set_credential_store(store)
-        try:
-            assert resolve_internal_username() == "v_heyongjun01"
         finally:
             set_credential_store(None)

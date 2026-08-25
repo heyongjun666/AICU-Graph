@@ -32,9 +32,7 @@ logger = logging.getLogger(__name__)
 
 
 # 模型名是否有效由目标 CLI 自行判断（无效名会在 CLI 调用时暴露为错误）。
-# 各 CLI 的模型命名空间不同（internal 的 "Claude Sonnet 4.6"/"Opus 4.8"/"Fable 5"、
-# qwen 的 "qwen3.8-max"/"MiniMax-M2.5" 等都不符合任何统一前缀），
-# 硬编码前缀白名单会误拦用户显式选择的合法模型，故不做前缀校验。
+# 各 CLI 的模型命名空间不同，硬编码前缀白名单会误拦用户显式选择的合法模型，故不做前缀校验。
 _DEFAULT_MODEL = "DeepSeek-V4-Flash"
 
 
@@ -203,8 +201,7 @@ def _validate_model(model_name: Optional[str]) -> str:
 
     只兜底「未指定」的情况；非空模型名一律信任并原样透传——模型名是否有效
     由目标 CLI 自行判断（无效名会在 CLI 调用时暴露为错误，而非被静默回退）。
-    不再用前缀白名单拦截，因为各 CLI 的模型命名空间不统一（internal 的
-    "Claude Sonnet 4.6"、qwen 的 "qwen3.8-max" 等都不匹配统一前缀），
+    不再用前缀白名单拦截，因为各 CLI 的模型命名空间不统一，
     前缀校验会误拦用户显式选择的合法模型。
     """
     if not model_name:

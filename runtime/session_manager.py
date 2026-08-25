@@ -238,7 +238,7 @@ class SessionManager:
             self._save_global_config()
             return dict(self.global_config)
 
-    # ---- 凭据（sk / internal 账号名）—— 委托 runtime.credentials.CredentialStore ----
+    # ---- 凭据（按模型厂商保存的 API Key）—— 委托 CredentialStore ----
 
     def get_api_key(self, vendor: str) -> Optional[str]:
         return self.credential_store.get(vendor)
@@ -251,15 +251,6 @@ class SessionManager:
 
     def list_api_key_vendors(self) -> list[str]:
         return self.credential_store.vendors()
-
-    def get_internal_username(self) -> Optional[str]:
-        return self.credential_store.get_username()
-
-    def set_internal_username(self, name: str) -> None:
-        self.credential_store.set_username(name)
-
-    def delete_internal_username(self) -> None:
-        self.credential_store.delete_username()
 
     def _load_global_config(self) -> dict[str, Any]:
         if not os.path.exists(self._config_path):

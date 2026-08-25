@@ -31,7 +31,6 @@ import {
   OutputFile,
   AgentEvent,
   ApiKeyResponse,
-  InternalUsernameResponse,
 } from '../types';
 import { useUIStateStore } from '../stores/UIStateStore';
 export type { RoleInfo } from '../types';
@@ -568,7 +567,7 @@ export function testConnection(payload: {
   });
 }
 
-// ---- 凭据（sk / internal 账号名称），明文存储，按模型厂商回显 ----
+// ---- 凭据（按模型厂商保存的 API Key），明文存储 ----
 
 export function getApiKey(model: string): Promise<ApiKeyResponse> {
   return sessionRequest(`config/api-key?model=${encodeURIComponent(model)}`);
@@ -584,17 +583,6 @@ export function saveApiKey(model: string, api_key: string): Promise<ApiKeyRespon
 export function deleteApiKey(vendor: string): Promise<void> {
   return sessionRequest(`config/api-key?vendor=${encodeURIComponent(vendor)}`, {
     method: 'DELETE',
-  });
-}
-
-export function getInternalUsername(): Promise<InternalUsernameResponse> {
-  return sessionRequest('config/internal-username');
-}
-
-export function saveInternalUsername(username: string): Promise<InternalUsernameResponse> {
-  return sessionRequest('config/internal-username', {
-    method: 'PUT',
-    body: JSON.stringify({ username }),
   });
 }
 

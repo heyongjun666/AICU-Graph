@@ -134,7 +134,7 @@ export interface SessionSummary {
 
 /** 节点和会话的执行配置。API Key 仅保存环境变量名。 */
 export interface NodeConfig {
-  cli_name?: 'internal' | 'claude' | 'codex' | 'kimi' | 'qwen' | 'antigravity' | 'grok';
+  cli_name?: 'claude' | 'codex' | 'kimi' | 'qwen' | 'antigravity' | 'grok';
   model?: string;
   api_base_url?: string;
   api_key_env?: string;
@@ -198,11 +198,6 @@ export interface GlobalConfigResponse {
 export interface ApiKeyResponse {
   vendor: string | null;
   api_key: string | null;
-}
-
-/** 后端 /v1/config/internal-username 响应（internal 账号名称）。 */
-export interface InternalUsernameResponse {
-  username: string | null;
 }
 
 export interface RoleField {

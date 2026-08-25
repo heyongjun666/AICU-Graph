@@ -12,7 +12,7 @@ AICU 是一个**多 Agent 软件研发编排框架**：
 - 用户提交一个研发任务（例如"做一个博客系统"）；
 - 系统自动生成一棵 **Manager / Worker 的 Agent 组织树**；
 - 节点通过 **Event 事件总线**互相通信，形成「开发 → 测试反馈 → 修复 → 复验 → 交付」的协作闭环；
-- 每一步真实执行由 **AI 编程 Agent**（CC / internal 等终端 CLI）完成，在隔离工作目录里真实读写文件、运行命令。
+- 每一步真实执行由 **AI 编程 Agent** 通过终端 CLI 完成，在隔离工作目录里真实读写文件、运行命令。
 
 ---
 
@@ -25,15 +25,9 @@ AICU 是一个**多 Agent 软件研发编排框架**：
 | Node.js | 18+ | ⭕ 可选 | 仅前端工作台（React）需要 |
 | codegraph | — | ⭕ 可选 | 仅开启 `AICU_CODEGRAPH=1` 时需要 |
 
-支持的 AI 编程 CLI（优先级即默认选择顺序）：
+AICU 通过适配器支持多种 AI 编程 CLI。具体支持情况和参数以 `cli_adapters.py`、`cli_models.json` 以及前端设置页为准。
 
-```
-internal > claude > codebuddy > codex > kimi > qwen > opencode > pi > gemini > cursor > antigravity > grok
-```
-
-- `internal`：内部 Claude Code 封装（内部环境推荐，需账号）。
-- `claude`：官方 Claude Code CLI。
-- 其余为第三方终端 Agent CLI，均可直连对应厂商。
+至少安装一个与你所选模型和服务商匹配的 CLI，并确保其可执行文件位于系统 `PATH` 中。
 
 ---
 
@@ -42,8 +36,8 @@ internal > claude > codebuddy > codex > kimi > qwen > opencode > pi > gemini > c
 ```
 final_solution/
 ├── main.py               # 后端入口（FastAPI + uvicorn，默认 0.0.0.0:8080）
-├── aicu.py               # AI 执行引擎（任务→CC/internal 提示词，编排多 peer）
-├── claude_code_agent.py  # internal/claude CLI 程序化封装（多轮对话/超时/续接/重试）
+├── aicu.py               # AI 执行引擎（任务→Agent 提示词，编排多 peer）
+├── claude_code_agent.py  # CLI 程序化封装（多轮对话/超时/续接/重试）
 ├── cli_adapters.py       # 多终端 CLI 适配层（协议差异抽象）
 ├── cli_models.json       # 各 CLI 已知模型清单（前端下拉候选）
 ├── requirements.txt      # Python 依赖
@@ -81,21 +75,14 @@ pip install -r requirements.txt
 
 AICU 通过 `shutil.which` 探测已安装的 CLI。至少安装其一：
 
-**内部环境（推荐 internal）：**
-
-```bash
-# 确认 internal 可用
-which internal
-internal --version
-```
-
-**通用环境（官方 Claude Code）：**
+请按 `cli_adapters.py` 支持的 CLI 之一完成安装，并确认命令位于 `PATH` 中。例如：
 
 ```bash
 which claude
+claude --version
 ```
 
-若都没有，请按 `cli_adapters.py` 支持的 CLI 之一安装（codex / kimi / qwen / …），并确保其可执行文件在 `PATH` 中。
+如果你使用其他 CLI，请将上面的命令替换为对应的 CLI 名称，并确认其可以在终端直接执行。
 
 ### 4.4 （可选）构建前端工作台
 
@@ -116,33 +103,28 @@ cd ..
 
 ### 5.1 模型与 CLI 选择
 
-- 各 CLI 支持的模型清单集中在 `cli_models.json`（`internal` 键为内部网关 display name，`all` 键为全厂商官方名）。
-- 前端工作台「设置」页可切换 CLI 与模型；`internal` 默认返回网关全厂商模型。
+- 各 CLI 支持的模型清单集中在 `cli_models.json`。
+- 前端工作台「设置」页可切换 CLI、Provider 和模型；具体可用选项取决于本地安装的 CLI 及对应服务商。
 
 ### 5.2 凭证
 
-凭证存储于项目根 `api_keys.json`（明文，0600 权限，首次配置时自动创建），两类：
+凭证由运行时按服务商保存到 `runtime_sessions/api_keys.json`（明文，文件权限为 0600，首次配置时自动创建）。不同 CLI 使用的凭证类型可能不同，通常是对应服务商的 API Key。
 
-| 场景 | 需要 | 配置方式 |
-| --- | --- | --- |
-| 使用 internal | 账号名（username） | `PUT /v1/config/internal-username` 或前端设置页 |
-| 使用第三方 CLI（非 internal） | 厂商 API Key（按 vendor） | `PUT /v1/config/api-key` 或前端设置页 |
+支持的 vendor 包括：`anthropic / openai / moonshot / xai / google / deepseek / zhipu / minimax / aliyun`。
 
-vendor 映射：`anthropic / openai / moonshot / xai / google / deepseek / zhipu / minimax / aliyun`。
+建议优先使用前端工作台的设置页保存和测试凭证，也可以通过 API 配置：
 
 ```bash
-# 示例：配置 internal 账号
-curl -X PUT http://localhost:8080/v1/config/internal-username \
-  -H "Content-Type: application/json" \
-  -d '{"username": "v_xxx"}'
-
-# 示例：配置 anthropic 厂商 API Key
 curl -X PUT http://localhost:8080/v1/config/api-key \
   -H "Content-Type: application/json" \
   -d '{"vendor": "anthropic", "api_key": "sk-..."}'
+
+curl -X POST http://localhost:8080/v1/config/test-connection \
+  -H "Content-Type: application/json" \
+  -d '{"cli_name": "claude", "model": "claude-sonnet-4-6"}'
 ```
 
-> 内部模型（internal 网关 `auto` / `*-内部`）无需 sk。第三方 CLI 可通过 `POST /v1/config/test-connection` 测试连接。
+不要将 `runtime_sessions/`、API Key、环境变量文件或本地 CLI 配置提交到公开仓库。
 
 ### 5.3 环境变量
 
@@ -210,19 +192,16 @@ curl -X POST http://localhost:8080/v1/sessions/<session_id>/graph/resume
 ## 7. 常见问题
 
 **Q1：启动报「未找到可用的 CLI 工具」？**
-AICU 未探测到任何已安装的 AI 编程 CLI。请安装 internal / claude 之一并确保在 `PATH` 中，再重启。
+AICU 未探测到任何已安装的 AI 编程 CLI。请安装一个受支持的 CLI，确保命令位于 `PATH` 中，再重启。
 
-**Q2：internal 报多账号需指定 username？**
-配置 internal 账号：`PUT /v1/config/internal-username`。
-
-**Q3：第三方 CLI 调用报认证失败？**
+**Q2：CLI 调用报认证失败？**
 在 `PUT /v1/config/api-key` 中按 vendor 配置对应 API Key，并用 `POST /v1/config/test-connection` 验证。
 
-**Q4：只想离线跑通流程、不接真实 AI？**
+**Q3：只想离线跑通流程、不接真实 AI？**
 设置 `EXEC_MODE=stub`（确定性 stub 假 AI），用于测试/验收流程。
 
-**Q5：前端访问不到页面？**
+**Q4：前端访问不到页面？**
 未执行 `npm run build` 时后端无 `frontend/dist` 静态产物；请先构建，或直接使用 REST API。
 
-**Q6：数据/会话存在哪里？**
+**Q5：数据/会话存在哪里？**
 会话持久化在 `runtime_sessions/`（`sessions.json` + 每个 session 的 `graph.json`），节点产物在 `nodes/`、工作区在 `workspaces/`。

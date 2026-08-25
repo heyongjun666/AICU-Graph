@@ -113,8 +113,8 @@
 | **事件投递生命周期** | Router 决策记录 + 投递状态 | `routed`（已决策未投递）→ `delivered`（已落盘）→ `consumed`（已消费）；`routed_to` = 决策目标列表 |
 | **AICU Router** | 独立路由决策：Event + 组织图 → 目标 Nodes（LLM，stub/real 双模式） | `runtime/router.py`；与 `structure_version` 绑定，结构变更自动重置会话 |
 | **Event→重激活桥** | 把投递给非运行态节点 inbox 的事件解释为"请求该节点行动" | `Scheduler._process_reactivation_events()` |
-| **AICU** | AI 执行引擎：把任务转成 CC/internal 提示词并编排多 peer（num_ccs） | `aicu.py` |
-| **ClaudeCodeAgent** | 程序化封装 internal/claude CLI：多轮对话、超时杀进程 | `claude_code_agent.py` |
+| **AICU** | AI 执行引擎：把任务转成 Agent 提示词并编排多 peer（num_ccs） | `aicu.py` |
+| **ClaudeCodeAgent** | 程序化封装 AI Coding CLI：多轮对话、超时杀进程 | `claude_code_agent.py` |
 | **Executable** | 可执行体抽象（Manager/Worker 是其子类），支持 stub/real 双模式 | `executables/base.py` `registry.py` |
 | **Delivery（交付保障）** | Artifact Gate + Registry + Assembly Gate 三层 | `runtime/delivery/` |
 | **Session** | 一次独立的多会话运行（session_id + 独立 Runtime）| `runtime/session_manager.py` |
@@ -148,7 +148,7 @@
 │          executables/base.py / manager.py / worker.py / registry.py        │
 │          （负责：装配 Prompt → 调 AICU → 解析输出 → 状态回写）            │
 ├────────────────────────────────────────────────────────────────────────┤
-│ 引擎层    aicu.py（peer 编排） + claude_code_agent.py（CC/internal 封装）      │
+│ 引擎层    aicu.py（peer 编排） + claude_code_agent.py（CLI 封装）           │
 │          EXEC_MODE = stub（DefaultStubAICU，离线测试）                     │
 │                    | real（真实 AI 编程 Agent）                            │
 └────────────────────────────────────────────────────────────────────────┘
@@ -395,8 +395,9 @@
 ### 8.2 ClaudeCodeAgent（claude_code_agent.py）
 
 - `ClaudeCodeAgent(workspace_path, instruction_md_path, model="DeepSeek-V4-Flash", skip_permissions, cli_name, enable_project_skills, output_callback, api_base_url, api_key_env)`。
-- `detect_cli`：internal → claude 自动探测。
-- `_build_base_command`：`--model`、internal 时 `--username`、`--allowedTools "Read Write Edit Bash"` + `--permission-mode dontAsk`（skip_permissions 时）、`--setting-sources project`。
+- `detect_cli`：按适配器和本机 `PATH` 自动探测可用 CLI。
+
+- `_build_base_command`：根据所选 CLI 组装模型、权限和项目设置参数。
 - `chat`：`--print` + `--output-format stream-json/json`、`--resume conversation_id`、stdin 喂 prompt（`Popen` + `start_new_session` + 超时 `killpg`），`_parse_result_output`，失败（`error_during_execution`）抛 `CCExecutionError`。
 - 其他方法：`spawn_child`（子工作区 CC）、`interactive`、`execute_bash`、`read_file`。
 
@@ -445,7 +446,7 @@
 |---|---|
 | `main.py` | **服务入口**：置 `EXEC_MODE=real`，注册 Manager/Worker 到 ExecutableRegistry，创建 SessionManager + `create_session_app`，uvicorn 起 `0.0.0.0:8080`，SIGINT/SIGTERM 优雅停机 |
 | `aicu.py` | **AI 执行引擎**：peer 编排（num_ccs）、角色配置加载、CC 工作区创建、single-writer 约束、vote/review/audit 产物管理 |
-| `claude_code_agent.py` | **CC/internal CLI 程序化封装**：多轮对话（--resume）、stdin 提示、超时 killpg、`CCExecutionError` |
+| `claude_code_agent.py` | **AI Coding CLI 程序化封装**：多轮对话（--resume）、stdin 提示、超时 killpg、`CCExecutionError` |
 | `conftest.py` | pytest 根级 fixture（stub 模式、临时工作区等） |
 | `run_tests.py` | **自包含集成测试编排器**：跑 144 个测试（Models 30 / Graph 25 / StateMachine 30 / Planner 20 / Persistence 10 / EventBus 10 / SSEManager 6 / Registry 3 / Integration 10），产出 `test_report.md` |
 | `docs/plan_v3.1_communication.md` | V3.1 通信与双图架构的规划记录（迭代进度） |
@@ -609,7 +610,7 @@
 | 改多依赖分级阅读策略 | `executables/worker.py`（`_build_tiered_reading_instructions`） |
 | 改 CC 流式日志分流/日志粒度 | `executables/worker.py`（`_handle_cc_stream_output`）、环境变量 `AICU_NODE_LOG_STREAMING` |
 | 改 peer 协作模式（num_ccs） | `aicu.py`（策略选择 + 工作区结构） |
-| 改 CC/internal CLI 的调用参数 | `claude_code_agent.py`（`_build_base_command` / `chat`） |
+| 改 AI Coding CLI 的调用参数 | `claude_code_agent.py`（`_build_base_command` / `chat`） |
 | 换默认模型 | `claude_code_agent.py`（`model` 参数）、`main.py`、roles yaml |
 | 改 stub 假 AI 行为 | `executables/default_stub.py` |
 | 注册新的 Executable 类型 | `executables/registry.py` + `main.py` |

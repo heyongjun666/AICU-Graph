@@ -1,404 +1,198 @@
-# AICU
+# AICU-Graph
 
-[English](README.md) | [简体中文](README_CN.md)
+English | [简体中文](README_CN.md)
 
-# Build dynamic AI agent organizations that collaborate to solve complex, long-running tasks.
+> Build dynamic AI agent organizations that collaborate on complex, long-running tasks.
 
-AICU (Agent Intelligent Collaboration Unit) is a dynamic multi-agent collaboration platform that enables AI agents to form, coordinate, and adapt organizations in real time to solve complex and evolving tasks.
+AICU-Graph is a multi-agent orchestration runtime for complex tasks. It creates an execution organization around a task, uses Managers to decompose and coordinate work, uses Workers to execute concrete tasks, and supports collaboration through events, shared workspaces, and artifacts.
 
-Unlike traditional agent frameworks that rely on predefined workflows or fixed agent teams, AICU allows AI organizations to be created around the task itself. Different specialized agents can be organized when needed, collaborate during execution, and adapt as the task changes.
+AICU-Graph is designed for more than one-shot question answering. It is designed to keep a real, multi-stage task moving as requirements, dependencies, and execution results change.
 
-> From individual AI agents completing tasks to AI organizations completing tasks.
+## Project Scope
 
----
+AICU-Graph is the **organization and runtime layer**. It is responsible for:
 
-## Why AICU?
+- Creating and persisting task sessions;
+- Building Manager / Worker execution graphs;
+- Scheduling nodes and handling dependencies and state changes;
+- Supporting collaboration through events and shared artifacts;
+- Providing REST APIs, SSE event streams, and a React workbench.
 
-Most existing agent systems work well when the workflow is already known:
+An AICU is one execution unit in the graph. When an AICU node is created, it receives a role configuration, task configuration, and execution parameters, then performs its work through a configured AI coding CLI.
 
-```
-Task
- ↓
-Fixed Workflow
- ↓
-Agent A
- ↓
-Agent B
- ↓
-Agent C
- ↓
-Result
-```
-
-However, many real-world problems do not have a predefined solution path.
-
-Large engineering projects, research tasks, and complex automation problems often require:
-
-* Different expertise at different stages
-* New agents when unexpected problems appear
-* Dynamic collaboration between specialists
-* Continuous adaptation during execution
-
-AICU is designed for these scenarios.
-
-Instead of defining a fixed team beforehand, AICU builds an AI agent organization around the current objective and allows that organization to evolve as the task progresses.
-
-<!-- TODO: Add hero image / demo GIF here
-
-Suggested content:
-- User provides a complex task
-- AICU creates an agent organization
-- Multiple agents collaborate
-- Task is completed
-
-Recommended:
-- GIF or short video
-- 800x450 or similar aspect ratio
-
--->
-
----
-
-# What is AICU?
-
-AICU is a runtime for building and operating dynamic AI agent organizations.
-
-The core idea is:
-
-```
-Task
- ↓
-Understand required capabilities
- ↓
-Build an agent organization
- ↓
-Agents execute specialized work
- ↓
-Agents collaborate when needed
- ↓
-Organization adapts
- ↓
-Task completion
+```text
+User task
+   |
+   v
+AICU-Graph Runtime
+   |
+   +-- Manager: understand the task, create a plan, coordinate verification
+   |
+   +-- Worker: execute concrete tasks
+   |       |
+   |       +-- Role / Skills / CLI / Model
+   |
+   +-- Event Bus: publish important state and collaboration events
+   |
+   +-- Artifacts / Shared Workspace: share intermediate and final results
 ```
 
-AICU focuses on three major questions:
+## Why AICU-Graph?
 
-### 1. What capabilities are needed?
+Fixed workflows work well when the execution path is known in advance:
 
-A complex task may require many different abilities.
-
-AICU identifies required capabilities and organizes suitable agents around them.
-
-### 2. How should agents collaborate?
-
-Different agents may need different collaboration patterns depending on the task.
-
-AICU enables dynamic collaboration instead of forcing every task into a fixed workflow.
-
-### 3. How should the organization evolve?
-
-Long-running tasks often change during execution.
-
-New requirements, failures, discoveries, and dependencies may require the organization to adapt.
-
----
-
-# Core Features
-
-## 🏗️ Dynamic Agent Organization
-
-AICU creates agent teams dynamically based on the task.
-
-Instead of:
-
-```
-One task → predefined agents
+```text
+Task -> Agent A -> Agent B -> Agent C -> Result
 ```
 
-AICU enables:
+Complex long-running tasks often introduce new requirements, dependencies, failures, and capability needs while they are running. AICU-Graph treats task organization as part of runtime execution: it creates an execution organization, advances it according to the current state, and uses Managers, Workers, and events to continue verification, repair, or collaboration when needed.
 
-```
-Task
- ↓
-Required capabilities
- ↓
-Agent organization
- ↓
-Execution
-```
-
-The organization itself becomes part of the problem-solving process.
-
----
-
-## 🧩 Capability-Driven Agents
-
-AICU separates capabilities from individual agents.
-
-Agents can be defined through reusable:
-
-* Roles
-* Skills
-* Capabilities
-
-Example:
-
-```
-Role:
-- Backend Developer
-
-Skills:
-- Python
-- Django
-- Database Design
-- API Development
+```text
+Task objective
+   |
+   v
+Manager creates an execution plan
+   |
+   +--> Worker: architecture
+   +--> Worker: backend implementation
+   +--> Worker: frontend implementation
+   +--> Worker: testing and verification
+              |
+              v
+       Shared artifacts / events
+              |
+              v
+          Verification, repair, delivery
 ```
 
-This allows AICU to select and organize agents based on what they can do, rather than only their predefined identity.
+## Core Concepts
 
----
+### AICU-Graph
 
-## 🔄 Event-Driven Collaboration
+A task execution organization made up of multiple AICU nodes. It provides sessions, execution graphs, scheduling, an event bus, persistence, and artifact management.
 
-Agents do not need to constantly communicate.
+### AICU Node
 
-Instead, collaboration happens when meaningful events occur.
+A concrete work unit that executes a task. A node contains task data, role, execution type, configuration, and state. Its identity and execution configuration are established when it is created. If new expertise is required, the graph can create another node instead of arbitrarily changing the identity of a running node.
 
-Examples:
+### Manager / Worker
 
-* A dependency changes
-* A blocking issue appears
-* A review is required
-* A critical problem is discovered
+- **Manager**: understands a task, creates an `ExecutionPlan`, submits child tasks, and verifies or iterates on the result.
+- **Worker**: performs a concrete task from the plan and produces artifacts such as code, documents, and test reports.
 
-This enables efficient collaboration while reducing unnecessary communication.
+### Role / Skills
 
----
+Roles and skills are reusable capability configurations used by nodes during execution. They are kept separately from the Manager / Worker execution framework and can be reused by different nodes.
 
-## 🎯 Dynamic Coordination
+### Event / Artifact / Shared Workspace
 
-AICU separates task execution from coordination.
+- **Event**: an important state change, blocking issue, dependency change, or collaboration request.
+- **Artifact**: a concrete result produced by a node, such as code, a report, or test output.
+- **Shared Workspace**: a shared working directory used by related nodes to exchange actual work results instead of repeatedly copying full conversation histories.
 
-Agents focus on completing their specialized work.
+## AICU Internal Work Modes
 
-The system coordinates collaboration based on the current task state and organization.
+Each AICU node can configure `num_ccs` to select an internal peer collaboration strategy. These are **execution strategies inside one AICU node**. They are not four node types and are not four Runtime states.
 
----
+| Mode | Configuration | Collaboration pattern | Typical use |
+| --- | ---: | --- | --- |
+| **Solo** | `1` | One agent generates, self-reviews, and revises when needed | Simple, low-risk, mechanical tasks |
+| **Pair** | `2` | One agent produces, another reviews, and the producer revises | General development; default quality/cost balance |
+| **Triple** | `3` | Two agents produce independently; a third compares, selects, and merges | Requirements, architecture, important decisions |
+| **Full** | `4` | Two proposals, merge review, independent deep audit, and repair iterations | Core features, high-risk work, release audits |
 
-## 📦 Shared Workspace and Artifacts
+These modes can be selected independently for different nodes. They are separate from `EXEC_MODE`:
 
-Agents collaborate through shared task outcomes.
+- `EXEC_MODE=real`: invoke configured Codex, Pi, Qwen, Claude, or other CLI tools;
+- `EXEC_MODE=stub`: use deterministic stubs for offline tests and workflow validation.
 
-Important results are represented as artifacts and shared state instead of repeatedly transferring large conversation histories.
+## Current Implementation
 
-This enables more scalable long-running execution.
+The repository currently includes:
 
----
+- Manager / Worker executables and `ExecutionPlan` validation;
+- Multi-session Runtime, task graphs, scheduling, and state persistence;
+- Event Bus, SSE event streams, and node logs;
+- Shared workspaces, artifact management, and delivery checks;
+- Multiple AI coding CLI adapters and model / provider configuration;
+- A React workbench;
+- Stub execution and a substantial Python / frontend test suite.
 
-## ⚡ Long-Running Task Execution
+AICU-Graph is currently a runnable research and engineering prototype. The availability of a specific CLI, model, or external service depends on local installation, account permissions, API keys, and provider quotas.
 
-AICU is designed for tasks that require many steps and multiple specialized agents.
+## Quick Start
 
-Examples:
+### Requirements
 
-* Software development
-* Large-scale refactoring
-* Research workflows
-* Product development
-* Documentation generation
-* Complex automation
+- Python 3.10+;
+- At least one available AI coding CLI;
+- Node.js 18+ for building the frontend.
 
----
+### Install dependencies
 
-# How AICU Works
+```bash
+pip install -r requirements.txt
 
-High-level architecture:
-
-<!-- TODO: Add architecture diagram here
-
-Suggested diagram:
-
-User Task
-    ↓
-Capability Discovery
-    ↓
-Organization Planning
-    ↓
-Dynamic Agent Organization
-    ↓
-Agent Execution
-    ↓
-Collaboration Events
-    ↓
-Organization Adaptation
-    ↓
-Final Result
-
-The diagram should explain the concept, not implementation details.
-
--->
-
-```
-                User Task
-                    |
-                    v
-          Build Agent Organization
-                    |
-       +------------+------------+
-       |            |            |
-       v            v            v
-    Agent A      Agent B      Agent C
-       |            |            |
-       +------------+------------+
-                    |
-              Collaboration
-                    |
-                    v
-          Organization Evolves
-                    |
-                    v
-              Task Completed
+cd frontend
+npm install
+npm run build
+cd ..
 ```
 
----
+### Start the Runtime
 
-# Example
-
-A user asks:
-
-```
-Build a complete blog platform.
+```bash
+python main.py
 ```
 
-Instead of executing a fixed workflow, AICU can create an organization:
+The default server address is:
 
-```
-                Project Goal
-                    |
-                    v
-              AI Organization
-                    |
-    +---------------+---------------+
-    |               |               |
-Architect      Backend         Frontend
-    |               |               |
-    +---------------+---------------+
-                    |
-                 Testing
+```text
+http://localhost:8080
 ```
 
-During execution, if new requirements appear, the organization can adapt.
+After startup, open the workbench or use the REST API to create sessions and submit tasks. For CLI installation, credential configuration, API details, and troubleshooting, see [docs/INSTALL.md](docs/INSTALL.md).
 
-For example:
+### Offline testing
 
-```
-Backend discovers authentication complexity
+To run the workflow without invoking a real AI coding CLI:
 
-        ↓
-
-Security capability is required
-
-        ↓
-
-New collaboration happens
-
-        ↓
-
-Organization adapts
+```bash
+EXEC_MODE=stub python main.py
 ```
 
----
+## Documentation
 
-# AICU Compared With Traditional Agent Workflows
+- [Installation, configuration, and startup](docs/INSTALL.md)
+- [Architecture](docs/ARCHITECTURE.md)
+- [Frontend and example blog guide](docs/user_guide.md)
+- [Communication architecture plan](docs/plan_v3.1_communication.md)
 
-Traditional workflow:
+This README is the project overview and entry point. API details, runtime directories, credential management, CLI adapters, and troubleshooting belong in `docs/`.
 
-```
-Task
- ↓
-Fixed Pipeline
- ↓
-Agents
- ↓
-Result
-```
+## Security Notice
 
-AICU:
+API keys and session runtime data are local runtime state and must not be committed to Git. Do not upload:
 
-```
-Task
- ↓
-Create Organization
- ↓
-Agents Work
- ↓
-Collaboration
- ↓
-Adapt Organization
- ↓
-Continue Execution
- ↓
-Complete Task
+```text
+runtime_sessions/
+.env
+api_keys.json
 ```
 
-The difference:
+## Contributing
 
-> AICU treats the AI organization itself as a dynamic part of solving the problem.
+Contributions are welcome in areas including:
 
----
+- Dynamic agent organizations and task planning;
+- Manager / Worker Runtime;
+- Roles, skills, and capability configuration;
+- Event-driven collaboration and long-running execution;
+- Artifacts, shared workspaces, and delivery guarantees;
+- CLI adapters, evaluation, and testing.
 
-# Roadmap
+Please read the existing documentation and tests before submitting changes, and never commit local credentials or runtime artifacts.
 
-## Current Development
+## License
 
-* Dynamic agent organization
-* Role and skill system
-* Capability-driven planning
-* Event-based collaboration
-* Agent runtime
-* Shared workspace
-* Artifact management
-
-## Future
-
-* Large-scale capability ecosystem
-* More adaptive organization evolution
-* Advanced evaluation system
-* Agent interoperability
-* More efficient collaboration strategies
-
----
-
-# Documentation
-
-Documentation is under development.
-
-Future documentation will include:
-
-* Architecture overview
-* Agent organization concepts
-* Capability system
-* Collaboration model
-* Runtime design
-* Examples and tutorials
-
----
-
-# Contributing
-
-Contributions are welcome.
-
-Areas of interest:
-
-* Multi-agent collaboration
-* Agent organization design
-* Capability systems
-* Agent evaluation
-* Runtime infrastructure
-* AI workflow research
-
----
-
-# License
-
-See [LICENSE](LICENSE).
+There is currently no LICENSE file at the repository root. Before publishing a formal release, add the appropriate license file and update this section.

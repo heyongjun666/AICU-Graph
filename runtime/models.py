@@ -142,6 +142,7 @@ class EventMessage:
     """
 
     EVENT_STATUS_ROUTED = "routed"
+    EVENT_STATUS_ROUTE_FAILED = "route_failed"
     EVENT_STATUS_DELIVERED = "delivered"
     EVENT_STATUS_CONSUMED = "consumed"
 

@@ -13,8 +13,11 @@ tests/test_event_field_propagation.py — Event 字段透传链路测试（验�
 这些字段全部是 Router 的参考信号，不指定目标、不硬约束路由。
 """
 
+import json
+
 from runtime.agent_events import AgentEventManager
-from runtime.models import EventMessage
+from runtime.graph import Graph
+from runtime.models import EventMessage, Node, NodeStatus
 from runtime.router import AICURouter
 
 
@@ -92,6 +95,90 @@ class TestFieldPropagation:
         assert "更新实现并重新验证" in prompt
         assert "frontend_dev" in prompt
         assert "对齐接口契约" in prompt
+
+
+class _RouteNode:
+    def __init__(self, node_id, role, status=NodeStatus.WAITING):
+        self.id = node_id
+        self.exec_type = "worker"
+        self.role = role
+        self.task = f"{role} task"
+        self.config = {}
+        self.status = status
+        self.parent_id = None
+        self.step_ref = role
+        self.task_summary = f"{role} summary"
+
+
+def _route_graph() -> Graph:
+    graph = Graph()
+    graph.add_node(_RouteNode("producer", "backend", NodeStatus.COMPLETED))
+    graph.add_node(_RouteNode("security", "security"))
+    return graph
+
+
+class _TargetRouter:
+    def __init__(self, targets=None, error=None):
+        self.targets = targets or []
+        self.error = error
+
+    def attach_graph(self, graph):
+        self.graph = graph
+
+    def route(self, event):
+        if self.error:
+            raise self.error
+        return list(self.targets)
+
+    def decision_trace(self):
+        return {"mode": "stub", "candidate_nodes": []}
+
+
+class TestRouterTrace:
+    def test_router_trace_contains_snapshot_and_delivery(self, tmp_path):
+        router = _TargetRouter(["security"])
+        mgr = AgentEventManager(str(tmp_path), router=router)
+        graph = _route_graph()
+        mgr.attach_graph(graph)
+
+        ids = mgr.publish_events("producer", [{
+            "event_id": "evt_trace",
+            "objective": "认证存在安全风险",
+            "intent": "collaboration",
+            "affected_roles": ["security"],
+            "scope": "related",
+            "action": "执行安全检查",
+        }])
+
+        assert ids == ["evt_trace"]
+        records = [
+            json.loads(line)
+            for line in (tmp_path / "router_traces.jsonl").read_text().splitlines()
+        ]
+        assert len(records) == 1
+        record = records[0]
+        assert record["event_id"] == "evt_trace"
+        assert record["router"]["parsed_targets"] == ["security"]
+        assert {node["id"] for node in record["router"]["candidate_nodes"]} == {
+            "producer", "security",
+        }
+        assert record["delivery"]["targets"]["security"]["status"] == "delivered"
+
+    def test_router_failure_is_not_marked_delivered(self, tmp_path):
+        mgr = AgentEventManager(
+            str(tmp_path), router=_TargetRouter(error=RuntimeError("router down"))
+        )
+        mgr.attach_graph(_route_graph())
+
+        mgr.publish_events("producer", [{
+            "event_id": "evt_failed_route",
+            "objective": "需要安全协作",
+        }])
+
+        record = json.loads((tmp_path / "router_traces.jsonl").read_text().splitlines()[0])
+        assert record["route_status"] == "failed"
+        assert record["event"]["status"] == "route_failed"
+        assert record["router"]["error"].startswith("RuntimeError")
 
 
 class TestObjectiveBudget:

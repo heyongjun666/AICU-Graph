@@ -42,6 +42,7 @@ import logging
 import os
 import re
 import threading
+import time
 import uuid
 from datetime import datetime
 from typing import Any, Optional
@@ -164,6 +165,7 @@ class AgentEventManager:
         self._lock = threading.Lock()
         self._graph: Any = None
         self._router: Any = router
+        self._route_attempts: dict[str, int] = {}
 
     # ------------------------------------------------------------------
     # Graph 引用注入（延迟，避免循环导入）
@@ -183,6 +185,21 @@ class AgentEventManager:
     def events_file(self) -> str:
         """全局事件日志路径。"""
         return os.path.join(self._workspace_root, "events.json")
+
+    @property
+    def router_traces_file(self) -> str:
+        """Append-only structured route audit log for offline training."""
+        return os.path.join(self._workspace_root, "router_traces.jsonl")
+
+    def _append_router_trace(self, trace: dict[str, Any]) -> None:
+        """Persist one bounded route trace without affecting event delivery."""
+        try:
+            os.makedirs(self._workspace_root, exist_ok=True)
+            with open(self.router_traces_file, "a", encoding="utf-8") as file:
+                file.write(json.dumps(trace, ensure_ascii=False, default=str) + "\n")
+                file.flush()
+        except OSError as exc:
+            logger.error("Failed to append router trace: %s", exc)
 
     def load(self) -> None:
         """从 events.json 恢复事件日志（重启恢复）。
@@ -512,31 +529,92 @@ class AgentEventManager:
             self._router = AICURouter(mode="stub")
             self._router.attach_graph(self._graph)
         for msg in messages:
+            attempt = self._route_attempts.get(msg.event_id, 0) + 1
+            self._route_attempts[msg.event_id] = attempt
+            started = time.monotonic()
             try:
                 targets = self._router.route(msg)
             except Exception as exc:  # noqa: BLE001
+                elapsed_ms = round((time.monotonic() - started) * 1000, 2)
+                msg.status = EventMessage.EVENT_STATUS_ROUTE_FAILED
+                router_trace = getattr(self._router, "decision_trace", lambda: {})()
+                if not isinstance(router_trace, dict):
+                    router_trace = {}
+                trace = {
+                    "trace_version": 1,
+                    "event_id": msg.event_id,
+                    "event": msg.to_dict(),
+                    "route_attempt": attempt,
+                    "route_status": "failed",
+                    "router": {
+                        **router_trace,
+                        "latency_ms": elapsed_ms,
+                        "error": f"{type(exc).__name__}: {exc}"[:1000],
+                    },
+                    "delivery": {"targets": {}},
+                }
+                self._append_router_trace(trace)
                 logger.error(
-                    "Router failed for event '%s': %s; skipped routing",
+                    "Router failed for event '%s': %s; marked for retry",
                     msg.event_id, exc,
                 )
                 continue
+            elapsed_ms = round((time.monotonic() - started) * 1000, 2)
             msg.routed_to = [str(t) for t in targets]
+            router_trace = getattr(self._router, "decision_trace", lambda: {})()
+            if not isinstance(router_trace, dict):
+                router_trace = {}
+            router_trace["parsed_targets"] = list(msg.routed_to)
             if not msg.routed_to:
                 # 无人接收：无投递动作，delivered 即终态
                 msg.status = EventMessage.EVENT_STATUS_DELIVERED
+                self._append_router_trace({
+                    "trace_version": 1,
+                    "event_id": msg.event_id,
+                    "event": msg.to_dict(),
+                    "route_attempt": attempt,
+                    "route_status": "delivered",
+                    "router": {
+                        **router_trace,
+                        "latency_ms": elapsed_ms,
+                    },
+                    "delivery": {"targets": {}},
+                })
                 continue
             msg.status = EventMessage.EVENT_STATUS_ROUTED
+            delivery_targets: dict[str, dict[str, Any]] = {}
             for target_id in msg.routed_to:
                 target_node = self._graph.get_node(target_id)
                 if target_node is None:
+                    delivery_targets[target_id] = {
+                        "status": "target_missing",
+                        "attempt": attempt,
+                    }
                     logger.warning(
                         "Event '%s' router target '%s' not found in graph; skipped",
                         msg.event_id, target_id,
                     )
                     continue
                 self._deliver(target_node, msg)
+                delivered = self._target_inbox_present(msg, target_id)
+                delivery_targets[target_id] = {
+                    "status": "delivered" if delivered else "delivery_failed",
+                    "attempt": attempt,
+                }
             if self._all_targets_inbox_present(msg):
                 msg.status = EventMessage.EVENT_STATUS_DELIVERED
+            self._append_router_trace({
+                "trace_version": 1,
+                "event_id": msg.event_id,
+                "event": msg.to_dict(),
+                "route_attempt": attempt,
+                "route_status": "delivered" if msg.status == EventMessage.EVENT_STATUS_DELIVERED else "routed",
+                "router": {
+                    **router_trace,
+                    "latency_ms": elapsed_ms,
+                },
+                "delivery": {"targets": delivery_targets},
+            })
             # 投递失败（inbox 未全落盘）保持 routed → 下次 load() 幂等重投
 
     def _deliver(self, node: Any, msg: EventMessage) -> None:
@@ -602,8 +680,23 @@ class AgentEventManager:
         if self._graph is None:
             return
         for msg in self._events.values():
-            if msg.status != EventMessage.EVENT_STATUS_ROUTED:
+            if msg.status not in (
+                EventMessage.EVENT_STATUS_ROUTED,
+                EventMessage.EVENT_STATUS_ROUTE_FAILED,
+            ):
                 continue
+            if msg.status == EventMessage.EVENT_STATUS_ROUTE_FAILED:
+                # Router failures have no stable target list; retry the decision
+                # with the current graph instead of treating them as delivered.
+                try:
+                    targets = self._router.route(msg)
+                    msg.routed_to = [str(t) for t in targets]
+                    msg.status = EventMessage.EVENT_STATUS_ROUTED
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(
+                        "Retry routing event '%s' failed: %s", msg.event_id, exc,
+                    )
+                    continue
             if not msg.routed_to:
                 msg.status = EventMessage.EVENT_STATUS_DELIVERED
                 continue
@@ -636,7 +729,10 @@ class AgentEventManager:
                 continue
             if self._graph is None:
                 continue
-            if msg.status == EventMessage.EVENT_STATUS_ROUTED:
+            if msg.status in (
+                EventMessage.EVENT_STATUS_ROUTED,
+                EventMessage.EVENT_STATUS_ROUTE_FAILED,
+            ):
                 if self._all_targets_inbox_present(msg):
                     msg.status = EventMessage.EVENT_STATUS_DELIVERED
             elif msg.status == EventMessage.EVENT_STATUS_DELIVERED:

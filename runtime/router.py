@@ -78,6 +78,12 @@ class AICURouter:
         # Router 生命周期：与组织结构版本绑定。结构变更 → 重置会话；
         # 运行状态变化（running/completed/failed）不切换。
         self._structure_epoch: Optional[int] = None
+        # Structured decision trace consumed by AgentEventManager. The trace is
+        # intentionally separate from EventMessage so the event wire contract
+        # remains stable while route-training data can evolve independently.
+        self._last_trace: dict[str, Any] = {}
+        self._last_raw_output: Any = None
+        self._last_parse_error: Optional[str] = None
 
     # ------------------------------------------------------------------
     # Graph 引用注入（延迟，避免循环导入）
@@ -101,16 +107,62 @@ class AICURouter:
         （stub/real）→ parse targets。不解析 Event.content 中的任何"目标声明"——
         content 只作为事件本身的描述传给 LLM/桩。
         """
+        self._last_trace = {}
+        self._last_raw_output = None
+        self._last_parse_error = None
         if self._graph is None:
             logger.warning("Router not attached to a graph; event '%s' not routed",
                            event.event_id)
+            self._last_parse_error = "router_not_attached_to_graph"
             return []
         producer_id = self._resolve_producer_node(event.producer) or event.producer
         self._maybe_reset_on_structure_change()
         snapshot = self._graph_snapshot(producer_id)
+        producer_snapshot = next(
+            (dict(item) for item in snapshot if item.get("id") == producer_id),
+            None,
+        )
+        self._last_trace = {
+            "producer_id": producer_id,
+            "producer_snapshot": producer_snapshot,
+            "candidate_nodes": [dict(item) for item in snapshot],
+            "graph_version": getattr(self._graph, "graph_version", None),
+            "structure_epoch": self._structure_epoch,
+            "mode": self._mode,
+        }
         prompt = self._build_prompt(event, producer_id, snapshot)
-        result = self._ai().ask(prompt)
-        return self._parse_targets(result)
+        try:
+            result = self._ai().ask(prompt)
+        except Exception as exc:
+            self._last_parse_error = f"router_call_failed: {type(exc).__name__}: {exc}"
+            raise
+        self._last_raw_output = result
+        try:
+            targets = self._parse_targets(result)
+        except Exception as exc:
+            self._last_parse_error = f"router_parse_failed: {type(exc).__name__}: {exc}"
+            raise
+        self._last_trace["parsed_targets"] = list(targets)
+        return targets
+
+    def decision_trace(self) -> dict[str, Any]:
+        """Return a bounded, JSON-safe snapshot of the latest route decision."""
+        trace = dict(self._last_trace)
+        raw = self._last_raw_output
+        if isinstance(raw, str):
+            trace["raw_output"] = raw[:4000]
+        elif raw is None or isinstance(raw, (int, float, bool)):
+            trace["raw_output"] = raw
+        else:
+            try:
+                trace["raw_output"] = json.dumps(
+                    raw, ensure_ascii=False, default=str,
+                )[:4000]
+            except (TypeError, ValueError):
+                trace["raw_output"] = str(raw)[:4000]
+        if self._last_parse_error:
+            trace["parse_error"] = self._last_parse_error[:1000]
+        return trace
 
     # ------------------------------------------------------------------
     # 生命周期：Router 与「组织结构版本」绑定

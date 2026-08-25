@@ -4,6 +4,7 @@ workspaces/
 runtime_sessions/
 events*
 *.log
+router_traces.jsonl
 
 # Credentials and local configuration
 .env

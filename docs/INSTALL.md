@@ -2,7 +2,7 @@
 
 本文档面向第一次使用 AICU-Graph 的用户。
 
-## 2. 环境要求
+## 1. 环境要求
 
 - Python 3.10 或更高版本
 - Node.js 18 或更高版本
@@ -12,7 +12,7 @@
 
 Qwen Code、Kimi Code 和 Pi 可能要求更高版本的 Node.js，请以对应 CLI 的官方要求为准。
 
-## 3. 获取项目
+## 2. 获取项目
 
 安装 Git 后，在终端执行：
 
@@ -21,7 +21,7 @@ git clone https://github.com/heyongjun666/AICU-Graph.git
 cd AICU-Graph
 ```
 
-## 4. 安装依赖
+## 3. 安装依赖
 
 安装 Python 依赖：
 
@@ -38,7 +38,7 @@ npm run build
 cd ..
 ```
 
-## 5. 安装 AI Coding CLI
+## 4. 安装 AI Coding CLI
 
 AICU 会检测系统 `PATH` 中的 CLI。至少安装一个，并先完成该 CLI 自己的登录或认证。
 
@@ -130,9 +130,23 @@ grok --version
 python3 -c "from cli_adapters import detect_installed; print(detect_installed())"
 ```
 
+## 5. 启动项目
+
+在项目根目录执行：
+
+```bash
+python3 main.py
+```
+
+然后打开：
+
+```text
+http://localhost:8080
+```
+
 ## 6. 配置模型和 API Key
 
-启动项目后，在前端工作台的设置页完成以下操作：
+在前端工作台的设置页完成以下操作：
 
 1. 选择 CLI；
 2. 选择服务商和模型；
@@ -150,21 +164,7 @@ export ANTHROPIC_API_KEY="你的 API Key"
 
 不要把真实 API Key 写入源码、README、`.env` 文件或 Git 提交中。
 
-## 7. 启动项目
-
-在项目根目录执行：
-
-```bash
-python3 main.py
-```
-
-然后打开：
-
-```text
-http://localhost:8080
-```
-
-## 8. 离线运行
+## 7. 离线运行
 
 不调用真实 AI CLI 时，可以使用 Stub 模式验证基础流程：
 
@@ -172,7 +172,7 @@ http://localhost:8080
 EXEC_MODE=stub python3 main.py
 ```
 
-## 9. 基本验证
+## 8. 基本验证
 
 服务启动后，检查 API 是否正常响应：
 
@@ -195,7 +195,7 @@ curl -X POST http://localhost:8080/v1/sessions \
 curl -X POST http://localhost:8080/v1/sessions/<session_id>/graph/resume
 ```
 
-## 10. 常见问题
+## 9. 常见问题
 
 ### 找不到 CLI
 

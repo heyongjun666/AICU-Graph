@@ -2,13 +2,13 @@
 main.py — cc_0 Runtime 入口文件
 
 启动流程（按顺序）：
-  1. Runtime.start() — 初始化 Graph/Planner/Scheduler/Persistence
-  2. SSEManager.start() — 订阅 EventBus 开始消费事件
-  3. create_app() — 创建 FastAPI 应用
+  1. 创建并配置 ExecutableRegistry，注册 Manager/Worker
+  2. 创建 SessionManager，由它构造和管理各会话的 Runtime 与 SSEManager
+  3. create_session_app() — 创建多会话 FastAPI 应用
   4. uvicorn.run() — 启动 HTTP 服务
 
-关闭流程（逆序）：
-  SIGINT/SIGTERM -> SSEManager.stop() -> Runtime.shutdown()
+关闭流程：
+  SIGINT/SIGTERM -> SessionManager.shutdown()，由会话管理器停止 SSEManager 并关闭 Runtime
 """
 
 import logging

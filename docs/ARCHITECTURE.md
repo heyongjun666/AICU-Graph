@@ -1,4 +1,4 @@
-# AICU v5 项目超级详解 —— 架构 / 功能 / 文件职责 / 新手修改索引
+# AICU-Graph 架构与源码职责
 
 > 本文档的目标读者是**第一次接触本项目的新手**。读完本文后，你应当能够：
 > 1. 理解整个项目的架构是怎么设计的、为什么这么设计；
@@ -13,7 +13,7 @@
 ## 目录
 
 - [一、项目概览](#一项目概览)
-- [二、两大子系统](#二两大子系统)
+- [二、系统组成](#二系统组成)
 - [三、源码目录 vs 运行时数据目录（重要）](#三源码目录-vs-运行时数据目录重要)
 - [四、核心概念速查表](#四核心概念速查表)
 - [五、总体架构：分层设计](#五总体架构分层设计)
@@ -22,10 +22,10 @@
   - [6.2 Graph + Planner（图与唯一写入口）](#62-graph--planner图与唯一写入口)
   - [6.3 状态机与生命周期](#63-状态机与生命周期)
   - [6.4 Scheduler（调度器）](#64-scheduler调度器)
-  - [6.5 独立 AICU Router（方案三：Event + 组织图 → 目标 Nodes）](#65-独立-aicu-router方案三event--组织图-目标-nodes)
+  - [6.5 独立 AICU Router（Event + 组织图 → 目标 Nodes）](#65-独立-aicu-routerevent--组织图-目标-nodes)
   - [6.6 Agent Event Bus（节点通信总线）](#66-agent-event-bus节点通信总线)
   - [6.7 事件→重激活桥（反馈闭环）](#67-事件重激活桥反馈闭环)
-  - [6.8 闭环与交付可靠性（V3-2 Delivery）](#68-闭环与交付可靠性v3-2-delivery)
+  - [6.8 闭环与交付可靠性（Delivery）](#68-闭环与交付可靠性delivery)
   - [6.9 共享工作区（Shared Workspace）](#69-共享工作区shared-workspace)
   - [6.10 CodeGraph 上下文（AICU_CODEGRAPH）](#610-codegraph-上下文aicu_codegraph)
   - [6.11 角色 / 技能 / 持久化 / SSE / HTTP API](#611-角色--技能--持久化--sse--http-api)
@@ -41,6 +41,7 @@
   - [10.6 roles/（数据驱动配置）](#106-roles数据驱动配置)
   - [10.7 tests/ 与根级测试脚本](#107-tests-与根级测试脚本)
   - [10.8 frontend/（Vite+React 工作台）](#108-frontendvite-react-工作台)
+  - [10.9 backend/（独立 Flask 后端模块）](#109-backend独立-flask-后端模块)
 - [十一、新手修改指南：想改 X → 读 Y](#十一新手修改指南想改-x--读-y)
 - [十二、环境变量与功能开关总表](#十二环境变量与功能开关总表)
 - [十三、端到端一次运行的真实时序](#十三端到端一次运行的真实时序)
@@ -50,7 +51,7 @@
 
 ## 一、项目概览
 
-本项目名为 **AICU v5（AI Coding Universe 第五版）**，是一个**多 Agent 软件研发编排框架**：
+本项目是一个**多 Agent 软件研发编排框架**：
 
 - 用户提交一个软件研发任务；
 - 系统自动生成一棵 **Manager / Worker 的 Agent 组织树**：
@@ -71,16 +72,16 @@
 |---|---|---|
 | **Runtime 后端** | `runtime/` `executables/` `roles/` `aicu.py` `claude_code_agent.py` `main.py` | 会话管理、组织图、任务规划、调度、事件路由、产物交付和 CLI 执行。 |
 | **Web 前端** | `frontend/` | React/Vite 工作台，负责图可视化、会话管理、节点详情、事件流和运行配置。 |
-| **辅助后端模块** | `backend/` | 独立的 Flask 应用模块，提供 CSV 数据层及其 API；不属于 AICU Runtime 的核心启动链路。 |
+| **辅助后端模块** | `backend/` | 仓库中保留的 Flask 应用、API Blueprint 和测试文件；当前快照缺少其部分数据层、认证、Markdown 和统计依赖，不属于 AICU Runtime 的核心启动链路。 |
 | **测试与文档** | `tests/` `docs/` | 验证核心运行时、适配器和前端行为，记录安装与架构说明。 |
 
-AICU-Graph 的核心运行服务由 `main.py` 启动，使用 `runtime/` 提供的 FastAPI、SSE 和任务执行能力；`frontend/` 是对应的 Web 工作台。`backend/` 保留为仓库中的独立后端模块，使用时应按其自身入口和依赖运行。
+AICU-Graph 的核心运行服务由 `main.py` 启动，使用 `runtime/` 提供的 FastAPI、SSE 和任务执行能力；`frontend/` 是对应的 Web 工作台。`backend/` 中保留了部分 Flask 后端文件，但当前快照缺少 `app.py` 引用的多个依赖模块，不能按现状直接启动，也不是 README 快速启动流程的一部分。
 
 ---
 
 ## 三、源码目录 vs 运行时数据目录（重要）
 
-以下目录看起来像源码，但**都是运行期生成的动态数据**，修改框架功能时**不要动它们**：
+下面按用途区分源码、依赖、构建产物和运行时数据；其中运行时数据与构建产物不应作为框架源码修改：
 
 | 目录 | 内容 | 何时产生 |
 |---|---|---|
@@ -92,7 +93,7 @@ AICU-Graph 的核心运行服务由 `main.py` 启动，使用 `runtime/` 提供�
 | `.codegraph/` | CodeGraph 代码图谱索引 | 构建 |
 | `events.json` `review_v*.md` `test_report.md` 等根级文件 | 运行/测试痕迹 | 运行/测试 |
 
-项目源码包括：`runtime/` `executables/` `roles/` `aicu.py` `claude_code_agent.py` `main.py` `frontend/` `backend/` `docs/` `tests/`、`conftest.py`、`run_tests.py` 及根级测试脚本；运行时目录和构建产物不属于源码。
+项目源码和配置包括：`runtime/`、`executables/`、`roles/`、`aicu.py`、`claude_code_agent.py`、`main.py`、`frontend/src/`、`backend/`、`docs/`、`tests/`、`conftest.py` 和 `run_tests.py`；`frontend/node_modules/`、`frontend/dist/`、`.codegraph/` 以及运行时目录不属于源码。
 
 ---
 
@@ -100,7 +101,7 @@ AICU-Graph 的核心运行服务由 `main.py` 启动，使用 `runtime/` 提供�
 
 | 概念 | 含义 | 关键字段/机制 |
 |---|---|---|
-| **Node（节点）** | 组织树中的一个 Manager 或 Worker | `id`(UUID) `parent_id` `exec_type`(manager/worker) `role` `task` `status` `step_ref` `max_activations` |
+| **Node（节点）** | 组织树中的一个 Manager 或 Worker | `id`(UUID) `parent_id` `exec_type`(manager/worker) `role` `task` `status` `step_ref` `activation_count` |
 | **Edge（边）** | 节点间关系 | `PARENT`（组织关系）、`DEPENDENCY`（执行依赖） |
 | **Graph（图）** | 内存中的 Node+Edge 集合，带邻接索引 | `runtime/graph.py` |
 | **Planner** | Graph 的**唯一写入口**：校验 ExecutionPlan → 翻译成 Node+Edge | `runtime/planner.py` |
@@ -108,7 +109,7 @@ AICU-Graph 的核心运行服务由 `main.py` 启动，使用 `runtime/` 提供�
 | **Manager** | 规划者：expand（出计划）+ review（评审子节点产物） | `executables/manager.py`，`manager_phase` 状态机 |
 | **Worker** | 执行者：一次任务产出 1 份产物 | `executables/worker.py` |
 | **Scheduler** | 调度循环：推进节点状态、激活可运行节点、超时/重试 | `runtime/scheduler.py` |
-| **Event（事件）** | 节点间唯一的通信载体 | `EventMessage{event_id, producer, content, created_at, routed_to, status}`（6 字段） |
+| **Event（事件）** | 节点间唯一的通信载体 | `EventMessage{event_id, producer, objective, intent, affected_roles, scope, action, created_at, routed_to, status}`（10 个字段） |
 | **事件投递生命周期** | Router 决策记录 + 投递状态 | `routed`（已决策未投递）→ `delivered`（已落盘）→ `consumed`（已消费）；`routed_to` = 决策目标列表 |
 | **AICU Router** | 独立路由决策：Event + 组织图 → 目标 Nodes（LLM，stub/real 双模式） | `runtime/router.py`；与 `structure_version` 绑定，结构变更自动重置会话 |
 | **Event→重激活桥** | 把投递给非运行态节点 inbox 的事件解释为"请求该节点行动" | `Scheduler._process_reactivation_events()` |
@@ -155,11 +156,11 @@ AICU-Graph 的核心运行服务由 `main.py` 启动，使用 `runtime/` 提供�
 
 ### 关键设计原则
 
-1. **Graph 唯一写入口**：任何对图结构（加节点/加边/改状态）的写入都必须经 `Planner` 或 `Runtime` 的受控方法，保证可审计、可恢复。
+1. **受控图写入入口**：`Planner` 和 `Runtime` 的受控接口是正常业务流程中的主要图写入入口；`Graph` 本身仍公开提供 `add_node`、`update_node`、`add_edge`、`remove_edge` 等方法，当前代码未从技术上禁止其他内部调用者直接使用这些方法。
 2. **组织树是唯一组织事实**：`PARENT` 边（树）管"谁管理谁"。节点间通信不依赖任何预声明关系（无 related_nodes / 通信图）——事件的去向由 **AICU Router** 在运行时结合 Event + 组织图用 LLM 统一决策，节点不需要也不能指定目标。
-3. **Event 是唯一的通信载体**：节点间不直接写文件传话，一律发事件——**事件载荷极简**（`{event_id, producer, content}`，`content` 只描述事件本身，目标由 Router 决策）；`routed_to`/`status` 是框架后补的路由元数据（决策记录 + 投递生命周期），不属于事件载荷。
+3. **Event 是唯一的通信载体**：节点间不直接写文件传话，一律发事件——**事件模型包含事件目标描述、意图、受影响角色、作用范围和动作等字段；`routed_to`/`status` 是框架维护的路由元数据。
 4. **Manager 不写码，Worker 才写码**：Manager 只做两件事——expand（规划）和 review（评审）。
-5. **stub/real 双模式**：`EXEC_MODE=stub` 时用 `DefaultStubAICU`（离线、确定性），测试全走 stub；`EXEC_MODE=real` 时才真正调 AI。
+5. **stub/real 双模式**：`EXEC_MODE=stub` 时用 `DefaultStubAICU`（离线、确定性）；`EXEC_MODE=real` 时才真正调 AI。`main.py` 默认设置为 `real`，测试通常由 fixture 显式切换到 stub。
 
 ---
 
@@ -170,30 +171,30 @@ AICU-Graph 的核心运行服务由 `main.py` 启动，使用 `runtime/` 提供�
 **文件**：`runtime/session_manager.py`、`runtime/session_server.py`
 
 - `SessionManager(registry, root_dir="runtime_sessions", max_concurrency=4, workspace_root, restore, roles_dir)`：
-  - `create_session(task, settings)`：生成 session_id → 建 session 目录 → 创建 `Runtime + Persistence(graph.json) + SSEManager` → 自动提交根 Manager（submit_root_manager）→ 返回 session。
+  - `create_session(task, title, role, config)`：生成 session_id → 建 session 目录 → 创建 `Runtime + Persistence(graph.json)`，并由 SessionManager 为该会话组装独立的 `SSEManager` → 自动提交根 Manager（submit_root_manager）→ 返回 session。
   - `list_sessions / get_session / pause_session / resume_session / stop_session / delete_session`：生命周期管理。
   - `pause_session` 支持 `drain`（排空后暂停）与 `immediate`（立即中断，记 interrupted 供恢复）。
   - `_build_handle`：组装 Runtime 与回调（`_complete_pause` 暂停完成回调、`_reconcile_terminal_state` 终态对账）。
   - 会话持久化：`sessions.json` 原子写 + 崩溃恢复 `_restore_sessions`。
   - `_summary`：根据图中节点状态**推导**会话状态：Running > Paused > Failed > Completed > Stopped > Waiting。
-- `create_session_app(session_manager)`：多会话 v2.0 HTTP 应用（见 6.11）。
+  - `create_session_app(session_manager)`：多会话 HTTP 应用（见 6.11）。
 
-### 6.2 Graph + Planner（图与唯一写入口）
+### 6.2 Graph + Planner（图与受控写入入口）
 
 **文件**：`runtime/graph.py`、`runtime/planner.py`、`runtime/plan_validator.py`
 
-- **Graph**：`add_node/update_node/get_node/all_nodes/add_edge/remove_edge/dependencies/children/...`；边按类型分索引；`graph_version` 单调版本号（持久化契约）。
+- **Graph**：`add_node/update_node/get_node/all_nodes/add_edge/remove_edge/dependencies/children/...`；边按类型分索引；`graph_version` 单调版本号（持久化契约）。Graph 公开提供底层变更操作，Planner/Runtime 是正常业务流程中的主要写入口。
 - **Planner**：
-  - `translate(plan, parent_node_id, iteration_count)`：校验 → 分配 UUID → 建 Node（step_ref 在 iteration>0 时追加 `_v{N}` 后缀）→ 建 PARENT 边 → 建 DEPENDENCY 边 → 注入图。
+  - `translate(plan, parent_node_id, iteration_count)`：校验 → 分配 UUID → 建 Node（step_ref 在 iteration>0 时追加 `_v{N}` 后缀）→ 建 PARENT 边 → 建 DEPENDENCY 边 → 注入图。它是计划翻译和常规图构建的主要入口。
   - `translate_revision(plan, parent_node_id, reuse_map)`：增量续跑专用——`reuse_map` 里的 step 复用既有节点，其余新建；只重建"被重新激活子节点之间"的依赖边。
   - `restore(nodes, edges, skip_validation=True, graph_version)`：崩溃恢复路径。
   - `rewind_parent_chain_for_retry(parent_id, clear_notification)`：子节点重试时把已推进的父 Manager 链拉回 WAITING。
   - `validate_plan(plan)`：结构校验（steps 非空、必填字段、exec_type 合法、step_id 唯一、depends_on 引用存在且无环、单层 worker ≤8）。
   - `create_retry_node`：**已废弃**，保留仅为兼容旧测试。
 - **PlanValidator（`plan_validator.py`）**：与 Planner 分离的**确定性机械校验器**，绝不进化成"第二个 Manager"：
-  - `validate_errors(plan, manager_roles, worker_roles)`：`config.num_ccs ∈ {1,2,3,4}`、exec_type↔role 一致性（角色集由 RolesManager 提供）。
+  - `validate_errors(plan, manager_roles, worker_roles)`：当前计划校验要求 `config.num_ccs ∈ {1,2,3,4}`、exec_type↔role 一致性（角色集由 RolesManager 提供）；`Step` 模型本身允许更大的 1–10 范围。
   - `validate_warnings(plan)`：软告警（单层 6-8 个 worker → 建议分组）。
-  - 协作路由不做任何结构校验（方案三：目标由 Router LLM 决策，不再有 related_nodes / known_node_ids 跨 scope 引用校验）。
+  - 协作路由不做任何结构校验（当前设计：目标由 Router LLM 决策，不再有 related_nodes / known_node_ids 跨 scope 引用校验）。
 
 ### 6.3 状态机与生命周期
 
@@ -213,36 +214,35 @@ AICU-Graph 的核心运行服务由 `main.py` 启动，使用 `runtime/` 提供�
 - 独立线程的 tick 循环（`tick_interval`，约 0.5s；无 Ready/Running/Waiting 节点时自动停止）。
 - 职责：
   1. **manager-aware 并发调度**：`slots = min(max_concurrency - effective_running, len(ready))`；WAITING phase 的 Manager 不占并发槽位（`_get_effective_running_count` 排除）；优先调度 WAITING Manager 的子节点，确保 Expand→Children→Review 序列不被阻塞；
-  2. 激活可运行节点（依赖已满足 + 在并发槽内 + 未超激活预算）；
+  2. 激活可运行节点（依赖已满足 + 在并发槽内）；
   3. `_try_auto_retry`：FAILED 且有重试预算 → 原地重置（Manager 有子节点→仅 re-review / 无子节点或 Worker→WAITING+延迟→READY），不新建节点；`_process_scheduled_retries` 处理到期的延迟重试；
   4. **事件→重激活桥** `_process_reactivation_events()`（见 6.7）；
-  5. `_handle_routing` / `_activate_target`：处理节点激活的安全边界（方案三：无 related_nodes 可达边界，允许任意 Node 含 Manager 为目标；保留 C1 预算、max_activations、mark_terminal）。
+  5. `_handle_routing` / `_activate_target`：处理节点激活（当前设计：无 related_nodes 可达边界，允许任意 Node 含 Manager 为目标；保留 C1 协作预算和 `mark_terminal`）。
   6. 父 Manager 通知：子节点全部完成后通知父 Manager 进入 review。
-- 全局协作预算 `max_collaboration_rounds`（默认 10）、节点 `max_activations`（默认 3）、Watchdog（异常自动重启，最多 3 次，最小间隔 60s）。
+- 全局协作预算 `max_collaboration_rounds`（默认 10）、节点 `activation_count`（仅作观测计数，不设激活上限）、Watchdog（异常自动重启，最多 3 次，最小间隔 60s）。
 
-### 6.5 独立 AICU Router（方案三：Event + 组织图 → 目标 Nodes）
+### 6.5 独立 AICU Router（Event + 组织图 → 目标 Nodes）
 
 **文件**：`runtime/router.py`（AICURouter）；`runtime/runtime.py`（接线）；`executables/manager.py` / `executables/worker.py`（事件发布/收件箱 prompt）
 
 一句话定稿：
 
-> **Organization Graph 是唯一组织事实；Node 产生极简 Event（载荷 `{id, producer, content}`，框架后补 `routed_to`/`status` 元数据）；AICU Router 在运行时根据「Event + 当前组织图」用 LLM 决定交给哪些 Node；目标节点 inbox 有事件即由 Scheduler 消费执行。**
+ > **Organization Graph 是唯一组织事实；Node 产生 EventMessage，包含 objective、intent、affected_roles、scope 和 action 等事件字段；AICU Router 在运行时根据 Event 与当前组织图用 LLM 决定交给哪些 Node；目标节点 inbox 有事件即由 Scheduler 消费执行。**
 
-- **Router 是唯一路由形态**：不发展任何第二套"确定性路由规则"（无 Subscription Router / Collaboration Router / Rule Router / content 特判）。唯一形态 = `Event + Organization Graph → LLM Router → Targets`。
-- **stub/real 双模式**（复用 Executable 模式）：stub 桩基于 Router prompt（Event + Producer + 组织图）用**测试专用映射表**做固定决策并返回 `{"targets": [...]}`，**绝不解析 Event.content 中的目标声明**；real 模式用 AICU 实例（`num_ccs=1`，`{workspace_root}/router_cc/`）。
+- **Router 是当前路由形态**：当前事件均由 `Event + Organization Graph → LLM Router → Targets` 处理，不依赖预声明的通信图。
+- **stub/real 双模式**（复用 Executable 模式）：stub 桩基于 Router prompt（Event + Producer + 组织图）用**测试专用映射表**做固定决策并返回 `{"targets": [...]}`，**绝不解析 EventMessage 中的目标声明**；real 模式用 AICU 实例（`num_ccs=1`，`{workspace_root}/router_cc/`）。
 - **组织图快照是 Router 的唯一外部输入**：`_graph_snapshot` 只含路由决策所需的节点基本上下文（id/step_ref/exec_type/role/status/组织路径/task 摘要），不建立第二套索引体系。
 - **目标可为任意 Node**（Worker→Worker / Worker→Manager / Manager→Manager）——"Worker 发现问题超出职责、需要 Manager 重新规划"是自然协作；Scheduler 不解析事件语义、不校验目标角色（required_role 已删）。
-- **硬约束**：`route()` 与 stub 均不解析 `Event.content` 中的任何"目标声明"（content 只描述事件本身）；`producer` 统一为 node_id（step_ref 仅经 `_resolve_producer_node` 兼容层解析）。
+- **硬约束**：`route()` 与 stub 均不解析 `EventMessage` 中的任何"目标声明"（事件字段只描述事件本身）；`producer` 统一为 node_id（step_ref 仅经 `_resolve_producer_node` 兼容层解析）。
 - **Router 生命周期（与组织结构版本绑定）**：`Graph.structure_version`（`runtime/graph.py`）只在组织结构变更（新增/删除节点或边、换 parent、改 exec_type/role/step_ref）时自增；运行状态变化不触发。`route()` 每次先 `_maybe_reset_on_structure_change()`——结构版本变化即 `_reset_conversation()`（只清 AICU 各 CC 的 conversation_id，不起新进程）；stub 模式无会话，no-op。
-- **快照缓存**：`_graph_snapshot` 按 `graph_version` 缓存节点清单（图没变不扫全量节点）；`task` 截断 ~140 字。
+- **快照缓存**：`_graph_snapshot` 按 `graph_version` 缓存节点清单（图没变不扫全量节点）；`task` 截断 ~140 字。`structure_version` 只决定 Router 的 LLM 会话是否因组织结构变化而重置；状态变化不会重置会话，但会改变 `graph_version`，从而刷新快照中的状态字段。
 - **目标解析**：`_parse_targets` 容忍 AI 返回 dict / JSON 字符串 / 含围栏文本；`step_ref` 经 `_resolve_node_id` 解析为 node_id（不存在的目标静默丢弃）。real 模式下 `AICU.ask()` 返回元数据 dict（`content`/`content_parsed`/`final_output_path`），先经 `_extract_targets_payload` 归一化再解析。
-- **批次演进**：V3.1 的 Communication Graph + related_nodes 全链已删除（组织树 = 通信图的二图模型废弃），不再存在 `communication_graph.py` / `_land_communication_decisions` / 通信候选注入。
 
 ### 6.6 Agent Event Bus（节点通信总线）
 
 **文件**：`runtime/agent_events.py`
 
-- `EventMessage{event_id, producer, content, created_at, routed_to, status}`（6 字段；`producer` 恒为 node_id）。
+- `EventMessage{event_id, producer, objective, intent, affected_roles, scope, action, created_at, routed_to, status}`（10 个字段；`producer` 恒为 node_id）。
   - `routed_to`：Router 一次决策的产物（event_id → 目标 node_id 列表），属框架元数据而非事件内容；投递/重放从该记录走，**不重跑 Router**。
   - `status`：投递生命周期 `routed`（已决策未投递）→ `delivered`（所有目标 inbox 已落盘，空目标视为 delivered 终态）→ `consumed`（全部目标 inbox 已删除）。旧日志缺省回退 `routed`。
 - **四个存储对象**（物理目录即队列实现）：
@@ -251,7 +251,7 @@ AICU-Graph 的核心运行服务由 `main.py` 启动，使用 `runtime/` 提供�
   - `{node_ws}/event_inbox/*.json` —— 持久化 Consumer 队列（唯一待消费队列）；
   - `{node_ws}/events_inbox/*.json` —— RUNNING 实时信号（运行中 Node 消费 inbox 的实时机制，非独立待消费副本）。
 - `event_queue_dirs(node)`：统一契约，返回 `{outbox, inbox, live}`。
-- **事件格式校验（产出即验证）**：`_prepare_event_raws` 要求 `content` 为非空字符串——非字符串（dict/list/数字）自动 `json.dumps` 兜底规范化放行；空字符串/null/缺字段判定非法 → `_reject_event` 拒收（不摄入），并投递 `EVENT_FORMAT_INVALID` 反馈事件给生产者 inbox，由事件→重激活桥唤醒其重新生成。
+- **事件格式校验（产出即验证）**：`_prepare_event_raws` 规范化事件字段；空字符串/null/缺字段判定非法 → `_reject_event` 拒收（不摄入），并投递 `EVENT_FORMAT_INVALID` 反馈事件给生产者 inbox，由事件→重激活桥唤醒其重新生成。
 - `AgentEventManager`：
   - `publish_events` / `scan_node`（摄取 `{node_ws}/events/*.json`，合法即删源文件，非法改名 `.invalid` 留存现场）/ `scan_all`；
   - `_route_locked`：**所有 event 走 `self._router.route(msg)`** → 返回目标 node_id 列表 → 落回 `msg.routed_to` → 对每个目标 `_deliver(target_node, msg)`。无订阅广播、无 target 寻址/可达判定。
@@ -263,13 +263,13 @@ AICU-Graph 的核心运行服务由 `main.py` 启动，使用 `runtime/` 提供�
 
 **文件**：`runtime/scheduler.py` 内 `_process_reactivation_events()`；`executables/manager.py` 内 `_build_event_context_block` 兜底
 
-- 背景（方案三）：`routing.json` 文件反馈环与 related_nodes 可达边界均已删除，Event 成为唯一通信载体。Router 路由产生的 event 进入目标节点 inbox，目标节点空闲（非运行态）时由 Scheduler 消费执行——**"inbox 有事件即处理"**，Scheduler 不做第二次路由判断。
-- 桥的行为：Scheduler 每 tick 扫描各非运行态节点（WAITING/COMPLETED/FAILED，`_REACTIVATABLE_STATUSES`）的 `event_inbox/`，inbox 非空即处理，每节点每 tick 至多 1 条；消费后删除 inbox 文件（delete-on-consume，事实仍在 events.json 留痕）。
-- 消费语义：读 `event_id / producer / content` → 构造 activation 上下文 `{"event_content": content, "event_producer": producer}` 写入 pending_context → `_activate_target(...)`（无 collaboration_type，无 target 校验）。RUNNING 节点的消费走 CC 有界轮询 `events_inbox/` 信号路径。
-- 安全边界（方案三调整后）：C1 全局协作预算（超限升级 `collaboration_budget_exceeded`）、C2 单节点激活上限（任何被 max_activations 拦截都升级 `activation_budget_exceeded`）、父 Manager 通知清除 + `rewind_parent_chain_for_retry`、mark_terminal。**不再有 related_nodes 能力边界 / A3 Manager 目标拦截 / required_role 校验**——角色与目标判断完全由 Router LLM 负责。
+- 背景：`routing.json` 文件反馈环与 related_nodes 可达边界均已删除，Event 成为唯一通信载体。Router 路由产生的 event 进入目标节点 inbox；Scheduler 不做第二次路由判断。
+- 桥的行为：Scheduler 每 tick 扫描处于 `WAITING` 或 `COMPLETED` 状态的节点（`_REACTIVATABLE_STATUSES`）的 `event_inbox/`，inbox 非空即处理，每节点每 tick 至多 1 条；消费后删除 inbox 文件（delete-on-consume，事实仍在 events.json 留痕）。`FAILED`、`PAUSED`、`STOPPED` 不会由事件桥自动恢复，FAILED 需要人工 `continue_node`。
+- 消费语义：读 `event_id / producer / objective` → 构造 activation 上下文 `{"event_objective": objective, "event_producer": producer}` 写入 pending_context → `_activate_target(...)`（无 collaboration_type，无 target 校验）。RUNNING 节点的消费走 CC 有界轮询 `events_inbox/` 信号路径。
+- 安全边界：C1 全局协作预算（超限升级 `collaboration_budget_exceeded`）、父 Manager 通知清除 + `rewind_parent_chain_for_retry`、`mark_terminal`。`activation_count` 仅作观测计数，不限制节点重激活；**不再有 related_nodes 能力边界 / A3 Manager 目标拦截 / required_role 校验**，角色与目标判断由 Router LLM 负责。
 - Manager 兜底：`Manager.run()` 阶段完成后 `flush_node_events`（scheduler tick 扫描仅在存在 RUNNING 节点时执行，Manager 无 worker 时需自己 flush）；`_build_event_context_block` 主读 pending_context，fallback 读 inbox 事件（覆盖"目标先于事件 READY/RUNNING"竞态）。
 
-### 6.8 闭环与交付可靠性（V3-2 Delivery）
+### 6.8 闭环与交付可靠性（Delivery）
 
 **文件**：`runtime/closed_loop.py`、`runtime/delivery/*`
 
@@ -299,7 +299,7 @@ AICU-Graph 的核心运行服务由 `main.py` 启动，使用 `runtime/` 提供�
 **文件**：`runtime/context/*`
 
 - 门控：`AICU_CODEGRAPH==1` 才注入；默认关 → 字节级回归不变。
-- `build_codegraph_context(shared_root, node)` / `build_review_context`：fail-silent，`DEFAULT_BUDGET=4096`，角色→项目查询映射 `_ROLE_PROJECT_QUERY`，`_SKIP_PROJECT_ROLES`。
+- `build_codegraph_context(node, ctx)` / `build_review_context(ctx, children_info)`：fail-silent，使用模块常量 `DEFAULT_BUDGET`，角色→项目查询映射 `_ROLE_PROJECT_QUERY`，`_SKIP_PROJECT_ROLES`。
 - `codegraph.py`：`_run_cli`（CODEGRAPH_BIN）、`_project_root`（walk-up .codegraph）、`query_group_inventory(shared_root)`（`codegraph files`）、`query_symbol`。
 - `resolver.py`：`DEFAULT_BUDGET`、`extract_candidates`（file/symbol 正则）、`truncate`、`assemble`。
 - `state.py`：`GraphState(NOT_EXIST/READY/STALE/BUILDING/FAILED)`、`GroupGraphState.ensure_ready`（init/sync 带显式 `[path]`，避免对项目根重复建索引）。
@@ -315,7 +315,7 @@ AICU-Graph 的核心运行服务由 `main.py` 启动，使用 `runtime/` 提供�
 | `runtime/persistence.py` | `graph.json` 快照的 save/load；graph_version 单调性 |
 | `runtime/sse_manager.py` | `SSEManager` 订阅 EventBus `"*"`，`deque(maxlen=10000, ttl=1800)`，微批合并（同 type <200ms 合并），`get_events_since`（空 → snapshot 回退）、`get_snapshot_event`、`get_stats`、`format_sse` |
 | `runtime/server.py` | `create_app(runtime, sse_manager)` 单会话 app：`CONFIG_WHITELIST{num_ccs,model,skills,audit_rounds,max_iterations}`、task≤5000、graph/manager/plan/stats、pause/resume/stop/clear、node CRUD + start/pause/stop/continue/task/delete/external-input、`/v1/logs`、`/v1/roles`、SSE `/v1/graph/events`（含 `/since/{seq}`，snapshot/catch-up、1s poll、15s keepalive） |
-| `runtime/session_server.py` | `create_session_app(session_manager)` 多会话 v2.0 app：roles（list/schema/get/create/update）、skills（list/get/create/update）、sessions CRUD + settings（api_key_env 凭据检查）、graph（snapshot/link-candidates/pause/resume/stop/clear）、nodes（**手动建节点 create**/update/delete 级联 + control pause/**resume**/stop/continue/revise + **activity（cc_activity）**）、workspace/shared/results/artifact 浏览、edges add/delete（手动建依赖边）、**agent-events（事件日志查询）**、SSE per-session |
+| `runtime/session_server.py` | `create_session_app(session_manager)` 多会话 app：roles（list/schema/get/create/update）、skills（list/get/create/update）、sessions CRUD + settings（api_key_env 凭据检查）、graph（snapshot/link-candidates/pause/resume/stop/clear）、nodes（**手动建节点 create**/update/delete 级联 + control pause/**resume**/stop/continue/revise + **activity（cc_activity）**）、workspace/shared/results/artifact 浏览、edges add/delete（手动建依赖边）、**agent-events（事件日志查询）**、SSE per-session |
 
 ---
 
@@ -328,23 +328,23 @@ AICU-Graph 的核心运行服务由 `main.py` 启动，使用 `runtime/` 提供�
 - `Executable` ABC：`run(ctx)`、`stop()`、`pause()`、`resume()`、`cleanup_resources()`；`EXEC_MODE` 由 `BaseContext` 的 `AICU()` 工厂决定 stub/real。
 - 协议：`RuntimeGateway`（执行体反向调用 Runtime 的接口）、`SchedulerDelegate`（执行体调 Scheduler 的接口）、`ExecutableRegistry`（`register(cls)` + `create(exec_type)` 工厂）。
 
-### 7.2 Manager（manager.py，约 2100 行）
+### 7.2 Manager（manager.py）
 
 - **两阶段状态机**：`manager_phase ∈ {expand, review, waiting, ...}`。
   - `_expand`：装配 expand prompt → `_call_aiCU_with_retry` → `_parse_plan` → `submit_plan`（或 `submit_revision_plan` 若 `pending_revise`）→ 置 WAITING + waiting。
-  - `_review`：收集子节点（含产物内容/目录索引）→ 装配 review prompt → `_parse_review_assessments`（返回 assessments+status）→ 全通过则 Assembly Gate + 修复 → COMPLETED + closed_loop；有失败且迭代未超 → `submit_fix_plan` 定向修复。
+  - `_review`：收集子节点（含产物内容/目录索引）→ 装配 review prompt → `_parse_review_assessments`（返回 assessments+status）→ 全通过时按配置执行 Assembly Gate 和修复 → COMPLETED + closed_loop；有失败且迭代未超 → `submit_fix_plan` 定向修复。
 - **关键内部方法**：
   - `_parse_plan`：dict/str/final_output_path 三种形态解析，尾部花括号修复 + `_parse_markdown_plan` 兜底。
   - `_build_expand_prompt`：上下文快照 + event_context_block + event inbox/publish + revise_candidates + codegraph + task。
   - `_build_review_prompt`：逐子节点 pass/fail + fix JSON 契约；协作走事件（不声明目标，Router 决策）。
-  - `_build_event_context_block`：主读 pending_context（桥激活写入的 event_content/event_producer）+ fallback 读 inbox 事件（覆盖"目标先于事件 READY/RUNNING"竞态）。
+  - `_build_event_context_block`：主读 pending_context（桥激活写入的 event_objective/event_producer）+ fallback 读 inbox 事件（覆盖"目标先于事件 READY/RUNNING"竞态）。
   - `_build_execution_context_snapshot`：祖先链 + 兄弟节点（按状态排序）+ 可复用产物。
   - `_resolve_review_content` / `_write_review_output` / `_parse_review_assessments`：评审输出的内容归一化、落盘、pass/fail 判定。
   - `_build_repair_context_block` / `_build_repair_review_prompt` / `_degrade_review`：定向修复上下文注入、修复态评审 prompt、评审降级（无可用评审时兜底）。
   - `_run_assembly_gate` / `_repair_blocking_delivery`：交付保障在 Manager 完成阶段执行。
 - **Manager 也是 Producer + Consumer**：expand/review prompt 注入事件发布/收件箱指令（`_build_event_publish_instructions`），阶段完成后 `flush_node_events`。
 
-### 7.3 Worker（worker.py，约 1150 行）
+### 7.3 Worker（worker.py）
 
 - `run(ctx)` 主流程：
   1. 判定 `is_continuation`（`Worker._aicu_cache` 命中）与 `revise_resume` → 清 pending_context；
@@ -355,7 +355,7 @@ AICU-Graph 的核心运行服务由 `main.py` 启动，使用 `runtime/` 提供�
   6. `aicu.ask` 提交给单线程 executor；
   7. 成功 → `_normalize_worker_artifact`（共享分区=单一事实源）、Artifact Gate `_validate_worker_artifact_gate`（失败 → FAILED + delivery_state="invalid"）、`_publish_worker_artifact`、`notify_artifact_updated(shared_root)`、`flush_node_events` → COMPLETED + artifact_path + log；
   8. 异常 → FAILED + `ErrorObject.create_worker_execution_error()` + delivery_state="invalid"（若 gate 开）；
-  9. `finally`：executor.shutdown + 缓存清理（paused 保留缓存；activation_count≥max 则 pop；activation_count==0 则 pop）。
+  9. `finally`：executor.shutdown + 缓存清理（paused 保留缓存；`activation_count==0` 则 pop）。
 - 生命周期：`stop`（killpg 杀进程组）、`pause`、`resume`（重跑 run()）、`cleanup_resources`。
 - **上下文装配辅助方法**：
   - `_build_worker_context`：完整首跑上下文（共享产物清单、事件收件箱/发布块、任务）。
@@ -376,7 +376,7 @@ AICU-Graph 的核心运行服务由 `main.py` 启动，使用 `runtime/` 提供�
 
 **文件**：`aicu.py`、`claude_code_agent.py`
 
-### 8.1 AICU（aicu.py，约 1650 行）
+### 8.1 AICU（aicu.py）
 
 - **peer 模式由 `config.num_ccs` 决定**：
   - `1` = solo（单 peer）；
@@ -393,7 +393,7 @@ AICU-Graph 的核心运行服务由 `main.py` 启动，使用 `runtime/` 提供�
 
 ### 8.2 ClaudeCodeAgent（claude_code_agent.py）
 
-- `ClaudeCodeAgent(workspace_path, instruction_md_path, model="DeepSeek-V4-Flash", skip_permissions, cli_name, enable_project_skills, output_callback, api_base_url, api_key_env)`。
+- `ClaudeCodeAgent` 接收工作区、提示词文件、模型、CLI、权限、输出回调、Base URL 和 API Key 环境变量等配置。
 - `detect_cli`：按适配器和本机 `PATH` 自动探测可用 CLI。
 
 - `_build_base_command`：根据所选 CLI 组装模型、权限和项目设置参数。
@@ -410,10 +410,10 @@ AICU-Graph 的核心运行服务由 `main.py` 启动，使用 `runtime/` 提供�
 | 2 | Manager expand/review 两阶段 | `executables/manager.py` | — |
 | 3 | Worker 单次产物生产 | `executables/worker.py` | — |
 | 4 | Scheduler 调度（并发槽/重试/激活） | `runtime/scheduler.py` | — |
-| 5 | **独立 AICU Router（Event + 组织图 → 目标 Nodes，结构版本绑定的会话生命周期）** | `runtime/router.py` `runtime/agent_events.py` | 默认开 |
-| 6 | **事件投递（6 字段 + routed/delivered/consumed 生命周期 + 重启确定性重投）** | `runtime/agent_events.py` `runtime/models.py` | 默认开 |
-| 7 | **事件→重激活桥（反馈闭环唯一触发点）** | `runtime/scheduler.py` `_process_reactivation_events` | 默认开 |
-| 8 | **Event Queue 统一（outbox/inbox/live 契约，inbox 唯一待消费队列）** | `runtime/agent_events.py` `event_queue_dirs` | 默认开 |
+| 5 | **独立 AICU Router（Event + 组织图 → 目标 Nodes，结构变更时更新会话上下文）** | `runtime/router.py` `runtime/agent_events.py` | 无独立开关；默认 `EXEC_MODE=stub` 时不产生目标 |
+| 6 | **事件投递（EventMessage 10 个字段 + routed/delivered/consumed 生命周期 + 重启确定性重投）** | `runtime/agent_events.py` `runtime/models.py` | 无独立开关，代码路径默认参与运行 |
+| 7 | **事件→WAITING/COMPLETED 节点重激活桥** | `runtime/scheduler.py` `_process_reactivation_events` | 无独立开关；FAILED 需人工 `continue_node` |
+| 8 | **Event Queue 统一（outbox/inbox/live 契约，inbox 唯一待消费队列）** | `runtime/agent_events.py` `event_queue_dirs` | 无独立开关，代码路径默认参与运行 |
 | 9 | Revise 增量续跑（选择性复用子节点） | `executables/manager.py` `runtime/planner.py` `translate_revision` | — |
 | 10 | 协作闭环（collaboration_ledger → closed_loop.json + deliverable_manifest.json） | `runtime/closed_loop.py` | — |
 | 11 | 交付保障（Artifact Gate / Registry / Assembly Gate） | `runtime/delivery/*` | `AICU_DELIVERY=1` |
@@ -425,12 +425,12 @@ AICU-Graph 的核心运行服务由 `main.py` 启动，使用 `runtime/` 提供�
 | 17 | React 工作台前端（图可视化 + 会话管理 + 事件流） | `frontend/src/` | — |
 | 18 | 崩溃恢复（graph.json 快照 + sessions.json + 事件确定性重投） | `runtime/persistence.py` `runtime/session_manager.py` `agent_events._redeliver_routed_locked` | — |
 | 19 | stub/real 双执行模式 | `executables/default_stub.py` `EXEC_MODE` | `EXEC_MODE=stub\|real` |
-| 21 | **事件格式校验 + 拒收反馈（content 非空字符串）** | `runtime/agent_events.py` `_prepare_event_raws`/`_reject_event` | 默认开 |
-| 22 | **手动建节点 + 依赖边编辑（link-candidates）** | `runtime/runtime.py` `create_manual_node`/`add_dependency`/`get_link_candidates`、`session_server.py` | — |
-| 23 | **外部输入等待/投递（external-input）** | `runtime/runtime.py` `register_external_input_wait`/`deliver_external_input`、`server.py` | — |
-| 24 | **CC 活动视图（cc_activity 追踪 + /activity 端点）** | `runtime/runtime.py` `update_cc_activity`、`executables/worker.py` `_handle_cc_stream_output` | — |
-| 25 | **多依赖分级阅读（tiered reading）** | `executables/worker.py` `_build_tiered_reading_instructions` | 默认开（≥4 依赖触发） |
-| 26 | **CC 流式日志分流（粗粒度 log + 细粒度开关）** | `executables/worker.py` `_handle_cc_stream_output` | `AICU_NODE_LOG_STREAMING=1` 才全量写 |
+| 20 | **事件格式校验 + 拒收反馈** | `runtime/agent_events.py` `_prepare_event_raws`/`_reject_event` | 默认开 |
+| 21 | **手动建节点 + 依赖边编辑（link-candidates）** | `runtime/runtime.py` `create_manual_node`/`add_dependency`/`get_link_candidates`、`session_server.py` | — |
+| 22 | **外部输入等待/投递（external-input）** | `runtime/runtime.py` `register_external_input_wait`/`deliver_external_input`、`server.py` `POST /v1/nodes/{node_id}/external-input`（body.wait_token） | — |
+| 23 | **CC 活动视图（cc_activity 追踪 + 多会话 activity 端点）** | `runtime/runtime.py` `update_cc_activity/get_cc_activity`、`executables/worker.py` `_handle_cc_stream_output`、`runtime/session_server.py` `GET /v1/sessions/{session_id}/nodes/{node_id}/activity` | — |
+| 24 | **多依赖分级阅读（tiered reading）** | `executables/worker.py` `_build_tiered_reading_instructions` | 默认开（≥4 依赖触发） |
+| 25 | **CC 流式日志分流（粗粒度 log + 细粒度开关）** | `executables/worker.py` `_handle_cc_stream_output` | `AICU_NODE_LOG_STREAMING=1` 才全量写 |
 
 ---
 
@@ -446,21 +446,18 @@ AICU-Graph 的核心运行服务由 `main.py` 启动，使用 `runtime/` 提供�
 | `aicu.py` | **AI 执行引擎**：peer 编排（num_ccs）、角色配置加载、CC 工作区创建、single-writer 约束、vote/review/audit 产物管理 |
 | `claude_code_agent.py` | **AI Coding CLI 程序化封装**：多轮对话（--resume）、stdin 提示、超时 killpg、`CCExecutionError` |
 | `conftest.py` | pytest 根级 fixture（stub 模式、临时工作区等） |
-| `run_tests.py` | **自包含集成测试编排器**：跑 144 个测试（Models 30 / Graph 25 / StateMachine 30 / Planner 20 / Persistence 10 / EventBus 10 / SSEManager 6 / Registry 3 / Integration 10），产出 `test_report.md` |
-| `e2e_*.py`（6 个） | 端到端 stub 场景：`e2e_abc.py`（A 修复闭环 / B 跨 Manager 协作 / C 预算拦截）、`e2e_routing_feedback.py`（backend bug→test 反馈→修复→复验）、`e2e_revise.py`、`e2e_session_delivery.py`、`e2e_session_shared.py`、`e2e_shared_ws_smoke.py` |
-| `test_*_e2e.py`（根级，真实模型 harness） | 真实 AI 联调：`test_codegraph_value_e2e.py`、`test_routing_e2e.py`、`test_v2_e2e.py`、`test_manager_collab_e2e.py`、`test_v2_manager_expand.py`、`test_step1.py`、`test_step2.py` |
-| `repro_*.py` `rerun_integration.py` `restart_e2e.py` `resume_manager_collab_e2e.py` `retry_failed.py` `analyze_tool_usage.py` | 调试/复现辅助脚本（非核心） |
+| `run_tests.py` | **自包含测试编排器**：源码定义并收集 144 个内部测试用例，执行后产出 `test_report.md`；不等于仓库全部 pytest/Vitest 测试 |
 
 ### 10.2 runtime/
 
 | 文件 | 职责 |
 |---|---|
-| `models.py` | **数据模型**：Node / Edge / EdgeType / ExecutionPlan / Step / EventMessage（6 字段含 `routed_to`/`status`）/ RoutingDecision（activate/contexts/mark_terminal/reason）/ LogEntry / LogLevel / NodeStatus（含 `READY`）/ ManagerPhase / ErrorObject 等；`to_dict/from_dict` 序列化；Node 含 `cc_activity`/`delivery_state`/`pending_revise`/`activation_count`/`pending_context` |
+| `models.py` | **数据模型**：Node / Edge / EdgeType / ExecutionPlan / Step / EventMessage（10 个字段含事件描述和路由状态）/ RoutingDecision（activate/contexts/mark_terminal/reason）/ LogEntry / LogLevel / NodeStatus（含 `READY`）/ ManagerPhase / ErrorObject 等；`to_dict/from_dict` 序列化；Node 含 `cc_activity`/`delivery_state`/`pending_revise`/`activation_count`/`pending_context` |
 | `graph.py` | 内存图（Node+Edge + 邻接索引），`add_node/update_node/get_node/all_nodes/add_edge/remove_edge/dependencies/children`、`graph_version`（状态/结构都变）、`structure_version`（仅组织结构变更自增，Router 据此切换上下文）、`set_on_mutation` 变更回调 |
-| `planner.py` | Graph 唯一写入口：`translate` / `translate_revision`（增量复用）/ `restore` / `rewind_parent_chain_for_retry` / `validate_plan` / `create_retry_node`（废弃） |
+| `planner.py` | 计划翻译和常规图构建的主要入口：`translate` / `translate_revision`（增量复用）/ `restore` / `rewind_parent_chain_for_retry` / `validate_plan` / `create_retry_node`（废弃）；Graph 仍公开提供底层变更方法 |
 | `plan_validator.py` | 确定性机械校验：num_ccs、exec_type↔role、软告警（不做任何通信关系校验） |
 | `state_machine.py` | 节点状态机：合法转移表、`IllegalTransitionError` |
-| `scheduler.py` | tick 调度循环：并发槽、激活、自动重试（原地+定时重试）、**事件→重激活桥**、`_activate_target`、预算/升级（C1/C2） |
+| `scheduler.py` | tick 调度循环：并发槽、激活、自动重试（原地+定时重试）、**事件→重激活桥**、`_activate_target`、协作预算/升级（C1） |
 | `router.py` | **AICU Router**：`route(event)` = 组织图快照 + prompt → LLM/桩 → `{"targets":[...]}` 解析；stub/real 双模式；**生命周期**（`structure_version` 变化 → `_reset_conversation`）、快照缓存、`_resolve_node_id`、real AICU 元数据归一化 |
 | `runtime.py` | **Runtime 门面**：`submit_root_manager` / `inject_plan` / `submit_fix_plan` / `inject_revision_plan` / `continue_node` / `revise_manager_node` / `pause` / `resume` / `stop` / 事件流 / escalation 查询 / 崩溃恢复 / **手动建节点（create_manual_node/update_manual_node/delete_manual_node）** / **依赖边编辑（add_dependency/remove_dependency/get_link_candidates）** / **外部输入（register_external_input_wait/deliver_external_input）** / **cc_activity（update_cc_activity/get_cc_activity）** / 共享工作区/workspace 浏览 |
 | `agent_events.py` | **Event Bus**：四存储对象、`event_queue_dirs` 统一契约、`_route_locked`（Router 决策投递，落 `routed_to`，inbox 唯一待消费队列）、`_deliver`、`scan_node/scan_all`、`list_inbox`、**格式校验（_prepare_event_raws/_reject_event）**、**重启确定性重投（_redeliver_routed_locked）**、**状态 reconcile（_reconcile_statuses_locked）** |
@@ -473,7 +470,7 @@ AICU-Graph 的核心运行服务由 `main.py` 启动，使用 `runtime/` 提供�
 | `sse_manager.py` | SSE 事件流：环形缓冲、微批合并、`get_events_since`（空→snapshot 回退）、`get_snapshot_event` |
 | `server.py` | `create_app` 单会话 FastAPI app（CONFIG_WHITELIST、节点 CRUD、日志查询、SSE `/v1/graph/events`） |
 | `session_manager.py` | 多会话生命周期：create/list/pause/resume/stop/delete、`sessions.json` 原子持久化、`_summary` 状态推导 |
-| `session_server.py` | `create_session_app` 多会话 v2.0 app（roles/skills/sessions/nodes/workspace/edges/SSE per-session） |
+| `session_server.py` | `create_session_app` 多会话 app（roles/skills/sessions/nodes/workspace/edges/SSE per-session） |
 
 ### 10.3 runtime/delivery/
 
@@ -515,7 +512,8 @@ AICU-Graph 的核心运行服务由 `main.py` 启动，使用 `runtime/` 提供�
 | `roles/Manager/default.yaml` | Manager 基类配置（8 步决策策略） |
 | `roles/Manager/engineering_coord.yaml` `release_planner.yaml` | 具体 Manager 角色覆盖 |
 | `roles/Worker/default.yaml` | Worker 基类配置 |
-| `roles/Worker/dev_member.yaml` `test.yaml` `document.yaml` `architecture.yaml` `requirements.yaml` `code.yaml` `acceptance.yaml` `data_analysis.yaml` `deploy.yaml` `dev_lead.yaml` `grill.yaml` `incremental_plan.yaml` `prototype.yaml` `test_role.yaml` | 具体 Worker 角色；`dev_member`（code+source_file）、`test`（document+verdict_block）等含 `artifact_contract` 示例 |
+| `roles/Worker/acceptance.yaml` `architecture.yaml` `code.yaml` `data_analysis.yaml` `deploy.yaml` `dev_lead.yaml` `dev_member.yaml` `document.yaml` `grill.yaml` `incremental_plan.yaml` `prototype.yaml` `requirements.yaml` `test.yaml` | 具体 Worker 角色；部分角色配置包含 `artifact_contract` |
+| `roles/system_role/default.yaml` `roles/system_role/router.yaml` | 系统级角色配置 |
 
 ### 10.7 tests/ 与根级测试脚本
 
@@ -560,7 +558,7 @@ AICU-Graph 的核心运行服务由 `main.py` 启动，使用 `runtime/` 提供�
 | `backend/api/` | API 蓝图，包括认证、文章、标签、统计、上传、RSS 和健康检查 |
 | `backend/tests/test_api.py` | Flask 后端模块测试 |
 
-`backend/` 与 `main.py` 启动的 AICU Runtime 相互独立。需要运行该模块时，应安装 `backend/requirements.txt` 并使用其自身入口；它不是 README 快速启动流程的一部分。
+`backend/` 与 `main.py` 启动的 AICU Runtime 相互独立。当前快照中 `backend/app.py` 引用的 `storage/`、`models/`、`auth/`、`services/` 和 `markdown_service.py` 等依赖未全部出现，因此该 Flask 模块不能按现状直接启动；它不是 README 快速启动流程的一部分。
 
 ---
 
@@ -622,12 +620,12 @@ AICU-Graph 的核心运行服务由 `main.py` 启动，使用 `runtime/` 提供�
 | 想做什么 | 读这些文件 |
 |---|---|
 | 改调度 tick 间隔/并发槽规则 | `runtime/scheduler.py` |
-| 改重试预算 | `runtime/scheduler.py`（max_activations）、`runtime/models.py` |
+| 改重试和协作预算 | `runtime/scheduler.py`、`runtime/models.py` |
 | 改节点状态转移表 | `runtime/state_machine.py` |
 | 改多会话生命周期 | `runtime/session_manager.py` |
 | 改崩溃恢复逻辑 | `runtime/persistence.py`、`runtime/runtime.py`、`runtime/session_manager.py`、`runtime/agent_events.py`（`_redeliver_routed_locked` / `_reconcile_statuses_locked`） |
 | 改手动建节点/删节点/依赖边编辑 | `runtime/runtime.py`（`create_manual_node`/`update_manual_node`/`delete_manual_node`/`add_dependency`/`remove_dependency`/`get_link_candidates`）+ `runtime/session_server.py` |
-| 改外部输入等待/投递 | `runtime/runtime.py`（`register_external_input_wait`/`deliver_external_input`）+ `runtime/server.py`（`/external-input`） |
+| 改外部输入等待/投递 | `runtime/runtime.py`（`register_external_input_wait`/`deliver_external_input`）+ `runtime/server.py`（`POST /v1/nodes/{node_id}/external-input`，body.wait_token） |
 | 改 CC 活动视图（cc_activity） | `runtime/runtime.py`（`update_cc_activity`/`get_cc_activity`）、`runtime/models.py`（Node.cc_activity）、`executables/worker.py`（`_handle_cc_stream_output`） |
 
 ### F. Web / 前端相关
@@ -652,7 +650,6 @@ AICU-Graph 的核心运行服务由 `main.py` 启动，使用 `runtime/` 提供�
 | `AICU_ARTIFACT_GATE` | Artifact Gate 细分开关（`!= "0"` 且 delivery 开才生效） | 开 |
 | `AICU_CODEGRAPH` | CodeGraph 上下文注入开关 | 空（关） |
 | `CODEGRAPH_BIN` | codegraph CLI 路径 | 默认 |
-| `AICU_CODEGRAPH_BUDGET` | 上下文预算（覆盖 4096） | 4096 |
 | `MAX_COLLABORATION_ROUNDS`（运行时属性） | 全局协作轮数上限（C1） | 10 |
 | `AICU_NODE_LOG_STREAMING` | CC 流式日志全量写入 node.log（`=1` 时；默认只写 stderr/activity 分流） | 关 |
 | `VITE_MOCK_MODE` | 前端离线 mock | 关 |
@@ -662,7 +659,7 @@ AICU-Graph 的核心运行服务由 `main.py` 启动，使用 `runtime/` 提供�
 ## 十三、端到端一次运行的真实时序
 
 ```text
-1. 用户 POST /api/sessions {task, settings}
+1. 用户 POST /v1/sessions {task, title, role, config}
    → SessionManager.create_session
 2. SessionManager 创建 Runtime，Runtime.submit_root_manager(task)
    → Planner.translate(root ExecutionPlan) → 根 Manager Node (WAITING)
@@ -672,13 +669,14 @@ AICU-Graph 的核心运行服务由 `main.py` 启动，使用 `runtime/` 提供�
 4. Scheduler 继续推进：
    → Worker 节点激活 → Worker.run() → aicu.ask → AI 在 workspaces/{id}/cc_0/ 干活
    → 产物归一到 shared/{output_path} → Artifact Gate → COMPLETED
-   → Worker 发事件（content 描述事件本身）→ AICU Router 结合组织图决策目标 → 投递目标 inbox
-5. 目标非运行态节点（如 backend_impl）被事件→重激活桥唤醒（inbox 有事件即处理）
-   → 读 pending_context（event_content）→ 修复 → 再发事件通知 test 复验
+   → Worker 发事件（objective 描述事件本身）→ AICU Router 结合组织图决策目标 → 投递目标 inbox
+5. 处于 WAITING/COMPLETED 状态的目标节点（如 backend_impl）可被事件→重激活桥唤醒（inbox 有事件即处理）；FAILED/PAUSED/STOPPED 不会由该桥自动恢复
+   → 读 pending_context（event_objective）→ 修复 → 再发事件通知 test 复验
 6. 子节点全部完成后 → 父 Manager 收到通知 → _review 评审
-   → 全通过 → Assembly Gate → COMPLETED + closed_loop.json + deliverable_manifest.json
+   → 全通过；启用 `AICU_DELIVERY=1` 时执行 Assembly Gate，Gate 通过后才标记 delivered
+   → 按配置写入 closed_loop.json / deliverable_manifest.json，随后 COMPLETED
    → 逐级向上直到根 Manager 收敛
-7. 前端通过 SSE 实时看到：图变化、节点状态、事件流（谁产生事件 → Router 路由 → 目标消费）
+7. 前端通过 SSE 实时看到：图变化、节点状态、事件流（谁产生事件 → Router 路由 → 目标消费）。启用 `AICU_DELIVERY=1` 时，产物还会经过 Artifact/Assembly Gate；未启用时 Delivery 层不执行，节点 `COMPLETED` 不等于已交付。
 ```
 
 ---
@@ -687,13 +685,13 @@ AICU-Graph 的核心运行服务由 `main.py` 启动，使用 `runtime/` 提供�
 
 | 症状/问题 | 排查入口 |
 |---|---|
-| 测试挂了但不确定改动影响面 | 先跑 `python3 run_tests.py`（144 自包含测试），再 `pytest tests/ -x` |
+| 测试挂了但不确定改动影响面 | 先跑 `python3 run_tests.py`，再按需运行 `pytest tests/ -x` |
 | 事件没到达目标节点 | 看 `runtime/agent_events.py` 的 `_route_locked`/`_deliver`；检查 `runtime/router.py`（Router 是否返回目标、目标 node_id 是否正确） |
-| 节点没被重激活 | 看 `runtime/scheduler.py` 的 `_process_reactivation_events`；确认事件已投递到目标 inbox 且目标非 RUNNING；检查 `max_activations` / C1 预算 |
+| 节点没被重激活 | 看 `runtime/scheduler.py` 的 `_process_reactivation_events`；确认事件已投递到目标 inbox 且目标非 RUNNING；检查 C1 协作预算 |
 | Manager 评审卡住 | 看 `executables/manager.py` 的 `_review` 与 `_parse_review_assessments`；事件是否被 `flush_node_events` 兜底 |
 | 产物报 invalid | 看 `runtime/delivery/gate.py`（Artifact Gate 的 containment/exists/type/contract） |
 | 想看真实事件流转 | `events.json` 全局日志 + 前端 Event Stream / `runtime/sse_manager.py` |
-| 想跑一个确定性端到端场景 | `python3 e2e_abc.py`（A/B/C 三场景，全 stub，全 PASS） |
+| 想运行确定性测试 | `python3 run_tests.py`（运行项目内置测试） |
 
 ---
 

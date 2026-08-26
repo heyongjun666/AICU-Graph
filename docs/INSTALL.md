@@ -1,207 +1,234 @@
-# AICU v5 安装与部署文档
+# 安装与使用
 
-> 本文档介绍如何在一台新机器上安装并启动 **AICU v5（AI Coding Universe 第五版）多 Agent 软件研发编排框架**。
-> 配套文档：[docs/ARCHITECTURE.md](ARCHITECTURE.md)（架构详解）。
-
----
-
-## 1. 项目简介
-
-AICU 是一个**多 Agent 软件研发编排框架**：
-
-- 用户提交一个软件研发任务；
-- 系统自动生成一棵 **Manager / Worker 的 Agent 组织树**；
-- 节点通过 **Event 事件总线**互相通信，形成「开发 → 测试反馈 → 修复 → 复验 → 交付」的协作闭环；
-- 每一步真实执行由 **AI 编程 Agent** 通过终端 CLI 完成，在隔离工作目录里真实读写文件、运行命令。
-
----
+本文档面向第一次使用 AICU-Graph 的用户。
 
 ## 2. 环境要求
 
-| 依赖 | 版本 | 是否必需 | 说明 |
-| --- | --- | --- | --- |
-| Python | 3.10+ | ✅ 必需 | 后端运行时 |
-| AI 编程 CLI | — | ✅ 必需 | 至少安装一个，见 [4.3](#43-安装--确认-ai-编程-cli) |
-| Node.js | 18+ | ⭕ 可选 | 仅前端工作台（React）需要 |
-| codegraph | — | ⭕ 可选 | 仅开启 `AICU_CODEGRAPH=1` 时需要 |
+- Python 3.10 或更高版本
+- Node.js 18 或更高版本
+- Git
+- 至少一个受支持的 AI Coding CLI
+- 该 CLI 对应的账号、API Key 或其他认证信息
 
-AICU 通过适配器支持多种 AI 编程 CLI。具体支持情况和参数以 `cli_adapters.py`、`cli_models.json` 以及前端设置页为准。
+Qwen Code、Kimi Code 和 Pi 可能要求更高版本的 Node.js，请以对应 CLI 的官方要求为准。
 
-至少安装一个与你所选模型和服务商匹配的 CLI，并确保其可执行文件位于系统 `PATH` 中。
+## 3. 获取项目
 
----
-
-## 3. 目录结构
-
-```
-final_solution/
-├── main.py               # 后端入口（FastAPI + uvicorn，默认 0.0.0.0:8080）
-├── aicu.py               # AI 执行引擎（任务→Agent 提示词，编排多 peer）
-├── claude_code_agent.py  # CLI 程序化封装（多轮对话/超时/续接/重试）
-├── cli_adapters.py       # 多终端 CLI 适配层（协议差异抽象）
-├── cli_models.json       # 各 CLI 已知模型清单（前端下拉候选）
-├── requirements.txt      # Python 依赖
-├── runtime/              # 核心运行时（Graph/Planner/Scheduler/Router/EventBus/Delivery…）
-├── executables/          # 执行体（Manager/Worker）
-├── roles/                # 18 个角色定义（Manager/Worker/system_role 的 YAML）
-├── frontend/             # React/Vite Web 工作台
-├── backend/              # 独立 Flask 后端模块
-├── docs/                 # 文档
-└── tests/                # 测试套件
-```
-
-> 运行时会在项目根生成 `runtime_sessions/`、`workspaces/`、`nodes/`、`events*` 等动态数据目录，均已在 `.gitignore` 中排除。
-
----
-
-## 4. 快速安装
-
-### 4.1 解压
+安装 Git 后，在终端执行：
 
 ```bash
-tar xzf aicu_v5_final_solution.tar.gz
-cd final_solution
+git clone https://github.com/heyongjun666/AICU-Graph.git
+cd AICU-Graph
 ```
 
-### 4.2 安装 Python 依赖
+## 4. 安装依赖
+
+安装 Python 依赖：
 
 ```bash
-pip install -r requirements.txt
+python3 -m pip install -r requirements.txt
 ```
 
-依赖仅三项：`fastapi`、`uvicorn[standard]`、`pydantic`。
-
-### 4.3 安装 / 确认 AI 编程 CLI
-
-AICU 通过 `shutil.which` 探测已安装的 CLI。至少安装其一：
-
-请按 `cli_adapters.py` 支持的 CLI 之一完成安装，并确认命令位于 `PATH` 中。例如：
-
-```bash
-which claude
-claude --version
-```
-
-如果你使用其他 CLI，请将上面的命令替换为对应的 CLI 名称，并确认其可以在终端直接执行。
-
-### 4.4 （可选）构建前端工作台
-
-前端工作台提供图形化界面（图编辑、节点查看、会话管理、凭证配置）。不构建也不影响后端 API 运行。
+安装并构建前端：
 
 ```bash
 cd frontend
 npm install
-npm run build     # 产物输出到 frontend/dist
+npm run build
 cd ..
 ```
 
-开发模式：`cd frontend && npm run dev`。
+## 5. 安装 AI Coding CLI
 
----
+AICU 会检测系统 `PATH` 中的 CLI。至少安装一个，并先完成该 CLI 自己的登录或认证。
 
-## 5. 配置
-
-### 5.1 模型与 CLI 选择
-
-- 各 CLI 支持的模型清单集中在 `cli_models.json`。
-- 前端工作台「设置」页可切换 CLI、Provider 和模型；具体可用选项取决于本地安装的 CLI 及对应服务商。
-
-### 5.2 凭证
-
-凭证由运行时按服务商保存到 `runtime_sessions/api_keys.json`（明文，文件权限为 0600，首次配置时自动创建）。不同 CLI 使用的凭证类型可能不同，通常是对应服务商的 API Key。
-
-支持的 vendor 包括：`anthropic / openai / moonshot / xai / google / deepseek / zhipu / minimax / aliyun`。
-
-建议优先使用前端工作台的设置页保存和测试凭证，也可以通过 API 配置：
+### Claude Code
 
 ```bash
-curl -X PUT http://localhost:8080/v1/config/api-key \
-  -H "Content-Type: application/json" \
-  -d '{"vendor": "anthropic", "api_key": "sk-..."}'
-
-curl -X POST http://localhost:8080/v1/config/test-connection \
-  -H "Content-Type: application/json" \
-  -d '{"cli_name": "claude", "model": "claude-sonnet-4-6"}'
+npm install -g @anthropic-ai/claude-code
+claude --version
 ```
 
-不要将 `runtime_sessions/`、API Key、环境变量文件或本地 CLI 配置提交到公开仓库。
-
-### 5.3 环境变量
-
-| 环境变量 | 作用 | 默认 |
-| --- | --- | --- |
-| `EXEC_MODE` | `stub`（离线假 AI）/ `real`（真实 AI） | `real`（main.py 强制） |
-| `HOST` / `PORT` | HTTP 监听地址 / 端口 | `0.0.0.0` / `8080` |
-| `AICU_DELIVERY` | 交付保障总开关 | 空（关） |
-| `AICU_CODEGRAPH` | CodeGraph 上下文注入 | 空（关） |
-| `CODEGRAPH_BIN` | codegraph CLI 路径 | 默认探测 |
-| `AICU_CODEGRAPH_BUDGET` | 上下文预算 | 4096 |
-| `AICU_NODE_LOG_STREAMING` | CC 流式日志全量写 node.log | 关 |
-
----
-
-## 6. 启动与验证
-
-### 6.1 启动后端
+### Codex CLI
 
 ```bash
-python main.py
+npm install -g @openai/codex
+codex --version
 ```
 
-启动成功标志：
+### Qwen Code
 
+```bash
+npm install -g @qwen-code/qwen-code
+qwen --version
 ```
-INFO:  Uvicorn running on http://0.0.0.0:8080
+
+### Kimi Code CLI
+
+```bash
+npm install -g @moonshot-ai/kimi-code
+kimi --version
 ```
 
-> 生产/后台启动建议用 `setsid`（避免 nohup 的 SIGINT 被忽略问题）：
->
-> ```bash
-> setsid python main.py > /tmp/aicu_backend.log 2>&1 &
-> ```
+也可以按照 Kimi 官方文档使用安装脚本安装。
 
-### 6.2 健康检查
+### Gemini CLI
+
+```bash
+npm install -g @google/gemini-cli
+gemini --version
+```
+
+### OpenCode
+
+```bash
+npm install -g opencode-ai
+opencode --version
+```
+
+### Pi
+
+```bash
+npm install -g @earendil-works/pi-coding-agent
+pi --version
+```
+
+### CodeBuddy Code
+
+```bash
+npm install -g @tencent-ai/codebuddy-code
+codebuddy --version
+```
+
+### Cursor Agent
+
+请按照 Cursor 官方文档安装 CLI。安装完成后确认命令可用：
+
+```bash
+agent --version
+```
+
+### Antigravity
+
+请按照 Antigravity 官方文档安装 CLI。该适配器使用 `agy` 命令：
+
+```bash
+agy --version
+```
+
+### Grok CLI
+
+请按照 Grok 官方文档安装 CLI。安装完成后确认命令可用：
+
+```bash
+grok --version
+```
+
+安装后可以查看 AICU 检测到的 CLI：
+
+```bash
+python3 -c "from cli_adapters import detect_installed; print(detect_installed())"
+```
+
+## 6. 配置模型和 API Key
+
+启动项目后，在前端工作台的设置页完成以下操作：
+
+1. 选择 CLI；
+2. 选择服务商和模型；
+3. 填写 API Key 或完成对应认证；
+4. 保存配置；
+5. 点击连接测试。
+
+API Key 会保存在本机的 `runtime_sessions/api_keys.json`，不要把它提交到 Git 仓库。
+
+也可以在启动前设置服务商环境变量，例如：
+
+```bash
+export ANTHROPIC_API_KEY="你的 API Key"
+```
+
+不要把真实 API Key 写入源码、README、`.env` 文件或 Git 提交中。
+
+## 7. 启动项目
+
+在项目根目录执行：
+
+```bash
+python3 main.py
+```
+
+然后打开：
+
+```text
+http://localhost:8080
+```
+
+## 8. 离线运行
+
+不调用真实 AI CLI 时，可以使用 Stub 模式验证基础流程：
+
+```bash
+EXEC_MODE=stub python3 main.py
+```
+
+## 9. 基本验证
+
+服务启动后，检查 API 是否正常响应：
 
 ```bash
 curl http://localhost:8080/v1/sessions
 curl http://localhost:8080/v1/roles
 ```
 
-### 6.3 创建会话并提交任务
+创建并启动一个会话：
 
 ```bash
-# 1. 创建会话（提交研发任务）
 curl -X POST http://localhost:8080/v1/sessions \
   -H "Content-Type: application/json" \
-  -d '{"task": "实现一个需要多阶段协作的软件功能", "title": "demo"}'
+  -d '{"task":"实现一个需要多阶段协作的软件功能","title":"demo"}'
+```
 
-# 返回 {"id": "<session_id>", ...}
+将返回结果中的 `<session_id>` 替换为实际 ID：
 
-# 2. 启动该会话的调度循环（开始执行）
+```bash
 curl -X POST http://localhost:8080/v1/sessions/<session_id>/graph/resume
 ```
 
-更多端点：`GET /v1/sessions/{id}/graph`（查看图）、`GET /v1/sessions/{id}/nodes/{node_id}/logs`（节点日志）、`GET /v1/sessions/{id}/graph/events`（事件流）。
+## 10. 常见问题
 
-### 6.4 前端工作台（可选）
+### 找不到 CLI
 
-构建完成后访问 `http://localhost:8080`（后端托管 `frontend/dist` 静态文件）；或开发模式 `npm run dev` 后访问对应端口。
+确认 CLI 已安装，并且命令位于系统 `PATH`。例如：
 
----
+```bash
+which claude
+which codex
+which qwen
+which kimi
+which gemini
+which opencode
+which pi
+which codebuddy
+which agent
+which agy
+which grok
+```
 
-## 7. 常见问题
+如果使用 npm 全局安装后仍找不到命令，请重新打开终端，并检查 npm 全局 bin 目录是否在 `PATH` 中。
 
-**Q1：启动报「未找到可用的 CLI 工具」？**
-AICU 未探测到任何已安装的 AI 编程 CLI。请安装一个受支持的 CLI，确保命令位于 `PATH` 中，再重启。
+### 认证失败
 
-**Q2：CLI 调用报认证失败？**
-在 `PUT /v1/config/api-key` 中按 vendor 配置对应 API Key，并用 `POST /v1/config/test-connection` 验证。
+确认 CLI 已完成登录，或在 AICU 设置页保存了正确的服务商 API Key。不同 CLI 的认证方式可能不同。
 
-**Q3：只想离线跑通流程、不接真实 AI？**
-设置 `EXEC_MODE=stub`（确定性 stub 假 AI），用于测试/验收流程。
+### 前端页面无法访问
 
-**Q4：前端访问不到页面？**
-未执行 `npm run build` 时后端无 `frontend/dist` 静态产物；请先构建，或直接使用 REST API。
+在项目根目录重新构建前端，然后重启服务：
 
-**Q5：数据/会话存在哪里？**
-会话持久化在 `runtime_sessions/`（`sessions.json` + 每个 session 的 `graph.json`），节点产物在 `nodes/`、工作区在 `workspaces/`。
+```bash
+cd frontend
+npm install
+npm run build
+cd ..
+python3 main.py
+```

@@ -44,12 +44,13 @@ final_solution/
 ├── runtime/              # 核心运行时（Graph/Planner/Scheduler/Router/EventBus/Delivery…）
 ├── executables/          # 执行体（Manager/Worker）
 ├── roles/                # 18 个角色定义（Manager/Worker/system_role 的 YAML）
-├── frontend/             # React 工作台（graph-viewer，可选）
+├── frontend/             # React/Vite Web 工作台
+├── backend/              # 独立 Flask 后端模块
 ├── docs/                 # 文档
 └── tests/                # 测试套件
 ```
 
-> 运行时会在项目根生成 `runtime_sessions/`、`workspaces/`、`nodes/`、`events*` 等动态数据目录，均已在打包时排除。
+> 运行时会在项目根生成 `runtime_sessions/`、`workspaces/`、`nodes/`、`events*` 等动态数据目录，均已在 `.gitignore` 中排除。
 
 ---
 

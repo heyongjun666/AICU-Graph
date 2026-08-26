@@ -18,6 +18,16 @@ AICU-Graph is the **organization and runtime layer**. It is responsible for:
 - Supporting collaboration through events and shared artifacts;
 - Providing REST APIs, SSE event streams, and a React workbench.
 
+The repository has three clear code boundaries:
+
+```text
+runtime/ + executables/ + roles/   AICU Runtime backend
+frontend/                           React/Vite web workbench
+backend/                            Independent Flask backend module
+```
+
+The AICU Runtime is the core backend and is started by `main.py`; `frontend/` is its web workbench. The repository's `backend/` directory is an independent backend module outside the Runtime startup path and has its own dependencies and entry point.
+
 An AICU is one execution unit in the graph. When an AICU node is created, it receives a role configuration, task configuration, and execution parameters, then performs its work through a configured AI coding CLI.
 
 ```text

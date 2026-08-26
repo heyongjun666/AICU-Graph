@@ -65,11 +65,16 @@
 
 ---
 
-## 二、两大子系统
+## 二、系统组成
 
-| 子系统 | 代码位置 | 是什么 |
+| 层次 | 代码位置 | 职责 |
 |---|---|---|
-| **① AICU 多 Agent 编排框架** | `runtime/` `executables/` `roles/` `aicu.py` `claude_code_agent.py` `main.py` `frontend/src/`（工作台部分）`tests/` | 项目主体。核心价值所在，本文档 90% 篇幅讲它。 |
+| **Runtime 后端** | `runtime/` `executables/` `roles/` `aicu.py` `claude_code_agent.py` `main.py` | 会话管理、组织图、任务规划、调度、事件路由、产物交付和 CLI 执行。 |
+| **Web 前端** | `frontend/` | React/Vite 工作台，负责图可视化、会话管理、节点详情、事件流和运行配置。 |
+| **辅助后端模块** | `backend/` | 独立的 Flask 应用模块，提供 CSV 数据层及其 API；不属于 AICU Runtime 的核心启动链路。 |
+| **测试与文档** | `tests/` `docs/` | 验证核心运行时、适配器和前端行为，记录安装与架构说明。 |
+
+AICU-Graph 的核心运行服务由 `main.py` 启动，使用 `runtime/` 提供的 FastAPI、SSE 和任务执行能力；`frontend/` 是对应的 Web 工作台。`backend/` 保留为仓库中的独立后端模块，使用时应按其自身入口和依赖运行。
 
 ---
 
@@ -87,7 +92,7 @@
 | `.codegraph/` | CodeGraph 代码图谱索引 | 构建 |
 | `events.json` `review_v*.md` `test_report.md` 等根级文件 | 运行/测试痕迹 | 运行/测试 |
 
-真正的源码只有：`runtime/` `executables/` `roles/` `aicu.py` `claude_code_agent.py` `main.py` `conftest.py` `run_tests.py` `frontend/src/` `docs/` `tests/` 及根级 `test_*.py` `e2e_*.py`。
+项目源码包括：`runtime/` `executables/` `roles/` `aicu.py` `claude_code_agent.py` `main.py` `frontend/` `backend/` `docs/` `tests/`、`conftest.py`、`run_tests.py` 及根级测试脚本；运行时目录和构建产物不属于源码。
 
 ---
 
@@ -546,6 +551,16 @@
 | `frontend/src/utils/` `dagreLayout.ts` `sseEventMapper.ts` `eventBuffer.ts` `layoutCache.ts` `api.ts` | 布局/事件映射/缓冲/API 工具 |
 | `frontend/src/hooks/` | `useGraphOptimizations` / `useNodeVisibility` / `usePerformanceMode` |
 | `frontend/src/infra/` | 前端基础设施 API 与运行时接口 |
+
+### 10.9 backend/（独立 Flask 后端模块）
+
+| 文件 | 职责 |
+|---|---|
+| `backend/app.py` `backend/config.py` | Flask 应用工厂与配置 |
+| `backend/api/` | API 蓝图，包括认证、文章、标签、统计、上传、RSS 和健康检查 |
+| `backend/tests/test_api.py` | Flask 后端模块测试 |
+
+`backend/` 与 `main.py` 启动的 AICU Runtime 相互独立。需要运行该模块时，应安装 `backend/requirements.txt` 并使用其自身入口；它不是 README 快速启动流程的一部分。
 
 ---
 

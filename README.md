@@ -165,8 +165,6 @@ EXEC_MODE=stub python main.py
 
 - [Installation, configuration, and startup](docs/INSTALL.md)
 - [Architecture](docs/ARCHITECTURE.md)
-- [Frontend and example blog guide](docs/user_guide.md)
-- [Communication architecture plan](docs/plan_v3.1_communication.md)
 
 This README is the project overview and entry point. API details, runtime directories, credential management, CLI adapters, and troubleshooting belong in `docs/`.
 

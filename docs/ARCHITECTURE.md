@@ -6,7 +6,7 @@
 > 3. 知道每个代码文件分别实现了什么；
 > 4. **当你想调整某个功能时，能直接定位到需要读取/修改的文件**，不必把项目所有文件都遍历一遍。
 >
-> 配套文档：`docs/plan_v3.1_communication.md`（V3.1 通信架构迭代规划）、`docs/user_guide.md`（用户操作指南）。
+> 配套文档：`docs/INSTALL.md`（安装与配置）。
 
 ---
 
@@ -41,7 +41,6 @@
   - [10.6 roles/（数据驱动配置）](#106-roles数据驱动配置)
   - [10.7 tests/ 与根级测试脚本](#107-tests-与根级测试脚本)
   - [10.8 frontend/（Vite+React 工作台）](#108-frontendvite-react-工作台)
-  - [10.9 backend/（博客平台组合层）](#109-backend博客平台组合层)
 - [十一、新手修改指南：想改 X → 读 Y](#十一新手修改指南想改-x--读-y)
 - [十二、环境变量与功能开关总表](#十二环境变量与功能开关总表)
 - [十三、端到端一次运行的真实时序](#十三端到端一次运行的真实时序)
@@ -53,14 +52,12 @@
 
 本项目名为 **AICU v5（AI Coding Universe 第五版）**，是一个**多 Agent 软件研发编排框架**：
 
-- 用户提交一个研发任务（例如"做一个博客系统"）；
+- 用户提交一个软件研发任务；
 - 系统自动生成一棵 **Manager / Worker 的 Agent 组织树**：
   - **Manager** 负责**规划**（expand）与**评审**（review）两层工作，不做具体编码；
   - **Worker** 负责**产出具体产物**（代码 / 文档 / 测试报告 / 配置……）；
 - 树上的节点通过 **Event 事件总线**互相通信（Worker→Worker / Worker→Manager / Manager→Worker / Manager→Manager），形成一个协作闭环：开发 → 测试反馈 bug → 开发修复 → 测试复验 → 全部通过 → 交付；
 - 每一步的真实执行由 **AI 编程 Agent** 完成：`executables/` 负责把任务翻译成提示词喂给 AI，AI 在隔离的 `workspaces/{id}/cc_0/` 工作目录里真实读写文件、运行命令。
-
-除此之外，项目里还附带一个 **Markdown 博客平台**（`backend/` Flask 后端 + `frontend/src/blog/` 前端），它是框架"产出物"的一个演示例子，不是一个独立的完整产品（见第二节）。
 
 ### 一句话总结
 
@@ -73,9 +70,6 @@
 | 子系统 | 代码位置 | 是什么 |
 |---|---|---|
 | **① AICU 多 Agent 编排框架** | `runtime/` `executables/` `roles/` `aicu.py` `claude_code_agent.py` `main.py` `frontend/src/`（工作台部分）`tests/` | 项目主体。核心价值所在，本文档 90% 篇幅讲它。 |
-| **② Markdown 博客平台（示例产物）** | `backend/`（Flask API）+ `frontend/src/blog/`（React 博客 UI） | 一个"任务产物"的演示。后端只做**组合层**（路由 + 转发），数据/鉴权/统计/Markdown 引擎等"能力引擎"原本由 AICU 的 Worker 在工作区里产出，快照未保留。 |
-
-**注意**：`backend/` 不是框架的一部分。改框架的人可以完全忽略它。
 
 ---
 
@@ -93,7 +87,7 @@
 | `.codegraph/` | CodeGraph 代码图谱索引 | 构建 |
 | `events.json` `review_v*.md` `test_report.md` 等根级文件 | 运行/测试痕迹 | 运行/测试 |
 
-真正的源码只有：`runtime/` `executables/` `roles/` `aicu.py` `claude_code_agent.py` `main.py` `conftest.py` `run_tests.py` `frontend/src/` `backend/`（框架外）`docs/` `tests/` 及根级 `test_*.py` `e2e_*.py`。
+真正的源码只有：`runtime/` `executables/` `roles/` `aicu.py` `claude_code_agent.py` `main.py` `conftest.py` `run_tests.py` `frontend/src/` `docs/` `tests/` 及根级 `test_*.py` `e2e_*.py`。
 
 ---
 
@@ -426,7 +420,6 @@
 | 17 | React 工作台前端（图可视化 + 会话管理 + 事件流） | `frontend/src/` | — |
 | 18 | 崩溃恢复（graph.json 快照 + sessions.json + 事件确定性重投） | `runtime/persistence.py` `runtime/session_manager.py` `agent_events._redeliver_routed_locked` | — |
 | 19 | stub/real 双执行模式 | `executables/default_stub.py` `EXEC_MODE` | `EXEC_MODE=stub\|real` |
-| 20 | 博客平台演示（组合层） | `backend/` `frontend/src/blog/` | 独立子系统 |
 | 21 | **事件格式校验 + 拒收反馈（content 非空字符串）** | `runtime/agent_events.py` `_prepare_event_raws`/`_reject_event` | 默认开 |
 | 22 | **手动建节点 + 依赖边编辑（link-candidates）** | `runtime/runtime.py` `create_manual_node`/`add_dependency`/`get_link_candidates`、`session_server.py` | — |
 | 23 | **外部输入等待/投递（external-input）** | `runtime/runtime.py` `register_external_input_wait`/`deliver_external_input`、`server.py` | — |
@@ -449,10 +442,8 @@
 | `claude_code_agent.py` | **AI Coding CLI 程序化封装**：多轮对话（--resume）、stdin 提示、超时 killpg、`CCExecutionError` |
 | `conftest.py` | pytest 根级 fixture（stub 模式、临时工作区等） |
 | `run_tests.py` | **自包含集成测试编排器**：跑 144 个测试（Models 30 / Graph 25 / StateMachine 30 / Planner 20 / Persistence 10 / EventBus 10 / SSEManager 6 / Registry 3 / Integration 10），产出 `test_report.md` |
-| `docs/plan_v3.1_communication.md` | V3.1 通信与双图架构的规划记录（迭代进度） |
-| `docs/user_guide.md` | 用户操作指南 |
 | `e2e_*.py`（6 个） | 端到端 stub 场景：`e2e_abc.py`（A 修复闭环 / B 跨 Manager 协作 / C 预算拦截）、`e2e_routing_feedback.py`（backend bug→test 反馈→修复→复验）、`e2e_revise.py`、`e2e_session_delivery.py`、`e2e_session_shared.py`、`e2e_shared_ws_smoke.py` |
-| `test_*_e2e.py`（根级，真实模型 harness） | 真实 AI 联调：`test_codegraph_value_e2e.py`、`test_routing_e2e.py`、`test_v2_e2e.py`、`test_manager_collab_e2e.py`、`test_csv_blog.py`、`test_v2_manager_expand.py`、`test_step1.py`、`test_step2.py` |
+| `test_*_e2e.py`（根级，真实模型 harness） | 真实 AI 联调：`test_codegraph_value_e2e.py`、`test_routing_e2e.py`、`test_v2_e2e.py`、`test_manager_collab_e2e.py`、`test_v2_manager_expand.py`、`test_step1.py`、`test_step2.py` |
 | `repro_*.py` `rerun_integration.py` `restart_e2e.py` `resume_manager_collab_e2e.py` `retry_failed.py` `analyze_tool_usage.py` | 调试/复现辅助脚本（非核心） |
 
 ### 10.2 runtime/
@@ -554,22 +545,7 @@
 | `frontend/src/components/mdeditor/` | Markdown 编辑器（编辑/预览/图片上传/自动保存） |
 | `frontend/src/utils/` `dagreLayout.ts` `sseEventMapper.ts` `eventBuffer.ts` `layoutCache.ts` `api.ts` | 布局/事件映射/缓冲/API 工具 |
 | `frontend/src/hooks/` | `useGraphOptimizations` / `useNodeVisibility` / `usePerformanceMode` |
-| `frontend/src/infra/` | 基础设施 API（后端 blog 用） |
-| `frontend/src/blog/` | 博客平台 UI（`components/` `stats/` `types.ts` `api.ts`） |
-
-### 10.9 backend/（博客平台组合层）
-
-| 文件 | 职责 |
-|---|---|
-| `backend/app.py` `config.py` | Flask 应用装配与配置 |
-| `backend/api/articles.py` | 文章 CRUD 路由 |
-| `backend/api/auth.py` `auth_helpers.py` | 鉴权 |
-| `backend/api/stats.py` | 统计 |
-| `backend/api/tags.py` | 标签 |
-| `backend/api/upload.py` | 上传 |
-| `backend/api/rss.py` | RSS |
-| `backend/api/health.py` | 健康检查 |
-| `backend/tests/test_api.py` | 组合层测试 |
+| `frontend/src/infra/` | 前端基础设施 API 与运行时接口 |
 
 ---
 
@@ -706,4 +682,4 @@
 
 ---
 
-*文档完。遇到新功能迭代，请优先同步更新 `docs/plan_v3.1_communication.md`（V3.1 规划）与本文档第十节映射表，保持文档与代码同轨。*
+*文档完。遇到新功能迭代，请同步更新本文档的架构说明与文件职责映射，保持文档与代码同轨。*

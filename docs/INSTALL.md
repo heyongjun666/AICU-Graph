@@ -1,7 +1,7 @@
 # AICU v5 安装与部署文档
 
 > 本文档介绍如何在一台新机器上安装并启动 **AICU v5（AI Coding Universe 第五版）多 Agent 软件研发编排框架**。
-> 配套文档：`docs/ARCHITECTURE.md`（架构详解）、`docs/user_guide.md`（示例博客平台用户手册）、`docs/plan_v3.1_communication.md`（通信架构迭代规划）。
+> 配套文档：[docs/ARCHITECTURE.md](ARCHITECTURE.md)（架构详解）。
 
 ---
 
@@ -9,7 +9,7 @@
 
 AICU 是一个**多 Agent 软件研发编排框架**：
 
-- 用户提交一个研发任务（例如"做一个博客系统"）；
+- 用户提交一个软件研发任务；
 - 系统自动生成一棵 **Manager / Worker 的 Agent 组织树**；
 - 节点通过 **Event 事件总线**互相通信，形成「开发 → 测试反馈 → 修复 → 复验 → 交付」的协作闭环；
 - 每一步真实执行由 **AI 编程 Agent** 通过终端 CLI 完成，在隔离工作目录里真实读写文件、运行命令。
@@ -45,7 +45,6 @@ final_solution/
 ├── executables/          # 执行体（Manager/Worker）
 ├── roles/                # 18 个角色定义（Manager/Worker/system_role 的 YAML）
 ├── frontend/             # React 工作台（graph-viewer，可选）
-├── backend/              # 示例产物：Markdown 博客平台（框架外，非必需）
 ├── docs/                 # 文档
 └── tests/                # 测试套件
 ```
@@ -173,7 +172,7 @@ curl http://localhost:8080/v1/roles
 # 1. 创建会话（提交研发任务）
 curl -X POST http://localhost:8080/v1/sessions \
   -H "Content-Type: application/json" \
-  -d '{"task": "做一个博客系统", "title": "demo"}'
+  -d '{"task": "实现一个需要多阶段协作的软件功能", "title": "demo"}'
 
 # 返回 {"id": "<session_id>", ...}
 

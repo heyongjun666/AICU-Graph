@@ -165,8 +165,6 @@ EXEC_MODE=stub python main.py
 
 - [安装、配置与启动](docs/INSTALL.md)
 - [系统架构](docs/ARCHITECTURE.md)
-- [前端与示例博客说明](docs/user_guide.md)
-- [通信架构规划](docs/plan_v3.1_communication.md)
 
 README 只介绍项目定位和主要使用入口。API 细节、运行时目录、凭证管理、CLI 适配和故障排查以 `docs/` 中的文档为准。
 

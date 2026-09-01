@@ -57,20 +57,40 @@ function mapExecType(execType: unknown): 'M' | 'W' | undefined {
  */
 function mapNodePayload(raw: Record<string, unknown>): Partial<GraphNode> {
   const out: Partial<GraphNode> = {};
-  if (raw.id !== undefined) out.id = raw.id as string;
+  const rawId = raw.id ?? raw.node_id;
+  if (typeof rawId === 'string') out.id = rawId;
   if (raw.label !== undefined) {
     out.label = raw.label as string;
-  } else if (raw.id !== undefined) {
+  } else if (typeof rawId === 'string') {
     // 后端不带 label 时用 id + role 合成
-    out.label = `${raw.role || raw.exec_type || 'node'} ${(raw.id as string).slice(0, 8)}`;
+    out.label = `${raw.role || raw.exec_type || 'node'} ${rawId.slice(0, 8)}`;
   }
   const et = mapExecType(raw.exec_type);
   if (et) out.exec_type = et;
-  if (raw.parent_id !== undefined) out.parent_id = (raw.parent_id as string | null);
+  if (raw.parent_id !== undefined) out.parent_id = raw.parent_id as string | null;
   if (raw.role !== undefined) out.role = raw.role as string;
   if (raw.task !== undefined) out.task = raw.task as string;
   if (raw.status !== undefined) out.status = raw.status as any;
   if (raw.config !== undefined) out.config = raw.config as any;
+  if (raw.manager_phase !== undefined) out.manager_phase = raw.manager_phase as string | null;
+  if (raw.created_at !== undefined) out.created_at = raw.created_at as string | null;
+  if (raw.started_at !== undefined) out.started_at = raw.started_at as string | null;
+  if (raw.finished_at !== undefined) out.finished_at = raw.finished_at as string | null;
+  if (raw.artifact_path !== undefined) out.artifact_path = raw.artifact_path as string | null;
+  if (raw.error !== undefined) {
+    out.error = raw.error === null
+      ? null
+      : typeof raw.error === 'string'
+        ? raw.error
+        : String((raw.error as Record<string, unknown>)?.message || raw.error);
+  }
+  if (raw.cc_activity !== undefined) out.cc_activity = raw.cc_activity as GraphNode['cc_activity'];
+  if (raw.iteration !== undefined) out.iteration = raw.iteration as number;
+  if (raw.iteration_count !== undefined) out.iteration = raw.iteration_count as number;
+  if (raw.max_iterations !== undefined) out.max_iterations = raw.max_iterations as number;
+  if (raw.dependencies !== undefined) out.dependencies = raw.dependencies as string[];
+  if (raw.dependents !== undefined) out.dependents = raw.dependents as string[];
+  if (raw.children !== undefined) out.children = raw.children as string[];
   return out;
 }
 

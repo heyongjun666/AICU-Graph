@@ -152,6 +152,11 @@ class Runtime(RuntimeGateway, SchedulerDelegate):
     # Lifecycle
     # ========================================================================
 
+    def _ensure_scheduler_running(self) -> None:
+        """Restart the idle scheduler after a legal graph mutation."""
+        if not self._shutdown:
+            self.scheduler.start()
+
     def start(self, *, paused: bool = False, safe_recovery: bool = False) -> None:
         """启动 Runtime。
 
@@ -262,7 +267,7 @@ class Runtime(RuntimeGateway, SchedulerDelegate):
 
         # 恢复 Agent 事件日志（重启后继续去重/重放；遗留发布文件由调度线程 scan 摄取）
         try:
-            self.agent_events.load()
+            self.agent_events.load(recover_delivery=False)
         except Exception as exc:  # noqa: BLE001
             logger.error("Failed to load agent events: %s", exc)
 
@@ -565,7 +570,7 @@ class Runtime(RuntimeGateway, SchedulerDelegate):
             self._root_manager_id = node.id
 
         # 确保 Scheduler 运行以调度新节点
-        self.scheduler.start()
+        self._ensure_scheduler_running()
 
         logger.info("Root manager created: node_id=%s", node.id)
         return node.id
@@ -614,6 +619,7 @@ class Runtime(RuntimeGateway, SchedulerDelegate):
         logger.info(
             "Plan injected: parent=%s, nodes=%d", parent_node_id, len(nodes)
         )
+        self._ensure_scheduler_running()
         return nodes
 
     def submit_fix_plan(
@@ -1575,6 +1581,10 @@ class Runtime(RuntimeGateway, SchedulerDelegate):
             logger.error("flush_node_events(%s) failed: %s", node_id, exc)
             return 0
 
+    def recover_agent_events(self) -> None:
+        """Recover this session's persisted event delivery after dispatch opens."""
+        self.agent_events.recover_pending()
+
     def scan_agent_events(self) -> int:
         """扫描所有节点事件发布入口并路由投递（调度线程 tick 调用）。"""
         try:
@@ -1736,6 +1746,38 @@ class Runtime(RuntimeGateway, SchedulerDelegate):
                 event=metadata.get("event"),
                 task=metadata.get("task"),
             ),
+        )
+
+    def log_cc_lifecycle(
+        self,
+        node_id: str,
+        cc_id: str,
+        event: str,
+        *,
+        phase: Optional[str] = None,
+        task: Optional[str] = None,
+        level: LogLevel = LogLevel.INFO,
+    ) -> None:
+        """Append one concise, structured CC lifecycle fact to Node Log."""
+        messages = {
+            "cc_received": "CC received task",
+            "cc_started": "CC started task",
+            "cc_handoff": "CC handed off result",
+            "cc_completed": "CC completed task",
+            "cc_failed": "CC failed task",
+            "cc_paused": "CC paused",
+            "cc_resumed": "CC resumed",
+        }
+        if event not in messages:
+            raise ValueError(f"Unsupported CC lifecycle event: {event}")
+        self.append_node_log(
+            node_id,
+            level,
+            messages[event],
+            cc_id=cc_id,
+            phase=phase,
+            event=event,
+            task=task,
         )
 
     def update_cc_activity(
@@ -2081,11 +2123,7 @@ class Runtime(RuntimeGateway, SchedulerDelegate):
             return file.read()
 
     def get_graph_snapshot(self) -> dict:
-        """获取 Graph 快照（序列化为可 JSON 的 dict）。
-
-        Returns:
-            dict: nodes 列表、edges 列表、stats。
-        """
+        """获取 Graph 快照（序列化为可 JSON 的 dict）。"""
         nodes = []
         for n in self.graph.all_nodes():
             nodes.append({
@@ -2095,10 +2133,21 @@ class Runtime(RuntimeGateway, SchedulerDelegate):
                 "parent_id": n.parent_id,
                 "role": n.role,
                 "task": n.task,
+                "task_summary": n.task_summary,
                 "status": n.status.value if isinstance(n.status, NodeStatus) else str(n.status),
                 "manager_phase": n.manager_phase,
-                # 携带 config（剥离 _ 前缀内部键，与 _node_detail 展示一致）。
-                # 此前快照缺 config：前端 SSE 图刷新 batchUpdate 整体替换节点 → Configuration 被清空。
+                "created_at": n.created_at.isoformat() if n.created_at else None,
+                "started_at": n.started_at.isoformat() if n.started_at else None,
+                "finished_at": n.finished_at.isoformat() if n.finished_at else None,
+                "artifact_path": n.artifact_path,
+                "error": n.error.format_for_frontend() if n.error else None,
+                "cc_activity": n.cc_activity or {},
+                "iteration": n.iteration_count,
+                "iteration_count": n.iteration_count,
+                "max_iterations": n.max_iterations,
+                "dependencies": [item.id for item in self.graph.dependencies(n.id)],
+                "dependents": [item.id for item in self.graph.dependents(n.id)],
+                "children": [item.id for item in self.graph.children(n.id)],
                 "config": {
                     key: value for key, value in (n.config or {}).items()
                     if not key.startswith("_")
@@ -2114,8 +2163,7 @@ class Runtime(RuntimeGateway, SchedulerDelegate):
                 "from_node": e.from_node,
                 "to_node": e.to_node,
             })
-        stats = self.graph.get_stats()
-        return {"nodes": nodes, "edges": edges, "stats": stats}
+        return {"nodes": nodes, "edges": edges, "stats": self.graph.get_stats()}
 
     def update_node_task(self, node_id: str, task: str) -> None:
         """更新节点的 task 描述。
@@ -2144,8 +2192,7 @@ class Runtime(RuntimeGateway, SchedulerDelegate):
         """Create a waiting node and its optional parent/dependency edges."""
         # PlanValidator exec_type↔role 一致性：建节点前拦截（roles_dir 未注入时跳过）
         self._validate_manual_role(exec_type, role)
-        if parent_id and self.graph.get_node(parent_id) is None:
-            raise ValueError(f"Parent node '{parent_id}' not found")
+        self.graph.validate_parent(None, parent_id)
         dependencies = dependencies or []
         for dependency_id in dependencies:
             if self.graph.get_node(dependency_id) is None:
@@ -2185,6 +2232,7 @@ class Runtime(RuntimeGateway, SchedulerDelegate):
         except Exception:
             self.graph.remove_node(node.id)
             raise
+        self._ensure_scheduler_running()
         return node
 
     def update_manual_node(self, node_id: str, **updates: Any) -> Node:
@@ -2198,6 +2246,12 @@ class Runtime(RuntimeGateway, SchedulerDelegate):
             )
         allowed = {"task", "role", "exec_type", "config"}
         safe_updates = {key: value for key, value in updates.items() if key in allowed}
+        if "exec_type" in safe_updates or "role" in safe_updates:
+            self._validate_manual_role(
+                safe_updates.get("exec_type", node.exec_type),
+                safe_updates.get("role", node.role),
+            )
+        self.graph.validate_parent(node_id, node.parent_id)
         if safe_updates:
             self.graph.update_node(node_id, **safe_updates)
         return self.graph.get_node(node_id)
@@ -2219,7 +2273,8 @@ class Runtime(RuntimeGateway, SchedulerDelegate):
                 "label": f"{node.role or node.exec_type} {node.id[:8]}",
                 "task": node.task,
                 "status": node.status.value,
-                "eligible_as_parent": not creates_cycle,
+                "exec_type": node.exec_type,
+                "eligible_as_parent": node.exec_type == "manager" and not creates_cycle,
                 "eligible_as_dependency": not creates_cycle,
                 "reachable": bool(
                     node_id and self._is_reachable(node.id, node_id)
@@ -2270,6 +2325,7 @@ class Runtime(RuntimeGateway, SchedulerDelegate):
         if edge.type != EdgeType.DEPENDENCY:
             raise RuntimeError("Parent edges cannot be removed directly")
         self.graph.remove_edge(edge_id)
+        self._ensure_scheduler_running()
 
     def delete_manual_node(self, node_id: str) -> None:
         """Delete a leaf node.
@@ -2342,6 +2398,10 @@ class Runtime(RuntimeGateway, SchedulerDelegate):
                             ),
                             "message": log_entry.message,
                             "ts": str(log_entry.ts),
+                            "cc_id": getattr(log_entry, "cc_id", None),
+                            "phase": getattr(log_entry, "phase", None),
+                            "event": getattr(log_entry, "event", None),
+                            "task": getattr(log_entry, "task", None),
                         },
                     )
                     self.event_bus.publish(log_event)

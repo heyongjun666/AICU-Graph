@@ -86,7 +86,8 @@ class Planner:
         Raises:
             PlanValidationError: 校验失败，Graph 不会被修改。
         """
-        # 1. 校验
+        # 1. 校验父节点关系和计划；在分配 ID 或写图前完成全部确定性检查。
+        self._graph.validate_parent(None, parent_node_id)
         errors = self.validate_plan(plan)
         if errors:
             raise PlanValidationError(errors)
@@ -172,7 +173,8 @@ class Planner:
         Raises:
             PlanValidationError: 校验失败，Graph 不会被修改。
         """
-        # 1. 校验（任何图变更前拦截）
+        # 1. 校验父节点关系和计划（任何图变更前拦截）。
+        self._graph.validate_parent(None, parent_node_id)
         errors = self.validate_plan(plan)
         if errors:
             raise PlanValidationError(errors)

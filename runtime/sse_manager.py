@@ -164,35 +164,50 @@ class SSEManager:
         Returns:
             graph_updated 类型 SSEEvent。
         """
-        graph = runtime.graph
-        nodes = []
-        for n in graph.all_nodes():
-            nodes.append({
-                "id": n.id,
-                "label": f"{n.role or n.exec_type} {n.id[:8]}",
-                "exec_type": n.exec_type,
-                "parent_id": n.parent_id,
-                "role": n.role,
-                "task": n.task,
-                "status": n.status.value if hasattr(n.status, 'value') else str(n.status),
-                "manager_phase": n.manager_phase,
-                # 携带 config（剥离 _ 前缀内部键），保证图快照刷新不冲掉前端 Configuration。
-                "config": {
-                    key: value for key, value in (n.config or {}).items()
-                    if not key.startswith("_")
-                },
-            })
-        edges = []
-        for e in graph.all_edges():
-            edges.append({
-                "id": e.id,
-                "source": e.from_node,
-                "target": e.to_node,
-                "type": e.type.value if hasattr(e.type, 'value') else str(e.type),
-                "from_node": e.from_node,
-                "to_node": e.to_node,
-            })
-        stats = graph.get_stats()
+        snapshot_builder = getattr(runtime, "get_graph_snapshot", None)
+        if callable(snapshot_builder):
+            snapshot = snapshot_builder()
+            nodes = snapshot.get("nodes", [])
+            edges = snapshot.get("edges", [])
+            stats = snapshot.get("stats", {})
+        else:
+            # Keep compatibility with lightweight Runtime doubles and older
+            # integrations while production Runtime supplies the full schema.
+            graph = runtime.graph
+            nodes = [
+                {
+                    "id": node.id,
+                    "label": f"{node.role or node.exec_type} {node.id[:8]}",
+                    "exec_type": node.exec_type,
+                    "parent_id": node.parent_id,
+                    "role": node.role,
+                    "task": node.task,
+                    "status": node.status.value
+                    if hasattr(node.status, "value")
+                    else str(node.status),
+                    "manager_phase": node.manager_phase,
+                    "config": {
+                        key: value
+                        for key, value in (node.config or {}).items()
+                        if not key.startswith("_")
+                    },
+                }
+                for node in graph.all_nodes()
+            ]
+            edges = [
+                {
+                    "id": edge.id,
+                    "source": edge.from_node,
+                    "target": edge.to_node,
+                    "type": edge.type.value
+                    if hasattr(edge.type, "value")
+                    else str(edge.type),
+                    "from_node": edge.from_node,
+                    "to_node": edge.to_node,
+                }
+                for edge in graph.all_edges()
+            ]
+            stats = graph.get_stats()
 
         event = SSEEvent(
             event_type="graph_updated",

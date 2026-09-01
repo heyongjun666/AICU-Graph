@@ -3,12 +3,13 @@ import { X } from 'lucide-react';
 import { SessionSummary } from '../types';
 import { updateSessionSettings } from '../utils/api';
 import { useI18n } from '../i18n';
+import { useUIStateStore } from '../stores/UIStateStore';
 
 interface SessionWorkspaceDialogProps {
   open: boolean;
   session: SessionSummary | null;
   onClose: () => void;
-  onSaved: () => void;
+  onSaved: () => void | Promise<void>;
 }
 
 const SessionWorkspaceDialog: React.FC<SessionWorkspaceDialogProps> = ({
@@ -21,6 +22,15 @@ const SessionWorkspaceDialog: React.FC<SessionWorkspaceDialogProps> = ({
   const [workspaceRoot, setWorkspaceRoot] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
+  const addToast = useUIStateStore((state) => state.addToast);
+
+  const refreshAfterSave = async () => {
+    try {
+      await onSaved();
+    } catch {
+      addToast({ type: 'warning', message: t('settings.sessionRefreshFailed') });
+    }
+  };
 
   useEffect(() => {
     if (open && session) {
@@ -38,7 +48,7 @@ const SessionWorkspaceDialog: React.FC<SessionWorkspaceDialogProps> = ({
     try {
       await updateSessionSettings(session.id, {}, workspaceRoot.trim() || undefined);
       onClose();
-      onSaved();
+      await refreshAfterSave();
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : String(reason));
     } finally {

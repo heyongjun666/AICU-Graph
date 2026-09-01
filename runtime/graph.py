@@ -184,6 +184,36 @@ class Graph:
                 self._bump_structure()
         self._trigger_mutation("update_node", node_id=node_id, **updates)
 
+    def validate_parent(
+        self, child_id: Optional[str], parent_id: Optional[str]
+    ) -> None:
+        """Validate an organizational parent relationship without mutation.
+
+        Explicit parents must be existing Manager nodes.  ``None`` remains
+        valid for legacy manually-created root nodes and restore data.
+        """
+        if parent_id is None:
+            return
+        with self._lock:
+            parent = self.nodes.get(parent_id)
+            if parent is None:
+                raise ValueError(f"Parent node '{parent_id}' not found")
+            if parent.exec_type != "manager":
+                raise ValueError(f"Parent node '{parent_id}' must be a Manager")
+            if child_id is None:
+                return
+            if child_id == parent_id:
+                raise ValueError("A node cannot be its own parent")
+
+            cursor = parent_id
+            visited: set[str] = set()
+            while cursor and cursor not in visited:
+                if cursor == child_id:
+                    raise ValueError("Parent relationship would create a cycle")
+                visited.add(cursor)
+                ancestor = self.nodes.get(cursor)
+                cursor = ancestor.parent_id if ancestor is not None else None
+
     def append_log(self, node_id: str, entry: object) -> None:
         with self._lock:
             node = self.nodes.get(node_id)

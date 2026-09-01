@@ -45,6 +45,8 @@ const ToastItem: React.FC<{ toast: Toast; onRemove: (id: string) => void }> = ({
 
   return (
     <div
+      role={toast.type === 'error' ? 'alert' : 'status'}
+      aria-live={toast.type === 'error' ? 'assertive' : 'polite'}
       style={{
         padding: '8px 14px',
         borderRadius: 8,
@@ -92,6 +94,7 @@ const ToastContainer: React.FC = () => {
 
   return (
     <div
+      aria-live="polite"
       style={{
         position: 'fixed',
         top: 16,

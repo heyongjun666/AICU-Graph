@@ -45,15 +45,40 @@ const SSEProvider: React.FC<SSEProviderProps> = ({ children, sessionId }) => {
   const handleLogEvent = useCallback((event: Event) => {
     const messageEvent = event as MessageEvent<string>;
     try {
-      const payload = JSON.parse(messageEvent.data) as Partial<LogEntry> & { node_id?: string; ts?: string };
-      if (!payload.node_id || !payload.message) return;
-      const sequenceId = Number(messageEvent.lastEventId);
-      appendNodeLog(payload.node_id, {
-        id: Number.isFinite(sequenceId) && sequenceId > 0 ? sequenceId : Date.now(),
-        node_id: payload.node_id,
-        level: (payload.level || LogLevel.INFO) as LogLevel,
-        message: payload.message,
-        timestamp: payload.ts || new Date().toISOString(),
+      const parsed: unknown = JSON.parse(messageEvent.data);
+      const payloads = Array.isArray(parsed) ? parsed : [parsed];
+      payloads.forEach((rawPayload) => {
+        if (!rawPayload || typeof rawPayload !== 'object') return;
+        const payload = rawPayload as Record<string, unknown>;
+        const nodeId = payload.node_id;
+        const message = payload.message;
+        if (typeof nodeId !== 'string' || !nodeId || typeof message !== 'string' || !message) return;
+
+        const rawLevel = payload.level;
+        const level = typeof rawLevel === 'string' &&
+          (Object.values(LogLevel) as string[]).includes(rawLevel)
+          ? rawLevel as LogLevel
+          : LogLevel.INFO;
+        const rawTimestamp = payload.timestamp ?? payload.ts;
+        const timestamp = typeof rawTimestamp === 'string'
+          ? rawTimestamp
+          : new Date().toISOString();
+        const rawId = payload.id;
+        const parsedId = typeof rawId === 'number'
+          ? rawId
+          : typeof rawId === 'string' && rawId.trim() ? Number(rawId) : NaN;
+
+        appendNodeLog(nodeId, {
+          id: Number.isFinite(parsedId) && parsedId > 0 ? parsedId : undefined,
+          node_id: nodeId,
+          level,
+          message,
+          timestamp,
+          cc_id: typeof payload.cc_id === 'string' ? payload.cc_id : null,
+          phase: typeof payload.phase === 'string' ? payload.phase : null,
+          event: typeof payload.event === 'string' ? payload.event : null,
+          task: typeof payload.task === 'string' ? payload.task : null,
+        });
       });
     } catch {
       // Ignore malformed events; the next graph refresh remains authoritative.

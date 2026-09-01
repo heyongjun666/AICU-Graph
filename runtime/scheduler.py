@@ -110,6 +110,9 @@ class Scheduler:
         # 自动重试状态
         self._retry_attempts: dict[str, int] = {}  # original_node_id -> attempt count
         self._scheduled_retries: dict[str, float] = {}  # retry_node_id -> ready_time
+        # Session event recovery is performed once by the owning Scheduler,
+        # after its pause gate has been checked.
+        self._event_recovery_done = False
 
         # 升级台账：无法自动收敛时记录结构化升级信号（不静默继续循环）。
         # 最终由 closed_loop 业务产物消费，使交付审计可见"存在未闭合协作"。
@@ -257,10 +260,31 @@ class Scheduler:
     # Tick 循环
     # ========================================================================
 
+    def _recover_pending_events_once(self) -> None:
+        if self._event_recovery_done:
+            return
+        recover = getattr(self.runtime_gateway, "recover_agent_events", None)
+        if not callable(recover):
+            self._event_recovery_done = True
+            return
+        try:
+            recover()
+        except Exception as exc:  # noqa: BLE001
+            logger.error("Agent event recovery failed: %s", exc)
+        finally:
+            self._event_recovery_done = True
+
     def _tick_loop(self) -> None:
         """主 tick 循环，在独立后台线程中运行。"""
         while self._running and not self._stop_event.is_set():
             try:
+                # Event recovery belongs to this session's active Scheduler, not
+                # Runtime event-log loading. Paused recovery never reaches here.
+                with self._state_lock:
+                    paused = self._paused
+                if not paused:
+                    self._recover_pending_events_once()
+
                 # 检查是否应自动停止（无 Ready/Running/Waiting 节点）
                 # Waiting 节点也包括在内，因为它们需要被处理为 Ready
                 stats = self.graph.get_stats()

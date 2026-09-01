@@ -49,7 +49,7 @@ interface GraphActions {
   updateNode: (id: string, updates: Partial<GraphNode>) => void;
   /** 删除单个节点 */
   removeNode: (id: string) => void;
-  /** 批量更新节点（全量替换） */
+  /** 批量应用图快照；节点按字段合并，快照外节点按全量语义移除 */
   batchUpdate: (nodes: GraphNode[], edges: GraphEdge[]) => void;
   /** 收起所有 Manager 子树 */
   collapseAll: () => void;
@@ -80,6 +80,57 @@ interface GraphActions {
 }
 
 type GraphStore = GraphState & GraphActions;
+
+/** Merge only fields explicitly supplied by a backend patch. */
+function mergeNodeFields(
+  existing: GraphNode | undefined,
+  incoming: Partial<GraphNode>,
+): GraphNode {
+  if (!existing) return { ...incoming } as GraphNode;
+  const merged = { ...existing } as Record<string, unknown>;
+  for (const [key, value] of Object.entries(incoming)) {
+    // undefined means "not included in this sparse payload"; null is an
+    // intentional clear and must therefore be retained.
+    if (value !== undefined) merged[key] = value;
+  }
+  return merged as unknown as GraphNode;
+}
+
+function logKey(entry: LogEntry, nodeId: string): string {
+  if (entry.id !== undefined && entry.id !== null && Number.isFinite(entry.id) && entry.id > 0) {
+    return `server:${nodeId}:${entry.id}`;
+  }
+  return `content:${JSON.stringify([
+    nodeId,
+    entry.timestamp,
+    entry.level,
+    entry.message,
+    entry.cc_id ?? null,
+    entry.phase ?? null,
+    entry.event ?? null,
+    entry.task ?? null,
+  ])}`;
+}
+
+function mergeLogEntries(
+  nodeId: string,
+  existing: LogEntry[],
+  incoming: LogEntry[],
+): LogEntry[] {
+  const merged = new Map<string, LogEntry>();
+  for (const entry of [...existing, ...incoming]) {
+    const normalized = { ...entry, node_id: nodeId };
+    merged.set(logKey(normalized, nodeId), normalized);
+  }
+  return Array.from(merged.values())
+    .sort((a, b) => {
+      const left = Date.parse(a.timestamp);
+      const right = Date.parse(b.timestamp);
+      if (Number.isNaN(left) || Number.isNaN(right) || left === right) return 0;
+      return left - right;
+    })
+    .slice(-10000);
+}
 
 // ============================================================================
 // 初始状态
@@ -119,7 +170,7 @@ export const useGraphStore = create<GraphStore>((set, get) => ({
   addNode: (node: GraphNode) => {
     set((state) => {
       const nodes = new Map(state.nodes);
-      nodes.set(node.id, node);
+      nodes.set(node.id, mergeNodeFields(nodes.get(node.id), node));
       // 如果是第一个 Manager 节点，设为根节点
       const rootNodeId = state.rootNodeId || (node.exec_type === 'M' ? node.id : null);
       return {
@@ -132,10 +183,10 @@ export const useGraphStore = create<GraphStore>((set, get) => ({
 
   updateNode: (id: string, updates: Partial<GraphNode>) => {
     set((state) => {
-      const nodes = new Map(state.nodes);
-      const existing = nodes.get(id);
+      const existing = state.nodes.get(id);
       if (!existing) return state;
-      nodes.set(id, { ...existing, ...updates });
+      const nodes = new Map(state.nodes);
+      nodes.set(id, mergeNodeFields(existing, updates));
       return {
         nodes,
         stats: computeStats(nodes),
@@ -147,7 +198,9 @@ export const useGraphStore = create<GraphStore>((set, get) => ({
     set((state) => {
       const nodes = new Map(state.nodes);
       const edges = new Map(state.edges);
+      const logsByNode = new Map(state.logsByNode);
       nodes.delete(id);
+      logsByNode.delete(id);
       // 删除关联边
       for (const [edgeId, edge] of edges) {
         if (edge.source === id || edge.target === id) {
@@ -157,27 +210,32 @@ export const useGraphStore = create<GraphStore>((set, get) => ({
       return {
         nodes,
         edges,
+        logsByNode,
+        rootNodeId: state.rootNodeId === id ? null : state.rootNodeId,
         stats: computeStats(nodes),
       };
     });
   },
 
-  batchUpdate: (nodes: GraphNode[], edges: GraphEdge[]) => {
+  batchUpdate: (incomingNodes: GraphNode[], edges: GraphEdge[]) => {
     set((state) => {
+      // A graph snapshot is authoritative about membership, but a node object
+      // may still be sparse (for example after a status-only SSE refresh).
       const nodesMap = new Map<string, GraphNode>();
       const edgesMap = new Map<string, GraphEdge>();
 
-      // 保留已有节点中 crashed / affectedNodes 信息
-      for (const node of nodes) {
-        nodesMap.set(node.id, node);
+      for (const node of incomingNodes) {
+        nodesMap.set(node.id, mergeNodeFields(state.nodes.get(node.id), node));
       }
 
       for (const edge of edges) {
         edgesMap.set(edge.id, edge);
       }
 
-      // 计算根节点
-      const rootNodeId = state.rootNodeId || nodes.find((n) => n.exec_type === 'M')?.id || null;
+      // 计算根节点；如果旧根已不在完整快照中，重新选择 Manager。
+      const rootNodeId = state.rootNodeId && nodesMap.has(state.rootNodeId)
+        ? state.rootNodeId
+        : incomingNodes.find((n) => n.exec_type === 'M')?.id || null;
 
       return {
         nodes: nodesMap,
@@ -252,15 +310,11 @@ export const useGraphStore = create<GraphStore>((set, get) => ({
   setNodeLogs: (nodeId: string, entries: LogEntry[]) => {
     set((state) => {
       const logsByNode = new Map(state.logsByNode);
-      const existing = logsByNode.get(nodeId) || [];
-      const merged = new Map<string, LogEntry>();
-      for (const entry of [...existing, ...entries]) {
-        const key = `${entry.id}:${entry.timestamp}:${entry.message}`;
-        merged.set(key, { ...entry, node_id: nodeId });
-      }
-      logsByNode.set(nodeId, Array.from(merged.values()).sort((a, b) => (
-        new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime()
-      )));
+      logsByNode.set(nodeId, mergeLogEntries(
+        nodeId,
+        logsByNode.get(nodeId) || [],
+        entries,
+      ));
       return { logsByNode };
     });
   },
@@ -269,11 +323,12 @@ export const useGraphStore = create<GraphStore>((set, get) => ({
     set((state) => {
       const logsByNode = new Map(state.logsByNode);
       const existing = logsByNode.get(nodeId) || [];
-      const key = `${entry.id}:${entry.timestamp}:${entry.message}`;
-      if (existing.some((item) => `${item.id}:${item.timestamp}:${item.message}` === key)) {
+      const merged = mergeLogEntries(nodeId, existing, [entry]);
+      // Avoid publishing a new state for a duplicate event.
+      if (merged.length === existing.length && merged.every((item, index) => item === existing[index])) {
         return state;
       }
-      logsByNode.set(nodeId, [...existing, { ...entry, node_id: nodeId }].slice(-10000));
+      logsByNode.set(nodeId, merged);
       return { logsByNode };
     });
   },

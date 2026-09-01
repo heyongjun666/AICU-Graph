@@ -13,6 +13,7 @@ import {
   NewNodeDialog,
   NewSessionDialog,
   confirmSessionDelete,
+  LinkCandidateLoadState,
 } from './components/WorkbenchDialogs';
 import SSEProvider from './providers/SSEProvider';
 import { useGraphStore } from './stores/GraphStore';
@@ -57,6 +58,8 @@ const App: React.FC = () => {
   const [eventsOpen, setEventsOpen] = useState(false);
   const [dialogBusy, setDialogBusy] = useState(false);
   const [linkCandidates, setLinkCandidates] = useState<LinkCandidate[]>([]);
+  const [linkCandidateStatus, setLinkCandidateStatus] = useState<LinkCandidateLoadState>('idle');
+  const [linkCandidateError, setLinkCandidateError] = useState('');
 
   useEffect(() => { loadSessions(); }, [loadSessions]);
   useEffect(() => { resetGraph(); }, [activeSessionId, resetGraph]);
@@ -75,10 +78,31 @@ const App: React.FC = () => {
     }
   }, [activeSessionId, loadEvents, clearEvents]);
   useEffect(() => {
-    if (!newNodeOpen || !activeSessionId) return;
+    if (!newNodeOpen || !activeSessionId) {
+      if (!newNodeOpen) {
+        setLinkCandidates([]);
+        setLinkCandidateStatus('idle');
+        setLinkCandidateError('');
+      }
+      return;
+    }
+    let cancelled = false;
+    setLinkCandidateStatus('loading');
+    setLinkCandidateError('');
     getLinkCandidates(activeSessionId)
-      .then(setLinkCandidates)
-      .catch(() => setLinkCandidates([]));
+      .then((nextCandidates) => {
+        if (cancelled) return;
+        setLinkCandidates(nextCandidates);
+        setLinkCandidateStatus(nextCandidates.length ? 'ready' : 'empty');
+      })
+      .catch((reason) => {
+        if (cancelled) return;
+        // Keep the last authoritative list while exposing the request error;
+        // never turn an error into an all-nodes fallback.
+        setLinkCandidateStatus('error');
+        setLinkCandidateError(reason instanceof Error ? reason.message : String(reason));
+      });
+    return () => { cancelled = true; };
   }, [activeSessionId, newNodeOpen]);
 
   const activeSession = useMemo(
@@ -108,6 +132,9 @@ const App: React.FC = () => {
     if (!activeSessionId) return;
     setDialogBusy(true);
     try {
+      if (linkCandidateStatus === 'loading' || linkCandidateStatus === 'error') {
+        throw new Error(linkCandidateError || t('dialog.candidatesLoadFailed'));
+      }
       const node = await createSessionNode(activeSessionId, payload);
       addNode(node);
       setNewNodeOpen(false);
@@ -199,7 +226,16 @@ const App: React.FC = () => {
       </main>
 
       <NewSessionDialog open={newSessionOpen} busy={dialogBusy} onClose={() => setNewSessionOpen(false)} onSubmit={createNewSession} />
-      <NewNodeDialog open={newNodeOpen} busy={dialogBusy} nodes={Array.from(nodes.values())} candidates={linkCandidates} onClose={() => setNewNodeOpen(false)} onSubmit={addNewNode} />
+      <NewNodeDialog
+        open={newNodeOpen}
+        busy={dialogBusy}
+        nodes={Array.from(nodes.values())}
+        candidates={linkCandidates}
+        candidateStatus={linkCandidateStatus}
+        candidateError={linkCandidateError}
+        onClose={() => setNewNodeOpen(false)}
+        onSubmit={addNewNode}
+      />
       <WorkbenchSettings open={settingsOpen} onClose={() => setSettingsOpen(false)} onSaved={refreshSessions} />
       <SessionWorkspaceDialog open={Boolean(workspaceSession)} session={workspaceSession} onClose={() => setWorkspaceSession(null)} onSaved={refreshSessions} />
       <EventsDialog open={eventsOpen} sessionId={activeSessionId} onClose={() => setEventsOpen(false)} />

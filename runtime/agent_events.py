@@ -167,6 +167,15 @@ class AgentEventManager:
         self._router: Any = router
         self._route_attempts: dict[str, int] = {}
 
+    def recover_pending(self) -> None:
+        """Recover pending delivery after the owning Scheduler opens dispatch."""
+        with self._lock:
+            if not self._events:
+                return
+            self._redeliver_routed_locked()
+            self._reconcile_statuses_locked()
+        self.save()
+
     # ------------------------------------------------------------------
     # Graph 引用注入（延迟，避免循环导入）
     # ------------------------------------------------------------------
@@ -201,14 +210,12 @@ class AgentEventManager:
         except OSError as exc:
             logger.error("Failed to append router trace: %s", exc)
 
-    def load(self) -> None:
-        """从 events.json 恢复事件日志（重启恢复）。
+    def load(self, *, recover_delivery: bool = True) -> None:
+        """Load the session event log without requiring delivery recovery.
 
-        加载后做一次投递恢复：
-          1. 按 ``routed_to`` 记录确定性重投 status=routed 且目标非空的事件
-             （幂等写 inbox，**不重跑 LLM**）；
-          2. reconcile 状态（delivered 且 inbox 文件全消失 → consumed）。
-        随后立即 save() 持久化恢复后的状态（routed → delivered）。
+        ``recover_delivery`` remains enabled by default for standalone callers.
+        Runtime startup disables it so loading persisted session state cannot
+        invoke the Router before that session's Scheduler opens dispatch.
         """
         path = self.events_file
         if not os.path.exists(path):
@@ -233,10 +240,12 @@ class AgentEventManager:
                     continue
                 if msg.event_id and msg.event_id not in self._events:
                     self._events[msg.event_id] = msg
-            self._redeliver_routed_locked()
-            self._reconcile_statuses_locked()
-        # 落盘恢复后的状态（routed → delivered / consumed）
-        self.save()
+            if recover_delivery:
+                self._redeliver_routed_locked()
+                self._reconcile_statuses_locked()
+        # Standalone callers retain the historical load-and-reconcile behavior.
+        if recover_delivery:
+            self.save()
 
     def save(self) -> None:
         """原子写 events.json（tmp + fsync + rename，镜像 Persistence）。

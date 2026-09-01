@@ -22,7 +22,7 @@
 # =============================================================================
 
 # ---- 角色选择结构化元数据（供 Manager 选角时的 available_roles 面板使用）----
-summary: "通用工程师，按任务要求完成各类编程与文档工作，为无专用角色匹配时的兜底选项"
+summary: "通用执行角色，按任务要求完成各类成果产出，为无专用角色匹配时的兜底选项"
 suitable_for:
 - 通用编程任务
 - 兜底角色(当其他专用角色都不匹配时最后使用)
@@ -55,8 +55,8 @@ skills_dir: ~/.claude/skills
 #     软链接到列表中指定的 skill；并通过 --setting-sources project 限制
 #     CC 只加载这些 project-level skill，不加载用户级 skill
 #   - 例如: skills: [tdd, diagnosing-bugs, codegraph]
-skills:
-- codegraph
+#   - 具体角色应按任务需要声明领域 Skill
+skills: []
 
 # ---- 产出文件 ----
 # output_file: CC 生成结果写入的文件名（CC 自己负责写入）

@@ -19,6 +19,7 @@ from typing import Any, Optional
 
 from executables.base import Executable, ExecutableContext, normalize_exec_mode
 from executables.default_stub import DefaultStubAICU
+from executables.worker import _aicu_cc_ids, _log_cc_lifecycle
 from runtime.models import (
     ErrorObject,
     ExecutionPlan,
@@ -888,6 +889,18 @@ class Manager(Executable):
                 from executables.worker import _create_real_aicu
                 aicu = _create_real_aicu(ctx)
 
+        cc_ids = _aicu_cc_ids(aicu) if mode != "stub" else []
+        phase = ctx.node.manager_phase or "expand"
+        for cc_id in cc_ids:
+            _log_cc_lifecycle(
+                ctx.runtime,
+                ctx.node.id,
+                cc_id,
+                "cc_received",
+                phase=phase,
+                task=ctx.node.task,
+            )
+
         last_exception: Optional[Exception] = None
         for attempt in range(retries + 1):
             if self._interrupt_flag:
@@ -895,6 +908,15 @@ class Manager(Executable):
 
             try:
                 result = aicu.ask(prompt)
+                for cc_id in cc_ids:
+                    _log_cc_lifecycle(
+                        ctx.runtime,
+                        ctx.node.id,
+                        cc_id,
+                        "cc_handoff",
+                        phase="handoff",
+                        task=ctx.node.task,
+                    )
                 return result
             except Exception as exc:
                 last_exception = exc

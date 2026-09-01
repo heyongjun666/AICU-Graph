@@ -108,9 +108,15 @@ export function mapNodeFromBackend(raw: any): GraphNode {
   let feExecType: 'M' | 'W' = 'W';
   if (execType === 'manager' || execType === 'M') feExecType = 'M';
   else if (execType === 'worker' || execType === 'W') feExecType = 'W';
+  const id = String(raw.id ?? raw.node_id ?? '');
+  const error = raw.error === null || raw.error === undefined
+    ? raw.error
+    : typeof raw.error === 'string'
+      ? raw.error
+      : raw.error.message;
   return {
-    id: raw.id,
-    label: raw.label || `${raw.role || feExecType} ${raw.id.slice(0, 8)}`,
+    id,
+    label: raw.label || `${raw.role || feExecType} ${id.slice(0, 8)}`,
     status: raw.status,
     exec_type: feExecType,
     role: raw.role,
@@ -120,10 +126,12 @@ export function mapNodeFromBackend(raw: any): GraphNode {
     manager_phase: raw.manager_phase,
     created_at: raw.created_at,
     started_at: raw.started_at,
-    finished_at: raw.finished_at || raw.ended_at,
+    finished_at: raw.finished_at ?? raw.ended_at,
     artifact_path: raw.artifact_path,
     cc_activity: raw.cc_activity,
-    error: typeof raw.error === 'string' ? raw.error : raw.error?.message,
+    error,
+    iteration: raw.iteration ?? raw.iteration_count,
+    max_iterations: raw.max_iterations,
     dependencies: raw.dependencies,
     dependents: raw.dependents,
     children: raw.children,

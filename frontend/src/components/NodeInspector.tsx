@@ -80,6 +80,8 @@ const NodeInspector: React.FC = () => {
   const [followLogs, setFollowLogs] = useState(true);
   const [visibleLogStart, setVisibleLogStart] = useState(0);
   const logViewerRef = useRef<HTMLDivElement>(null);
+  const nodeRequestGeneration = useRef(0);
+  const logsRequestGeneration = useRef(0);
   const [workspace, setWorkspace] = useState<WorkspaceListing | null>(null);
   const [workspaceFile, setWorkspaceFile] = useState<WorkspaceFile | null>(null);
   const [workspacePath, setWorkspacePath] = useState('');
@@ -122,24 +124,62 @@ const NodeInspector: React.FC = () => {
   }, [selectedNodeId]);
 
   useEffect(() => {
+    const requestId = ++nodeRequestGeneration.current;
     if (!sessionId || !selectedNodeId) return;
     let cancelled = false;
-    getSessionNode(sessionId, selectedNodeId).then((detail) => {
-      if (!cancelled) {
+    const requestedSessionId = sessionId;
+    const requestedNodeId = selectedNodeId;
+    getSessionNode(requestedSessionId, requestedNodeId).then((detail) => {
+      if (
+        !cancelled &&
+        nodeRequestGeneration.current === requestId &&
+        useSessionStore.getState().activeSessionId === requestedSessionId &&
+        useGraphStore.getState().selectedNodeId === requestedNodeId
+      ) {
         setNode(detail);
+        // REST details and sparse SSE/snapshot patches share the same merge
+        // semantics, so lifecycle fields cannot be lost on the next refresh.
         updateNode(detail.id, detail);
       }
     }).catch(() => undefined);
     return () => { cancelled = true; };
   }, [sessionId, selectedNodeId, updateNode]);
 
+  // Hydrate historical logs as soon as a node is selected, independently of
+  // the active tab. The Logs tab effect below only handles live polling.
+  useEffect(() => {
+    const requestId = ++logsRequestGeneration.current;
+    if (!sessionId || !selectedNodeId) return;
+    let cancelled = false;
+    const requestedSessionId = sessionId;
+    const requestedNodeId = selectedNodeId;
+    getSessionNodeLogs(requestedSessionId, requestedNodeId)
+      .then((entries) => {
+        if (
+          !cancelled &&
+          logsRequestGeneration.current === requestId &&
+          useSessionStore.getState().activeSessionId === requestedSessionId &&
+          useGraphStore.getState().selectedNodeId === requestedNodeId
+        ) setNodeLogs(requestedNodeId, entries);
+      })
+      .catch(() => undefined);
+    return () => { cancelled = true; };
+  }, [sessionId, selectedNodeId, setNodeLogs]);
+
   useEffect(() => {
     if (!sessionId || !selectedNodeId || tab !== 'logs') return;
     let cancelled = false;
-    const loadLogs = () => getSessionNodeLogs(sessionId, selectedNodeId)
-      .then((entries) => { if (!cancelled) setNodeLogs(selectedNodeId, entries); })
+    const requestedSessionId = sessionId;
+    const requestedNodeId = selectedNodeId;
+    const loadLogs = () => getSessionNodeLogs(requestedSessionId, requestedNodeId)
+      .then((entries) => {
+        if (
+          !cancelled &&
+          useSessionStore.getState().activeSessionId === requestedSessionId &&
+          useGraphStore.getState().selectedNodeId === requestedNodeId
+        ) setNodeLogs(requestedNodeId, entries);
+      })
       .catch(() => undefined);
-    loadLogs();
     const timer = node?.status === NodeStatus.Running ? window.setInterval(loadLogs, 1500) : undefined;
     return () => { cancelled = true; if (timer) window.clearInterval(timer); };
   }, [sessionId, selectedNodeId, tab, setNodeLogs, node?.status]);
@@ -391,7 +431,7 @@ const NodeInspector: React.FC = () => {
             <div className="log-toolbar"><label>{t('inspector.level')}<select value={logLevel} onChange={(event) => setLogLevel(event.target.value as 'ALL' | LogLevel)}><option value="ALL">{t('common.all')}</option><option value={LogLevel.DEBUG}>{t('inspector.debug')}</option><option value={LogLevel.INFO}>{t('inspector.info')}</option><option value={LogLevel.WARN}>{t('inspector.warn')}</option><option value={LogLevel.ERROR}>{t('common.error')}</option></select></label><label className="log-follow"><input type="checkbox" checked={followLogs} onChange={(event) => setFollowLogs(event.target.checked)} /> {t('inspector.follow')}</label><button className="secondary-button" onClick={() => setVisibleLogStart(logs.length)}>{t('inspector.clearView')}</button></div>
             <div className="log-viewer" ref={logViewerRef}>
               {!visibleLogs.length && <div className="detail-empty">{logs.length ? t('inspector.noLogsMatch') : t('inspector.noLogsYet')}</div>}
-              {visibleLogs.map((entry) => <div className={`log-line log-${String(entry.level).toLowerCase()}`} key={`${entry.id}-${entry.timestamp}`}><time>{new Date(entry.timestamp).toLocaleTimeString()}</time>{entry.cc_id && <strong className="log-source">{entry.cc_id}</strong>}<span>{entry.message}</span></div>)}
+              {visibleLogs.map((entry) => <div className={`log-line log-${String(entry.level).toLowerCase()}`} key={`${entry.id ?? 'local'}-${entry.timestamp}-${entry.level}-${entry.cc_id ?? ''}-${entry.phase ?? ''}-${entry.event ?? ''}-${entry.task ?? ''}`}><time>{new Date(entry.timestamp).toLocaleTimeString()}</time><span className="log-meta">{entry.cc_id && <strong className="log-source">{entry.cc_id}</strong>}{entry.phase && <span>{t('inspector.phase')}: {entry.phase}</span>}{entry.event && <span>{t('inspector.eventName')}: {entry.event}</span>}{entry.task && <span className="log-task" title={entry.task}>{entry.task}</span>}</span><span className="log-message">{entry.message}</span></div>)}
             </div>
           </div>
         )}

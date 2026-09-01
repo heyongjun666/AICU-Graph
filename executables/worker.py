@@ -209,6 +209,55 @@ def _validate_model(model_name: Optional[str]) -> str:
     return model_name
 
 
+def _log_cc_lifecycle(
+    runtime: Any,
+    node_id: str,
+    cc_id: str,
+    event: str,
+    *,
+    phase: Optional[str] = None,
+    task: Optional[str] = None,
+    level: LogLevel = LogLevel.INFO,
+) -> None:
+    """Write one durable CC lifecycle fact when the Runtime supports it.
+
+    Older RuntimeGateway test doubles only expose ``append_node_log`` and should
+    continue to receive stream output without being forced to implement the
+    newer lifecycle API. Lifecycle logging is intentionally best effort: an
+    observability failure must never change the execution result.
+    """
+    log_lifecycle = getattr(runtime, "log_cc_lifecycle", None)
+    if not callable(log_lifecycle):
+        return
+    try:
+        log_lifecycle(
+            node_id,
+            cc_id,
+            event,
+            phase=phase,
+            task=task,
+            level=level,
+        )
+    except Exception:  # noqa: BLE001
+        logger.debug(
+            "Failed to append CC lifecycle log node=%s cc=%s event=%s",
+            node_id,
+            cc_id,
+            event,
+            exc_info=True,
+        )
+
+
+def _aicu_cc_ids(aicu: Any) -> list[str]:
+    """Return stable display IDs for the CCs owned by an AICU instance."""
+    ccs = getattr(aicu, "ccs", None)
+    if isinstance(ccs, (list, tuple)):
+        return [f"CC-{index}" for index, _ in enumerate(ccs)]
+    # An injected AICU-compatible implementation may not expose CC identity;
+    # wait for its activity callback rather than inventing a CC ID.
+    return []
+
+
 def _handle_cc_stream_output(
     node_id: str,
     task: Optional[str],
@@ -229,18 +278,55 @@ def _handle_cc_stream_output(
       AICU_NODE_LOG_STREAMING=1 时全量写入，供排查 CC 内部细节。
     """
     update_activity = getattr(runtime, "update_cc_activity", None)
-    if stream == "activity":
+    stream_cc_id, separator, output_stream = stream.partition(":")
+    is_activity_stream = stream == "activity" or (
+        separator and output_stream == "activity"
+    )
+    if is_activity_stream:
         try:
             activity = json.loads(message)
         except (TypeError, ValueError):
             activity = {}
-        if callable(update_activity) and activity.get("cc_id"):
+        cc_id = activity.get("cc_id") or (
+            stream_cc_id if stream_cc_id.startswith("CC-") else None
+        )
+        activity_status = activity.get("status", "running")
+        activity_phase = activity.get("phase")
+        activity_task = activity.get("task") or task
+        if callable(update_activity) and cc_id:
             update_activity(
                 node_id,
-                activity["cc_id"],
-                activity.get("status", "running"),
-                phase=activity.get("phase"),
+                cc_id,
+                activity_status,
+                phase=activity_phase,
                 task=task,
+            )
+
+        # AICU emits this callback at the semantic CC-attempt boundaries. Keep
+        # the live activity update and durable timeline entry in one callback,
+        # instead of duplicating lifecycle logs in every peer strategy.
+        lifecycle_event = {
+            "started": "cc_started",
+            "finished": "cc_completed",
+            "completed": "cc_completed",
+            "failed": "cc_failed",
+            "timeout": "cc_failed",
+        }.get(str(activity.get("event") or "").lower())
+        if lifecycle_event is None:
+            lifecycle_event = {
+                "running": "cc_started",
+                "completed": "cc_completed",
+                "failed": "cc_failed",
+            }.get(str(activity_status).lower())
+        if cc_id and lifecycle_event:
+            _log_cc_lifecycle(
+                runtime,
+                node_id,
+                str(cc_id),
+                lifecycle_event,
+                phase=activity_phase,
+                task=activity_task,
+                level=(LogLevel.ERROR if lifecycle_event == "cc_failed" else LogLevel.INFO),
             )
         return
     cc_id, _, output_stream = stream.partition(":")
@@ -983,6 +1069,20 @@ class Worker(Executable):
             task_body = ctx.node.task
             if task_parts:
                 task_body = "\n\n".join(task_parts) + "\n\n---\n\n## 你的任务\n\n" + task_body
+
+        # The AICU owns individual CC start/finish/failure events. Worker owns
+        # the outer task handoff so the timeline also explains what entered the
+        # CC pool, including injected AICU-compatible implementations.
+        cc_ids = _aicu_cc_ids(aicu) if mode != "stub" else []
+        for cc_id in cc_ids:
+            _log_cc_lifecycle(
+                ctx.runtime,
+                ctx.node.id,
+                cc_id,
+                "cc_received",
+                phase="worker",
+                task=ctx.node.task,
+            )
         future = executor.submit(aicu.ask, task_body)
 
         # Artifact Gate 开关预声明（供下方 except 引用；仅在成功路径到达 Gate 处置位）
@@ -1006,6 +1106,16 @@ class Worker(Executable):
                     Worker._aicu_cache.pop(ctx.node.id, None)
                 aicu = _create_real_aicu(ctx)
                 result = aicu.ask(task_body)
+
+            for cc_id in cc_ids:
+                _log_cc_lifecycle(
+                    ctx.runtime,
+                    ctx.node.id,
+                    cc_id,
+                    "cc_handoff",
+                    phase="handoff",
+                    task=ctx.node.task,
+                )
 
             # 守卫：若执行期间被手动 pause，跳过状态回填，保留 PAUSED 状态
             if getattr(ctx.node, 'status', None) == NodeStatus.PAUSED:
@@ -1052,13 +1162,9 @@ class Worker(Executable):
             except Exception:  # noqa: BLE001
                 pass
 
-            # Build success log entries
+            # Build the worker-level terminal entry. CC-level completion is
+            # emitted by the activity callback and is intentionally separate.
             log_entries = [
-                LogEntry(
-                    ts=datetime.now(),
-                    level=LogLevel.INFO,
-                    message="Worker execution started",
-                ),
                 LogEntry(
                     ts=datetime.now(),
                     level=LogLevel.INFO,
@@ -1096,13 +1202,9 @@ class Worker(Executable):
             except Exception:  # noqa: BLE001
                 pass
 
-            # Build failure log entries
+            # Build the worker-level terminal entry. A real CC failure, when
+            # available, is emitted once by the activity callback.
             log_entries = [
-                LogEntry(
-                    ts=datetime.now(),
-                    level=LogLevel.INFO,
-                    message="Worker execution started",
-                ),
                 LogEntry(
                     ts=datetime.now(),
                     level=LogLevel.ERROR,

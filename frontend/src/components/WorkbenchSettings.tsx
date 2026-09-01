@@ -2,6 +2,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import { ChevronDown, FolderTree, HelpCircle, Languages, Plus, Save, Server, Sparkles, Trash2, Upload, Users, X } from 'lucide-react';
 import { CliInfo, GlobalConfig, ProviderPreset, RoleField, RoleInfo, RoleSchema, SkillInfo } from '../types';
 import { useI18n } from '../i18n';
+import { useUIStateStore } from '../stores/UIStateStore';
 import {
   createRole,
   createSkill,
@@ -28,7 +29,7 @@ type RoleType = NonNullable<RoleInfo['type']>;
 interface WorkbenchSettingsProps {
   open: boolean;
   onClose: () => void;
-  onSaved: () => void;
+  onSaved: () => void | Promise<void>;
 }
 
 const tabs: Array<{ id: SettingsTab; label: string; icon: React.ReactNode }> = [
@@ -239,6 +240,7 @@ const RoleFieldEditor: React.FC<{
 
 const WorkbenchSettings: React.FC<WorkbenchSettingsProps> = ({ open, onClose, onSaved }) => {
   const { t, lang, setLang } = useI18n();
+  const addToast = useUIStateStore((state) => state.addToast);
   const [tab, setTab] = useState<SettingsTab>('connection');
   const [config, setConfig] = useState<GlobalConfig>(emptyConfig);
   const [clis, setClis] = useState<CliInfo[]>([]);
@@ -366,6 +368,13 @@ const WorkbenchSettings: React.FC<WorkbenchSettingsProps> = ({ open, onClose, on
     : Array.from(new Set(clis.flatMap((cli) => cli.models || [])));
   // 已知模型也可能来自预置 provider，因此不能据此清空或禁用自定义地址。
   const modelIsKnown = Boolean(config.model) && modelOptions.includes(config.model as string);
+  const refreshAfterSave = async () => {
+    try {
+      await onSaved();
+    } catch {
+      addToast({ type: 'warning', message: t('settings.sessionRefreshFailed') });
+    }
+  };
   const saveConnection = async () => {
     setBusy(true); setError(''); setNotice('');
     try {
@@ -378,8 +387,13 @@ const WorkbenchSettings: React.FC<WorkbenchSettingsProps> = ({ open, onClose, on
         api_base_url: config.api_base_url,
         api_key_env: config.api_key_env,
       });
-      setNotice(t('settings.connectionSaved')); onSaved();
-    } catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)); }
+      const message = t('settings.connectionSaved');
+      setNotice(message); addToast({ type: 'success', message });
+      await refreshAfterSave();
+    } catch (reason) {
+      const message = reason instanceof Error ? reason.message : String(reason);
+      setError(message); addToast({ type: 'error', message });
+    }
     finally { setBusy(false); }
   };
 
@@ -392,10 +406,16 @@ const WorkbenchSettings: React.FC<WorkbenchSettingsProps> = ({ open, onClose, on
         api_base_url: config.api_base_url,
         api_key_env: config.api_key_env,
       });
-      if (resp.ok) setNotice(resp.result ? t('settings.connectionSuccessResult', { result: resp.result.slice(0, 200) }) : (resp.message || t('settings.connectionSuccess')));
-      else setError(resp.message || t('settings.connectionFailed'));
+      if (resp.ok) {
+        const message = resp.result ? t('settings.connectionSuccessResult', { result: resp.result.slice(0, 200) }) : (resp.message || t('settings.connectionSuccess'));
+        setNotice(message); addToast({ type: 'success', message });
+      } else {
+        const message = resp.message || t('settings.connectionFailed');
+        setError(message); addToast({ type: 'error', message });
+      }
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : String(reason));
+      const message = reason instanceof Error ? reason.message : String(reason);
+      setError(message); addToast({ type: 'error', message });
     } finally { setTesting(false); }
   };
 
@@ -403,8 +423,13 @@ const WorkbenchSettings: React.FC<WorkbenchSettingsProps> = ({ open, onClose, on
     setBusy(true); setError(''); setNotice('');
     try {
       await updateGlobalConfig({ workspace_root: config.workspace_root || null });
-      setNotice(t('settings.workspaceSaved')); onSaved();
-    } catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)); }
+      const message = t('settings.workspaceSaved');
+      setNotice(message); addToast({ type: 'success', message });
+      await refreshAfterSave();
+    } catch (reason) {
+      const message = reason instanceof Error ? reason.message : String(reason);
+      setError(message); addToast({ type: 'error', message });
+    }
     finally { setBusy(false); }
   };
 
@@ -427,13 +452,22 @@ const WorkbenchSettings: React.FC<WorkbenchSettingsProps> = ({ open, onClose, on
   };
 
   const saveRole = async () => {
-    if (!roleId.trim()) { setError(t('settings.roleIdRequired')); return; }
+    if (!roleId.trim()) {
+      const message = t('settings.roleIdRequired');
+      setError(message); addToast({ type: 'error', message });
+      return;
+    }
     setBusy(true); setError(''); setNotice('');
     try {
       const payload = { role_id: roleId.trim(), role_type: roleType, config: roleConfig };
       if (selectedRole) await updateRole(payload); else await createRole(payload);
-      setRoles(await getRoles()); setSelectedRole(`${roleType}:${payload.role_id}`); setNotice(t('settings.roleSaved'));
-    } catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)); }
+      setRoles(await getRoles()); setSelectedRole(`${roleType}:${payload.role_id}`);
+      const message = t('settings.roleSaved');
+      setNotice(message); addToast({ type: 'success', message });
+    } catch (reason) {
+      const message = reason instanceof Error ? reason.message : String(reason);
+      setError(message); addToast({ type: 'error', message });
+    }
     finally { setBusy(false); }
   };
 
@@ -465,8 +499,13 @@ const WorkbenchSettings: React.FC<WorkbenchSettingsProps> = ({ open, onClose, on
     try {
       const payload = { skill_id: skillId.trim(), content: skillContent };
       if (selectedSkill) await updateSkill(payload); else await createSkill(payload);
-      setSkills(await getSkills()); setSelectedSkill(payload.skill_id); setNotice(t('settings.skillSaved'));
-    } catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)); }
+      setSkills(await getSkills()); setSelectedSkill(payload.skill_id);
+      const message = t('settings.skillSaved');
+      setNotice(message); addToast({ type: 'success', message });
+    } catch (reason) {
+      const message = reason instanceof Error ? reason.message : String(reason);
+      setError(message); addToast({ type: 'error', message });
+    }
     finally { setBusy(false); }
   };
 

@@ -86,12 +86,12 @@ export interface GraphNode {
   config?: NodeConfig;
   parent_id?: string | null;
   subtree_root?: string | null;
-  created_at?: string;
-  started_at?: string;
-  finished_at?: string;
+  created_at?: string | null;
+  started_at?: string | null;
+  finished_at?: string | null;
   iteration?: number;
   max_iterations?: number;
-  error?: string;
+  error?: string | null;
   manager_phase?: string | null;
   artifact_path?: string | null;
   cc_activity?: Record<string, CCActivity>;
@@ -368,6 +368,8 @@ export interface LinkCandidate {
   label: string;
   task: string;
   status: NodeStatus;
+  /** Backend value used to distinguish Manager parent candidates from Workers. */
+  exec_type?: 'manager' | 'worker';
   eligible_as_parent: boolean;
   eligible_as_dependency: boolean;
   reachable: boolean;
@@ -445,7 +447,8 @@ export interface SearchLogsRequest {
 }
 
 export interface LogEntry {
-  id: number;
+  /** Server sequence/id when available; null/undefined means client-generated. */
+  id?: number | null;
   node_id: string;
   level: LogLevel;
   message: string;

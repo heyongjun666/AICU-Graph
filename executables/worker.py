@@ -447,8 +447,6 @@ class Worker(Executable):
             DefaultStubAICU() if self._mode == "stub" else None
         )
         self._aicu = aicu_instance
-        self._stopped = False
-        self._paused = False
         self._process_pid: Optional[int] = None
 
     # 节点级 AICU 缓存：node_id → AICU 实例
@@ -1246,8 +1244,6 @@ class Worker(Executable):
 
     def stop(self, ctx: ExecutableContext) -> None:
         """终止 Worker 执行，清理子进程。幂等。"""
-        self._stopped = True
-
         # Kill child process group if tracked
         if self._process_pid is not None:
             try:
@@ -1257,12 +1253,10 @@ class Worker(Executable):
             self._process_pid = None
 
     def pause(self, ctx: ExecutableContext) -> None:
-        """暂停 Worker 执行。幂等。"""
-        self._paused = True
+        """暂停 Worker 执行。生命周期由 Runtime/Scheduler 管理。"""
 
     def resume(self, ctx: ExecutableContext) -> NodeStatus:
         """恢复 Worker 执行 — 重新执行 run()。"""
-        self._paused = False
         return self.run(ctx)
 
     def cleanup_resources(self, ctx: ExecutableContext) -> None:

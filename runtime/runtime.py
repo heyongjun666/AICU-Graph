@@ -1286,23 +1286,6 @@ class Runtime(RuntimeGateway, SchedulerDelegate):
         )
         return node_id
 
-    def _delete_artifact_file(self, artifact_path: Optional[str]) -> None:
-        """删除磁盘上的产物文件（如存在）。
-
-        Args:
-            artifact_path: 产物文件路径（相对或绝对），为 None 时跳过。
-        """
-        if not artifact_path:
-            return
-        if not os.path.isabs(artifact_path):
-            artifact_path = os.path.join(self.workspace_root, artifact_path)
-        try:
-            if os.path.exists(artifact_path):
-                os.remove(artifact_path)
-                logger.info("Deleted old artifact file: %s", artifact_path)
-        except OSError as exc:
-            logger.warning("Failed to delete artifact file '%s': %s", artifact_path, exc)
-
     # ========================================================================
     # 全局控制
     # ========================================================================

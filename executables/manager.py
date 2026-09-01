@@ -162,8 +162,6 @@ class Manager(Executable):
             DefaultStubAICU() if self._mode == "stub" else None
         )
         self._aicu = aicu_instance
-        self._stopped = False
-        self._paused = False
         self._interrupt_flag = False
 
     # ------------------------------------------------------------------
@@ -223,17 +221,13 @@ class Manager(Executable):
 
     def stop(self, ctx: ExecutableContext) -> None:
         """停止 Manager：设置中断标志。幂等。"""
-        self._stopped = True
         self._interrupt_flag = True
 
     def pause(self, ctx: ExecutableContext) -> None:
-        """暂停 Manager：设置暂停标志。幂等。"""
-        self._paused = True
+        """暂停 Manager：生命周期由 Runtime/Scheduler 管理。"""
 
     def resume(self, ctx: ExecutableContext) -> NodeStatus:
-        """恢复 Manager：清除暂停标志后重新执行 run()。"""
-        self._paused = False
-        self._stopped = False
+        """恢复 Manager：清除中断标志后重新执行 run()。"""
         self._interrupt_flag = False
         return self.run(ctx)
 

@@ -543,11 +543,11 @@ AICU-Graph 的核心运行服务由 `main.py` 启动，使用 `runtime/` 提供�
 | `frontend/src/providers/SSEProvider.tsx` | SSE 事件订阅（EventSource） |
 | `frontend/src/providers/MockProvider.tsx` | 离线 mock 数据（VITE_MOCK_MODE） |
 | `frontend/src/components/GraphCanvas.tsx` `TreeNode.tsx` `DependencyEdge.tsx` | React Flow 图渲染 |
-| `frontend/src/components/NodeInspector.tsx` `NodeDetailPanel.tsx` `TaskTab.tsx` `LogsTab.tsx` `ArtifactTab.tsx` `SubgraphTab.tsx` | 节点详情多标签 |
+| `frontend/src/components/NodeInspector.tsx` `ArtifactTab.tsx` | 节点详情与产物查看 |
 | `frontend/src/components/SessionSidebar.tsx` `SessionOutputsDialog.tsx` `WorkbenchSettings.tsx` `SubmitTaskModal.tsx` `EditTaskModal.tsx` `StopConfirmModal.tsx` `GlobalControlButtons.tsx` `GlobalToolbar.tsx` `GlobalLogSearchModal.tsx` `ExportModal.tsx` `CanvasControls.tsx` `ConcurrencySlider.tsx` `EmptyState.tsx` `StatusBar.tsx` `ToastContainer.tsx` `WorkbenchDialogs.tsx` `WorkbenchHeader.tsx` | 工作台各 UI 组件 |
 | `frontend/src/components/mdeditor/` | Markdown 编辑器（编辑/预览/图片上传/自动保存） |
-| `frontend/src/utils/` `dagreLayout.ts` `sseEventMapper.ts` `eventBuffer.ts` `layoutCache.ts` `api.ts` | 布局/事件映射/缓冲/API 工具 |
-| `frontend/src/hooks/` | `useGraphOptimizations` / `useNodeVisibility` / `usePerformanceMode` |
+| `frontend/src/utils/` `dagreLayout.ts` `eventBuffer.ts` `layoutCache.ts` `api.ts` | 布局/事件缓冲/API 工具 |
+| `frontend/src/hooks/` | `useGraphOptimizations` |
 | `frontend/src/infra/` | 前端基础设施 API 与运行时接口 |
 
 ### 10.9 backend/（独立 Flask 后端模块）

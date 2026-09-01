@@ -133,23 +133,6 @@ class Scheduler:
         with self._escalations_lock:
             return list(self._escalations)
 
-    def _record_escalation(self, node_id: str, kind: str, reason: str,
-                           budget_exceeded: bool = False) -> None:
-        """C2 升级台账：记录无法自动收敛的协作路由信号（线程安全）。"""
-        entry = {
-            "node_id": node_id,
-            "kind": kind,
-            "reason": reason,
-            "timestamp": datetime.now().isoformat(),
-            "budget_exceeded": budget_exceeded,
-        }
-        with self._escalations_lock:
-            self._escalations.append(entry)
-        logger.warning(
-            "ESCALATION[%s] node='%s': %s",
-            kind, node_id[:8], reason,
-        )
-
     def start(self) -> None:
         """启动 tick 循环（后台线程）。"""
         if self._running:

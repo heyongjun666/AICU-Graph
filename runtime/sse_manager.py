@@ -13,19 +13,6 @@ from typing import Any, Optional
 
 from runtime.event_bus import EventBus, SSEEvent
 
-# SSE 事件类型集合
-SSE_EVENT_TYPES = frozenset({
-    "node_added",
-    "node_updated",
-    "node_removed",
-    "edge_added",
-    "edge_removed",
-    "log_appended",
-    "graph_updated",
-    "session_state_changed",
-})
-
-
 def format_sse(event: SSEEvent) -> str:
     """将 SSEEvent 格式化为 W3C EventSource 格式。
 
@@ -61,7 +48,6 @@ class SSEManager:
         ttl: int = 1800,
     ):
         self._event_bus = event_bus
-        self._max_events = max_events
         self._ttl = ttl
 
         self._buffer: deque[SSEEvent] = deque(maxlen=max_events)

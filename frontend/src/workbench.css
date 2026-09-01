@@ -133,7 +133,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .detail-stack { padding: 16px; display: flex; flex-direction: column; gap: 20px; }
 .detail-stack section h3 { margin: 0 0 8px; color: #6f7680; font-size: 11px; text-transform: uppercase; }
 .task-copy { color: #34383e; font-size: 13px; line-height: 1.65; white-space: pre-wrap; }
-.detail-stack pre, .artifact-view pre { overflow: auto; padding: 12px; border: 1px solid #e6e8eb; border-radius: 6px; background: #f7f8f9; color: #353a40; font: 11px/1.6 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap; word-break: break-word; }
+.detail-stack pre { overflow: auto; padding: 12px; border: 1px solid #e6e8eb; border-radius: 6px; background: #f7f8f9; color: #353a40; font: 11px/1.6 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap; word-break: break-word; }
 .artifact-tab { min-height: 0; display: flex; flex: 1; flex-direction: column; }
 .artifact-toolbar { min-height: 38px; display: grid; grid-template-columns: 30px minmax(0, 1fr) 30px; align-items: center; gap: 6px; padding: 4px 8px; border-bottom: 1px solid var(--border); }
 .artifact-path { overflow: hidden; color: var(--muted); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
@@ -164,7 +164,6 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .log-line time { color: #7f8b97; }
 .log-error { color: #ff938a; }
 .log-warning { color: #edc46f; }
-.artifact-view { padding: 16px; }
 .artifact-path { margin-bottom: 10px; color: #6f7680; font: 11px ui-monospace, SFMono-Regular, Menlo, monospace; }
 .detail-empty { padding: 16px 0; color: #8a9099; font-size: 12px; }
 .related-node { width: 100%; min-height: 38px; padding: 6px 8px; display: grid; grid-template-columns: 12px 1fr auto; align-items: center; gap: 8px; border: 0; border-radius: 5px; background: transparent; text-align: left; cursor: pointer; }

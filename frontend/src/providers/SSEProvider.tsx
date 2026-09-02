@@ -161,8 +161,8 @@ const SSEProvider: React.FC<SSEProviderProps> = ({ children, sessionId }) => {
       if (refreshTimer.current !== null) return;
       refreshTimer.current = window.setTimeout(() => {
         refreshTimer.current = null;
-        refreshGraph();
-        refreshSessions();
+        void refreshGraph();
+        void refreshSessions().catch(() => undefined);
       }, 80);
     };
 

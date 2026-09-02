@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import {
   FolderOpen,
   Menu,
@@ -17,6 +17,15 @@ import { controlSession } from '../utils/api';
 import { useUIStateStore } from '../stores/UIStateStore';
 import { useI18n } from '../i18n';
 
+type SessionAction = 'pause' | 'resume' | 'stop';
+
+type AwaitingLifecycle = {
+  action: SessionAction;
+  acceptedState: SessionSummary['lifecycle_state'];
+  previousState: SessionSummary['lifecycle_state'];
+  acceptedVersion?: number;
+};
+
 interface WorkbenchHeaderProps {
   session: SessionSummary;
   clientStatus: SSEClientStatus;
@@ -25,7 +34,7 @@ interface WorkbenchHeaderProps {
   outputsOpen: boolean;
   onToggleOutputs: () => void;
   onOpenEvents: () => void;
-  onRefresh: () => void;
+  onRefresh: () => void | Promise<void>;
   terminalOpen: boolean;
   onToggleTerminal: () => void;
 }
@@ -43,7 +52,8 @@ const WorkbenchHeader: React.FC<WorkbenchHeaderProps> = ({
   onToggleTerminal,
 }) => {
   const { t } = useI18n();
-  const [busy, setBusy] = useState(false);
+  const [pendingAction, setPendingAction] = useState<SessionAction | null>(null);
+  const [awaitingLifecycle, setAwaitingLifecycle] = useState<AwaitingLifecycle | null>(null);
   const [error, setError] = useState('');
   const addToast = useUIStateStore((state) => state.addToast);
   const connected = clientStatus === SSEClientStatus.Connected;
@@ -54,29 +64,115 @@ const WorkbenchHeader: React.FC<WorkbenchHeaderProps> = ({
     || lifecycleState === 'failed'
     || lifecycleState === 'completed';
   const canStop = !['stopped', 'completed'].includes(lifecycleState);
+  const controlsBusy = Boolean(pendingAction || awaitingLifecycle);
+
+  useEffect(() => {
+    if (!awaitingLifecycle) return;
+    const { action, acceptedState, previousState, acceptedVersion } = awaitingLifecycle;
+    // Do not interpret the pre-request state as a new failure/success while
+    // waiting for the SSE lifecycle event or refreshed session summary.
+    if (lifecycleState === previousState && lifecycleState !== acceptedState) return;
+    if (
+      acceptedVersion !== undefined &&
+      session.state_version !== undefined &&
+      session.state_version <= acceptedVersion &&
+      lifecycleState !== acceptedState
+    ) return;
+
+    let message: string | null = null;
+    let type: 'success' | 'error' = 'success';
+    if (action === 'pause') {
+      if (lifecycleState === 'paused') message = t('header.sessionPaused');
+      else if (lifecycleState === 'recovery_required' || lifecycleState === 'failed') {
+        message = t('header.sessionPauseFailed'); type = 'error';
+      }
+    } else if (action === 'resume') {
+      if (lifecycleState === 'running') message = t('header.sessionResumed');
+      else if (lifecycleState === 'recovery_required' || lifecycleState === 'failed') {
+        message = t('header.sessionResumeFailed'); type = 'error';
+      }
+    } else if (lifecycleState === 'stopped') {
+      message = t('header.sessionStopped');
+    } else if (lifecycleState === 'failed') {
+      message = t('header.sessionStopFailed'); type = 'error';
+    }
+    if (message) {
+      addToast({ type, message });
+      setAwaitingLifecycle(null);
+    }
+  }, [addToast, awaitingLifecycle, lifecycleState, session.state_version, t]);
 
   const run = async (
-    action: 'pause' | 'resume' | 'stop',
+    action: SessionAction,
     payload?: { mode?: 'drain' | 'immediate' },
   ) => {
-    setBusy(true);
+    if (controlsBusy) return;
+    const previousState = lifecycleState;
+    setPendingAction(action);
+    setAwaitingLifecycle(null);
     setError('');
+    addToast({
+      type: 'info',
+      message: action === 'pause'
+        ? t('header.sessionPauseProcessing')
+        : action === 'resume'
+          ? t('header.sessionResumeProcessing')
+          : t('header.sessionStopProcessing'),
+    });
     try {
-      await controlSession(session.id, action, payload);
-      const messages: Record<string, string> = {
-        pause: payload?.mode === 'immediate' ? t('header.sessionInterrupted') : t('header.sessionPausing'),
-        resume: t('header.sessionResumed'),
-        stop: t('header.sessionStopped'),
-      };
-      addToast({ type: 'success', message: messages[action] });
-      await onRefresh();
+      const accepted = await controlSession(session.id, action, payload);
+      const acceptedState = accepted.lifecycle_state;
+      const finalState = action === 'pause' ? 'paused' : action === 'resume' ? 'running' : 'stopped';
+      const failedState = acceptedState === 'recovery_required' || acceptedState === 'failed';
+      if (acceptedState === finalState) {
+        setAwaitingLifecycle(null);
+        addToast({ type: 'success', message: action === 'pause' ? t('header.sessionPaused') : action === 'resume' ? t('header.sessionResumed') : t('header.sessionStopped') });
+      } else if (failedState) {
+        setAwaitingLifecycle(null);
+        addToast({
+          type: 'error',
+          message: action === 'pause'
+            ? t('header.sessionPauseFailed')
+            : action === 'resume'
+              ? t('header.sessionResumeFailed')
+              : t('header.sessionStopFailed'),
+        });
+      } else {
+        setAwaitingLifecycle({
+          action,
+          acceptedState,
+          previousState,
+          acceptedVersion: accepted.state_version,
+        });
+        addToast({
+          type: 'info',
+          message: action === 'pause'
+            ? t('header.sessionPauseAccepted')
+            : action === 'resume'
+              ? t('header.sessionResumeAccepted')
+              : t('header.sessionStopAccepted'),
+        });
+      }
+      setPendingAction(null);
+      try {
+        await onRefresh();
+      } catch {
+        // The command was accepted; a failed summary refresh must not turn it
+        // into a failed control request. SSE reconciliation can still finish it.
+        addToast({ type: 'warning', message: t('header.sessionRefreshFailed') });
+      }
     } catch (reason) {
       const msg = reason instanceof Error ? reason.message : String(reason);
       setError(msg);
       addToast({ type: 'error', message: msg });
-    } finally {
-      setBusy(false);
+      setPendingAction(null);
+      setAwaitingLifecycle(null);
     }
+  };
+
+  const pauseDrain = () => {
+    const confirmed = window.confirm(t('header.pauseDrainConfirm'));
+    if (confirmed) void run('pause', { mode: 'drain' });
   };
 
   const pauseImmediately = () => {
@@ -130,10 +226,10 @@ const WorkbenchHeader: React.FC<WorkbenchHeaderProps> = ({
         <button className="icon-button" onClick={onOpenEvents} title={t('header.agentEvents')}><Zap size={17} /></button>
         <button className="secondary-button add-node-button" onClick={onAddNode}><Plus size={16} /> {t('header.addNode')}</button>
         <div className="segmented-actions" aria-label={t('header.sessionControls')}>
-          <button onClick={() => run('pause', { mode: 'drain' })} disabled={busy || !canPause} title={t('header.drainPauseSession')}><Pause size={16} /></button>
-          <button onClick={pauseImmediately} disabled={busy || !canPause} title={t('header.immediatelyInterruptSession')}><ShieldAlert size={16} /></button>
-          <button onClick={resumeSession} disabled={busy || !canResume} title={t('header.resumeSession')}><Play size={16} /></button>
-          <button onClick={() => run('stop')} disabled={busy || !canStop} title={t('header.stopSession')}><Square size={15} /></button>
+          <button onClick={pauseDrain} disabled={controlsBusy || !canPause} title={t('header.drainPauseSession')} aria-busy={pendingAction === 'pause'}><Pause size={16} /></button>
+          <button onClick={pauseImmediately} disabled={controlsBusy || !canPause} title={t('header.immediatelyInterruptSession')} aria-busy={pendingAction === 'pause'}><ShieldAlert size={16} /></button>
+          <button onClick={resumeSession} disabled={controlsBusy || !canResume} title={t('header.resumeSession')} aria-busy={pendingAction === 'resume'}><Play size={16} /></button>
+          <button onClick={() => void run('stop')} disabled={controlsBusy || !canStop} title={t('header.stopSession')} aria-busy={pendingAction === 'stop'}><Square size={15} /></button>
         </div>
       </div>
     </header>

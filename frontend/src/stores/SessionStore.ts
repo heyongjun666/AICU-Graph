@@ -47,17 +47,46 @@ export const useSessionStore = create<SessionState>((set, get) => ({
 
   refreshSessions: async () => {
     try {
-      set({ sessions: await listSessions() });
-    } catch {
-      // The active graph remains usable during a transient summary refresh failure.
+      const incoming = await listSessions();
+      set((state) => {
+        const currentById = new Map(state.sessions.map((session) => [session.id, session]));
+        return {
+          sessions: incoming.map((session) => {
+            const current = currentById.get(session.id);
+            if (
+              current?.state_version !== undefined &&
+              session.state_version !== undefined &&
+              session.state_version < current.state_version
+            ) {
+              return current;
+            }
+            return session;
+          }),
+        };
+      });
+    } catch (error) {
+      // Keep the current summary usable, while allowing action callers to
+      // distinguish an accepted command from a failed reconciliation refresh.
+      throw error;
     }
   },
 
   updateSession: (sessionId, patch) => {
     set((state) => ({
-      sessions: state.sessions.map((session) =>
-        session.id === sessionId ? { ...session, ...patch } : session
-      ),
+      sessions: state.sessions.map((session) => {
+        if (session.id !== sessionId) return session;
+        // Lifecycle events can arrive out of order after reconnects. A
+        // versioned older event must not roll the session back to a prior
+        // state; unversioned legacy patches remain mergeable.
+        if (
+          session.state_version !== undefined &&
+          patch.state_version !== undefined &&
+          patch.state_version < session.state_version
+        ) {
+          return session;
+        }
+        return { ...session, ...patch };
+      }),
     }));
   },
 

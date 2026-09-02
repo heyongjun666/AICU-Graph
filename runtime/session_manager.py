@@ -349,7 +349,15 @@ class SessionManager:
                 return self._summary(handle)
             if metadata.lifecycle_state == "pausing":
                 raise RuntimeError("session is still draining; resume after it is paused")
-            if metadata.lifecycle_state not in {"paused", "recovery_required", "failed"}:
+            if metadata.lifecycle_state == "completed":
+                graph_status = self._summary(handle)["status"]
+                if graph_status not in {"Waiting", "Ready", "Running", "Paused"}:
+                    raise RuntimeError(
+                        "cannot resume completed session without schedulable work"
+                    )
+            if metadata.lifecycle_state not in {
+                "paused", "recovery_required", "failed", "completed"
+            }:
                 raise RuntimeError(
                     f"cannot resume session in {metadata.lifecycle_state} state"
                 )

@@ -49,7 +49,10 @@ const WorkbenchHeader: React.FC<WorkbenchHeaderProps> = ({
   const connected = clientStatus === SSEClientStatus.Connected;
   const lifecycleState = session.lifecycle_state || 'running';
   const canPause = lifecycleState === 'running';
-  const canResume = lifecycleState === 'paused' || lifecycleState === 'recovery_required' || lifecycleState === 'failed';
+  const canResume = lifecycleState === 'paused'
+    || lifecycleState === 'recovery_required'
+    || lifecycleState === 'failed'
+    || lifecycleState === 'completed';
   const canStop = !['stopped', 'completed'].includes(lifecycleState);
 
   const run = async (

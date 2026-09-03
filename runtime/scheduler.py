@@ -133,20 +133,38 @@ class Scheduler:
         with self._escalations_lock:
             return list(self._escalations)
 
+    @property
+    def is_running(self) -> bool:
+        """Return whether the scheduler tick loop is currently active."""
+        with self._state_lock:
+            return self._running
+
+    @property
+    def is_paused(self) -> bool:
+        """Return whether dispatch is currently paused."""
+        with self._state_lock:
+            return self._paused
+
     def start(self) -> None:
         """启动 tick 循环（后台线程）。"""
-        if self._running:
-            return
-        self._running = True
-        self._stop_event.clear()
-        self._tick_thread = threading.Thread(target=self._tick_loop, daemon=True, name="scheduler-tick")
-        self._tick_thread.start()
+        with self._state_lock:
+            if self._running:
+                return
+            if self._pool_shutdown:
+                pool_size = self.max_concurrency + 2
+                self._thread_pool = ThreadPoolExecutor(max_workers=pool_size)
+                self._pool_shutdown = False
+            self._running = True
+            self._stop_event.clear()
+            self._tick_thread = threading.Thread(target=self._tick_loop, daemon=True, name="scheduler-tick")
+            self._tick_thread.start()
         logger.info("Scheduler started (max_concurrency=%d, pool_size=%d)", self.max_concurrency, self._thread_pool._max_workers)
 
     def stop(self) -> None:
         """停止 tick 循环并清理。"""
-        self._running = False
-        self._stop_event.set()
+        with self._state_lock:
+            self._running = False
+            self._stop_event.set()
 
         # 取消所有进行中的 Future
         with self._futures_lock:
@@ -284,7 +302,12 @@ class Scheduler:
                         callback = getattr(self.delegate, "on_scheduler_idle", None)
                         if callable(callback):
                             callback()
-                    self._running = False
+                    with self._state_lock:
+                        # Recheck the gate before marking the loop stopped; a
+                        # concurrent explicit start must not be hidden by a stale tick.
+                        if self._stop_event.is_set():
+                            break
+                        self._running = False
                     logger.info("Scheduler auto-stopped (no Ready/Running/Waiting nodes)")
                     break
 
@@ -660,6 +683,11 @@ class Scheduler:
         parent_id = node.parent_id
         parent = self.graph.get_node(parent_id)
         if parent is None or parent.exec_type != "manager":
+            return
+
+        # Revise 会把 Manager 置为 Waiting/expand，而旧子节点通常仍是终态。
+        # 此时必须先执行增量 Expand，不能因旧子节点已完成而直接跳到 Review。
+        if getattr(parent, "pending_revise", False) or getattr(parent, "manager_phase", None) == "expand":
             return
 
         # 幂等保护：同时使用两种机制

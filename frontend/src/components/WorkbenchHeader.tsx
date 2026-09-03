@@ -59,10 +59,6 @@ const WorkbenchHeader: React.FC<WorkbenchHeaderProps> = ({
   const connected = clientStatus === SSEClientStatus.Connected;
   const lifecycleState = session.lifecycle_state || 'running';
   const canPause = lifecycleState === 'running';
-  const canResume = lifecycleState === 'paused'
-    || lifecycleState === 'recovery_required'
-    || lifecycleState === 'failed'
-    || lifecycleState === 'completed';
   const canStop = !['stopped', 'completed'].includes(lifecycleState);
   const controlsBusy = Boolean(pendingAction || awaitingLifecycle);
 
@@ -228,7 +224,7 @@ const WorkbenchHeader: React.FC<WorkbenchHeaderProps> = ({
         <div className="segmented-actions" aria-label={t('header.sessionControls')}>
           <button onClick={pauseDrain} disabled={controlsBusy || !canPause} title={t('header.drainPauseSession')} aria-busy={pendingAction === 'pause'}><Pause size={16} /></button>
           <button onClick={pauseImmediately} disabled={controlsBusy || !canPause} title={t('header.immediatelyInterruptSession')} aria-busy={pendingAction === 'pause'}><ShieldAlert size={16} /></button>
-          <button onClick={resumeSession} disabled={controlsBusy || !canResume} title={t('header.resumeSession')} aria-busy={pendingAction === 'resume'}><Play size={16} /></button>
+          <button onClick={resumeSession} disabled={controlsBusy} title={t('header.resumeSession')} aria-busy={pendingAction === 'resume'}><Play size={16} /></button>
           <button onClick={() => void run('stop')} disabled={controlsBusy || !canStop} title={t('header.stopSession')} aria-busy={pendingAction === 'stop'}><Square size={15} /></button>
         </div>
       </div>

@@ -337,6 +337,94 @@ def test_graph_resume_does_not_resume_manually_paused_node(session_manager):
     assert node.status == NodeStatus.PAUSED
 
 
+def test_running_session_with_stopped_scheduler_resumes_pending_work(session_manager):
+    session = session_manager.create_session("Resume pending revise")
+    handle = session_manager.get_session(session["id"])
+    root = handle.runtime.graph.get_node(session["root_node_id"])
+    assert root is not None
+    runtime = handle.runtime
+    scheduler = runtime.scheduler
+
+    # Reproduce the lifecycle/Scheduler split left by an idle scheduler after Revise.
+    handle.runtime.scheduler.stop()
+    handle.runtime.graph.update_node(
+        root.id,
+        status=NodeStatus.WAITING,
+        manager_phase="expand",
+        pending_revise=True,
+    )
+    handle.metadata.lifecycle_state = "running"
+    resume_calls: list[list[str] | None] = []
+    handle.runtime.global_resume = (  # type: ignore[method-assign]
+        lambda interrupted=None: resume_calls.append(interrupted)
+    )
+
+    resumed = session_manager.resume_session(session["id"])
+
+    assert resumed["lifecycle_state"] == "running"
+    assert resume_calls == [[]]
+    assert handle.runtime is runtime
+    assert handle.runtime.scheduler is scheduler
+
+
+def test_running_session_with_paused_scheduler_resumes_dispatch(session_manager):
+    session = session_manager.create_session("Resume paused dispatch")
+    handle = session_manager.get_session(session["id"])
+    root = handle.runtime.graph.get_node(session["root_node_id"])
+    assert root is not None
+    runtime = handle.runtime
+    scheduler = runtime.scheduler
+
+    scheduler.pause()
+    handle.runtime.graph.update_node(
+        root.id,
+        status=NodeStatus.WAITING,
+        manager_phase="expand",
+        pending_revise=True,
+    )
+    handle.metadata.lifecycle_state = "running"
+    resume_calls: list[list[str] | None] = []
+    handle.runtime.global_resume = (  # type: ignore[method-assign]
+        lambda interrupted=None: resume_calls.append(interrupted)
+    )
+
+    resumed = session_manager.resume_session(session["id"])
+
+    assert resumed["lifecycle_state"] == "running"
+    assert resume_calls == [[]]
+    assert handle.runtime is runtime
+    assert handle.runtime.scheduler is scheduler
+
+
+def test_stopped_session_with_waiting_work_can_resume(session_manager):
+    session = session_manager.create_session("Resume stopped pending work")
+    handle = session_manager.get_session(session["id"])
+    root = handle.runtime.graph.get_node(session["root_node_id"])
+    assert root is not None
+    runtime = handle.runtime
+    scheduler = runtime.scheduler
+
+    scheduler.stop()
+    handle.runtime.graph.update_node(
+        root.id,
+        status=NodeStatus.WAITING,
+        manager_phase="expand",
+        pending_revise=True,
+    )
+    handle.metadata.lifecycle_state = "stopped"
+    resume_calls: list[list[str] | None] = []
+    handle.runtime.global_resume = (  # type: ignore[method-assign]
+        lambda interrupted=None: resume_calls.append(interrupted)
+    )
+
+    resumed = session_manager.resume_session(session["id"])
+
+    assert resumed["lifecycle_state"] == "running"
+    assert resume_calls == [[]]
+    assert handle.runtime is runtime
+    assert handle.runtime.scheduler is scheduler
+
+
 def test_paused_session_restores_without_automatic_execution(tmp_path):
     _BlockingExecutable.started = threading.Event()
     _BlockingExecutable.release = threading.Event()

@@ -355,17 +355,31 @@ class SessionManager:
         with self._lock:
             metadata = handle.metadata
             if metadata.lifecycle_state == "running":
-                return self._summary(handle)
+                summary = self._summary(handle)
+                schedulable = {"Waiting", "Ready", "Running", "Paused"}
+                scheduler = handle.runtime.scheduler
+                if summary["status"] not in schedulable:
+                    return summary
+                if (
+                    scheduler.is_running
+                    and not scheduler.is_paused
+                    and scheduler.active_execution_count > 0
+                ):
+                    return summary
+                # A running tick loop may be concurrently entering idle shutdown.
+                # Reopen dispatch through the existing Runtime so that the
+                # scheduler cannot miss work added by Revise during that window.
             if metadata.lifecycle_state == "pausing":
                 raise RuntimeError("session is still draining; resume after it is paused")
-            if metadata.lifecycle_state == "completed":
+            if metadata.lifecycle_state in {"completed", "stopped"}:
                 graph_status = self._summary(handle)["status"]
                 if graph_status not in {"Waiting", "Ready", "Running", "Paused"}:
                     raise RuntimeError(
-                        "cannot resume completed session without schedulable work"
+                        f"cannot resume {metadata.lifecycle_state} session "
+                        "without schedulable work"
                     )
             if metadata.lifecycle_state not in {
-                "paused", "recovery_required", "failed", "completed"
+                "paused", "recovery_required", "failed", "completed", "stopped", "running"
             }:
                 raise RuntimeError(
                     f"cannot resume session in {metadata.lifecycle_state} state"
@@ -534,6 +548,7 @@ class SessionManager:
             max_concurrency=self.max_concurrency,
             workspace_root=workspace_dir,
             roles_dir=self.roles_dir,
+            router_config=self.global_config,
         )
         runtime.set_pause_completion_callback(
             lambda interrupted, session_id=metadata.id: self._complete_pause(

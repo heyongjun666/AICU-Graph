@@ -110,12 +110,12 @@ class Runtime(RuntimeGateway, SchedulerDelegate):
         self.persistence = persistence or Persistence()
         # Agent 事件总线（Worker→Runtime→Worker 动态协作信号）
         from runtime.agent_events import AgentEventManager
-        # 方案三：独立 AICU Router（LLM 决策 Event → 目标 Nodes；stub/real 双模式）。
-        # attach_graph 时同步注入 Graph，Router 读取当前组织图快照做统一路由判断。
+        # 独立 AICU Router；attach_graph 时同步注入 Graph。
         from runtime.router import AICURouter
         self.router = AICURouter(
+            aicu_instance=router_aicu_instance,
             workspace_root=self.workspace_root,
-            stub=router_stub,
+            config=router_config,
         )
         self.agent_events = AgentEventManager(
             workspace_root=self.workspace_root,
@@ -213,7 +213,8 @@ class Runtime(RuntimeGateway, SchedulerDelegate):
                     # 恢复时若不推进为 review，根会永久卡 WAITING。
                     if (
                         node.status == NodeStatus.WAITING
-                        and node.manager_phase in ("waiting", "expand")
+                        and node.manager_phase == "waiting"
+                        and not getattr(node, "pending_revise", False)
                     ):
                         kids = self.graph.children(node.id)
                         terminal = {
@@ -1210,7 +1211,7 @@ class Runtime(RuntimeGateway, SchedulerDelegate):
         """增量续跑已完成 Manager 节点（Revise，保留子节点/产物/Agent 会话）。
 
         Manager 从终态转为 WAITING + manager_phase="expand" + pending_revise=True，
-        由调度器自动拉起重新 expand；expand 时 Manager 会看到「可复用候选节点」块，
+        等待人工 Resume 后重新调度；expand 时 Manager 会看到「可复用候选节点」块，
         按决策 0 选择性复用既有子节点（reuse_step_ref），新能力处才产出新节点。
 
         Args:
@@ -1279,7 +1280,6 @@ class Runtime(RuntimeGateway, SchedulerDelegate):
                 started_at=None,
                 finished_at=None,
             )
-            self.scheduler.start()
         logger.info(
             "Manager '%s' revised: COMPLETED/terminal → WAITING(expand) with "
             "incremental task (pending_revise=True)",
@@ -1637,6 +1637,10 @@ class Runtime(RuntimeGateway, SchedulerDelegate):
             return
 
         if manager.exec_type != "manager":
+            return
+
+        # Revise 的 Manager 必须先执行 expand；旧子节点的终态不能直接推进 review。
+        if getattr(manager, "pending_revise", False):
             return
 
         children = self.graph.children(manager_node_id)

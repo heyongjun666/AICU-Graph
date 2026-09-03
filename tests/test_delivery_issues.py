@@ -171,7 +171,7 @@ def test_repair_loop_consumes_strategy_assembly_type(tmp_path):
     node = _manager_node()
     gw = _Gateway(str(tmp_path), [_child("app_v1")])
     ctx = ExecutableContext(node=node, runtime=gw, config={"mode": "stub"})
-    mgr = Manager(context=ctx, stub=None)
+    mgr = Manager(context=ctx, aicu_instance=None)
 
     from runtime.models import LogEntry, LogLevel
     status = mgr._repair_blocking_delivery(
@@ -189,7 +189,7 @@ def test_repair_loop_consumes_strategy_gate_type(tmp_path):
     node = _manager_node()
     gw = _Gateway(str(tmp_path), [_child("app_v1")])
     ctx = ExecutableContext(node=node, runtime=gw, config={"mode": "stub"})
-    mgr = Manager(context=ctx, stub=None)
+    mgr = Manager(context=ctx, aicu_instance=None)
 
     status = mgr._repair_blocking_delivery(
         ctx, [_issue("WRONG_LOCATION")], [], "/tmp/review.md", 0, 3,

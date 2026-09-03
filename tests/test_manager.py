@@ -287,7 +287,7 @@ class TestManagerRegistry:
         node = _make_manager_node()
         self.runtime.add_node(node)
         ctx = ExecutableContext(node=node, runtime=self.runtime)
-        mgr = self.registry.create("manager", ctx, stub=_ExpandStub())
+        mgr = self.registry.create("manager", ctx, aicu_instance=_ExpandStub())
 
         result = mgr.run(ctx)
         assert result == NodeStatus.WAITING
@@ -314,7 +314,7 @@ class TestManagerExpandPhase:
     def _make_manager(self, ctx) -> Manager:
         return Manager(
             context=ctx,
-            stub=_ExpandStub(role=ctx.node.role, task=ctx.node.task),
+            aicu_instance=_ExpandStub(role=ctx.node.role, task=ctx.node.task),
         )
 
     def test_expand_generates_execution_plan(self):
@@ -447,7 +447,7 @@ class TestManagerReviewPhase:
         self.runtime = _MockRuntimeGateway()
 
     def _make_manager(self, ctx, review_passed: bool = True) -> Manager:
-        return Manager(context=ctx, stub=_ReviewStub(review_passed=review_passed))
+        return Manager(context=ctx, aicu_instance=_ReviewStub(review_passed=review_passed))
 
     def test_review_all_completed(self):
         """review 阶段：所有子节点 COMPLETED → Manager COMPLETED。"""
@@ -488,7 +488,7 @@ class TestManagerReviewPhase:
 
         ctx = ExecutableContext(node=node, runtime=self.runtime)
         # _DualPhaseStub: review returns not-passed, expand returns valid plan
-        mgr = Manager(context=ctx, stub=_DualPhaseStub(review_passed=False))
+        mgr = Manager(context=ctx, aicu_instance=_DualPhaseStub(review_passed=False))
 
         result = mgr.run(ctx)
 
@@ -536,7 +536,7 @@ class TestManagerReviewPhase:
 
         ctx = ExecutableContext(node=node, runtime=self.runtime)
         # _DualPhaseStub: review returns not-passed, expand returns valid plan
-        mgr = Manager(context=ctx, stub=_DualPhaseStub(review_passed=False))
+        mgr = Manager(context=ctx, aicu_instance=_DualPhaseStub(review_passed=False))
 
         result = mgr.run(ctx)
 
@@ -794,7 +794,7 @@ class TestManagerReviewDegradation:
             config={"workspace_dir": str(tmp_path)},
         )
         stub = _UnparseableAuditPassStub(str(tmp_path))
-        mgr = Manager(context=ctx, stub=stub)
+        mgr = Manager(context=ctx, aicu_instance=stub)
 
         result = mgr.run(ctx)
 
@@ -840,7 +840,7 @@ class TestManagerReviewDegradation:
             config={"workspace_dir": str(tmp_path)},
         )
         stub = _UnparseableAuditFailStub(str(tmp_path))
-        mgr = Manager(context=ctx, stub=stub)
+        mgr = Manager(context=ctx, aicu_instance=stub)
 
         result = mgr.run(ctx)
 
@@ -891,7 +891,7 @@ class TestManagerReviewDegradation:
             config={"workspace_dir": str(tmp_path)},
         )
         stub = _RepairSucceedsStub(str(tmp_path))
-        mgr = Manager(context=ctx, stub=stub)
+        mgr = Manager(context=ctx, aicu_instance=stub)
 
         result = mgr.run(ctx)
 
@@ -948,7 +948,7 @@ class TestManagerEdgeCases:
         """
         node = _make_manager_node(node_id="nonexistent")
         ctx = ExecutableContext(node=node, runtime=self.runtime)
-        mgr = Manager(context=ctx)
+        mgr = Manager(context=ctx, aicu_instance=_ExpandStub())
 
         result = mgr.run(ctx)
         assert result == NodeStatus.WAITING

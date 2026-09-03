@@ -219,7 +219,7 @@ class TestRealMetadataReviewContent:
         gw.add_children(node.id, [_make_child("c1")])
         ctx = ExecutableContext(node=node, runtime=gw,
                                 config={"workspace_dir": str(tmp_path), "mode": "stub"})
-        mgr = Manager(context=ctx, stub=_Stub(payload))
+        mgr = Manager(context=ctx, aicu_instance=_Stub(payload))
         result = mgr.run(ctx)
         return node, result
 
@@ -286,7 +286,7 @@ class TestWriteReviewOutputContract:
         gw.add_node(node)
         ctx = ExecutableContext(node=node, runtime=gw,
                                 config={"workspace_dir": str(tmp_path), "mode": "stub"})
-        mgr = Manager(context=ctx, stub=_Stub({}))
+        mgr = Manager(context=ctx, aicu_instance=_Stub({}))
         contract = {
             "overall_passed": False,
             "assessments": [
@@ -311,7 +311,7 @@ class TestWriteReviewOutputContract:
         gw.add_node(node)
         ctx = ExecutableContext(node=node, runtime=gw,
                                 config={"workspace_dir": str(tmp_path), "mode": "stub"})
-        mgr = Manager(context=ctx, stub=_Stub({}))
+        mgr = Manager(context=ctx, aicu_instance=_Stub({}))
         path = mgr._write_review_output(
             ctx, {"audit_passed": True, "summary": "All good"}, {"c1": "..."}, 0,
         )

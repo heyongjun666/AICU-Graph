@@ -151,7 +151,7 @@ def test_review_all_pass_writes_closed_loop(tmp_path):
                 ],
             }
 
-    mgr = Manager(context=ctx, stub=_PassStub())
+    mgr = Manager(context=ctx, aicu_instance=_PassStub())
     result = mgr.run(ctx)
     assert result == NodeStatus.COMPLETED
     assert node.status == NodeStatus.COMPLETED
@@ -206,7 +206,7 @@ def test_review_fail_then_pass_accumulates_ledger(tmp_path):
             }
 
     stub = _SeqStub()
-    mgr = Manager(context=ctx, stub=stub)
+    mgr = Manager(context=ctx, aicu_instance=stub)
 
     # 第 1 轮：c2 失败 → WAITING，ledger 记录缺陷与修复指派
     result = mgr.run(ctx)
@@ -299,7 +299,7 @@ def test_review_all_pass_writes_manifest(tmp_path):
                 ],
             }
 
-    mgr = Manager(context=ctx, stub=_PassStub())
+    mgr = Manager(context=ctx, aicu_instance=_PassStub())
     result = mgr.run(ctx)
     assert result == NodeStatus.COMPLETED
     out_dir = os.path.join(str(tmp_path), "nodes", node.id, "output")

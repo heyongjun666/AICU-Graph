@@ -100,7 +100,7 @@ def _make_context(runtime, node):
 def _run_worker(workspace: str, stub, node):
     runtime = _TmpRuntime(workspace)
     ctx = _make_context(runtime, node)
-    worker = Worker(ctx, mode="stub", stub=stub)
+    worker = Worker(ctx, aicu_instance=stub)
     result = worker.run(ctx)
     return result, runtime
 
@@ -406,7 +406,7 @@ class _GateFailWorker(Worker):
 
     def __init__(self, context, **kwargs):
         ws = context.runtime.get_node_workspace(context.node.id)
-        super().__init__(context, mode="stub", stub=_MissingPathStub(ws))
+        super().__init__(context, aicu_instance=_MissingPathStub(ws))
 
 
 class _MockDelegate:

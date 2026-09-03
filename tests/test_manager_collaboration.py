@@ -291,7 +291,7 @@ class TestEventContextBlock:
         gw.add_node(node)
         ctx = ExecutableContext(node=node, runtime=gw,
                                 config={"workspace_dir": str(tmp_path), "mode": "stub"})
-        mgr = Manager(context=ctx, stub=_Stub({"steps": []}))
+        mgr = Manager(context=ctx, aicu_instance=_Stub({"steps": []}))
         prompt = mgr._build_expand_prompt(ctx)
         assert "## 📥 待处理事件上下文 (Event)" in prompt
         assert "review plan" in prompt
@@ -303,7 +303,7 @@ class TestEventContextBlock:
         gw.add_node(node)
         ctx = ExecutableContext(node=node, runtime=gw,
                                 config={"workspace_dir": str(tmp_path), "mode": "stub"})
-        mgr = Manager(context=ctx, stub=_Stub({"steps": []}))
+        mgr = Manager(context=ctx, aicu_instance=_Stub({"steps": []}))
         prompt = mgr._build_expand_prompt(ctx)
         assert "## 📥 待处理事件上下文 (Event)" not in prompt
         assert "## 你的任务(本节点原始 Task 描述)" in prompt

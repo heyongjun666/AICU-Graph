@@ -159,7 +159,7 @@ class TestWorkerConstruction:
     def test_worker_can_be_instantiated(self):
         """Worker 可正常实例化"""
         ctx = _make_context()
-        worker = Worker(ctx, mode="stub", stub=SuccessStub())
+        worker = Worker(ctx, aicu_instance=SuccessStub())
         assert isinstance(worker, Worker)
         assert isinstance(worker, Executable)
 
@@ -183,7 +183,7 @@ class TestStubSuccessPath:
         runtime = MockRuntimeGateway()
         stub = SuccessStub(result_dict={"final_output_path": "/tmp/stub/output.py"})
         ctx = _make_context(runtime=runtime)
-        worker = Worker(ctx, mode="stub", stub=stub)
+        worker = Worker(ctx, aicu_instance=stub)
         result = worker.run(ctx)
         assert result == NodeStatus.COMPLETED
 
@@ -192,7 +192,7 @@ class TestStubSuccessPath:
         runtime = MockRuntimeGateway()
         stub = SuccessStub(result_dict={"final_output_path": "/tmp/stub/output.py"})
         ctx = _make_context(runtime=runtime)
-        worker = Worker(ctx, mode="stub", stub=stub)
+        worker = Worker(ctx, aicu_instance=stub)
         worker.run(ctx)
         assert len(runtime.status_updates) >= 1
         last_node_id, last_status, last_updates = runtime.status_updates[-1]
@@ -203,7 +203,7 @@ class TestStubSuccessPath:
         runtime = MockRuntimeGateway()
         stub = SuccessStub(result_dict={"final_output_path": "/tmp/stub/output.py"})
         ctx = _make_context(runtime=runtime)
-        worker = Worker(ctx, mode="stub", stub=stub)
+        worker = Worker(ctx, aicu_instance=stub)
         worker.run(ctx)
         _, _, updates = runtime.status_updates[-1]
         assert updates.get("artifact_path") == "/tmp/stub/output.py"
@@ -213,7 +213,7 @@ class TestStubSuccessPath:
         runtime = MockRuntimeGateway()
         stub = SuccessStub()
         ctx = _make_context(runtime=runtime)
-        worker = Worker(ctx, mode="stub", stub=stub)
+        worker = Worker(ctx, aicu_instance=stub)
         result = worker.run(ctx)
         assert result == NodeStatus.COMPLETED
         _, _, updates = runtime.status_updates[-1]
@@ -223,8 +223,8 @@ class TestStubSuccessPath:
         """mode 可通过 ctx.config 设定"""
         runtime = MockRuntimeGateway()
         stub = SuccessStub(result_dict={"final_output_path": "/tmp/stub/output.py"})
-        ctx = _make_context(runtime=runtime, config={"mode": "stub", "stub_instance": stub})
-        worker = Worker(ctx, mode="stub", stub=stub)
+        ctx = _make_context(runtime=runtime, config={})
+        worker = Worker(ctx, aicu_instance=stub)
         result = worker.run(ctx)
         assert result == NodeStatus.COMPLETED
 
@@ -241,7 +241,7 @@ class TestStubFailurePath:
         runtime = MockRuntimeGateway()
         stub = FailureStub()
         ctx = _make_context(runtime=runtime)
-        worker = Worker(ctx, mode="stub", stub=stub)
+        worker = Worker(ctx, aicu_instance=stub)
         result = worker.run(ctx)
         assert result == NodeStatus.FAILED
 
@@ -250,7 +250,7 @@ class TestStubFailurePath:
         runtime = MockRuntimeGateway()
         stub = FailureStub()
         ctx = _make_context(runtime=runtime)
-        worker = Worker(ctx, mode="stub", stub=stub)
+        worker = Worker(ctx, aicu_instance=stub)
         worker.run(ctx)
         assert len(runtime.status_updates) >= 1
         last_node_id, last_status, last_updates = runtime.status_updates[-1]
@@ -261,7 +261,7 @@ class TestStubFailurePath:
         runtime = MockRuntimeGateway()
         stub = FailureStub()
         ctx = _make_context(runtime=runtime)
-        worker = Worker(ctx, mode="stub", stub=stub)
+        worker = Worker(ctx, aicu_instance=stub)
         worker.run(ctx)
         _, _, updates = runtime.status_updates[-1]
         error = updates.get("error")
@@ -276,7 +276,7 @@ class TestStubFailurePath:
         runtime = MockRuntimeGateway()
         stub = FailureStub(exception=ValueError("custom error"))
         ctx = _make_context(runtime=runtime)
-        worker = Worker(ctx, mode="stub", stub=stub)
+        worker = Worker(ctx, aicu_instance=stub)
         result = worker.run(ctx)
         assert result == NodeStatus.FAILED
         _, _, updates = runtime.status_updates[-1]
@@ -288,7 +288,7 @@ class TestStubFailurePath:
         runtime = MockRuntimeGateway()
         stub = FailureStub(fail_on_call=1)
         ctx = _make_context(runtime=runtime)
-        worker = Worker(ctx, mode="stub", stub=stub)
+        worker = Worker(ctx, aicu_instance=stub)
         result = worker.run(ctx)
         assert result == NodeStatus.FAILED
 
@@ -305,7 +305,7 @@ class TestStubTimeoutPath:
         runtime = MockRuntimeGateway()
         stub = TimeoutStub(block_duration=0.05, timeout=1)
         ctx = _make_context(runtime=runtime)
-        worker = Worker(ctx, mode="stub", stub=stub)
+        worker = Worker(ctx, aicu_instance=stub)
         result = worker.run(ctx)
         assert result == NodeStatus.FAILED
 
@@ -314,7 +314,7 @@ class TestStubTimeoutPath:
         runtime = MockRuntimeGateway()
         stub = TimeoutStub(block_duration=0.05, timeout=1)
         ctx = _make_context(runtime=runtime)
-        worker = Worker(ctx, mode="stub", stub=stub)
+        worker = Worker(ctx, aicu_instance=stub)
         worker.run(ctx)
         _, _, updates = runtime.status_updates[-1]
         error = updates.get("error")
@@ -326,7 +326,7 @@ class TestStubTimeoutPath:
         runtime = MockRuntimeGateway()
         stub = TimeoutStub(block_duration=0.05, timeout=1, fail_on_call=1)
         ctx = _make_context(runtime=runtime)
-        worker = Worker(ctx, mode="stub", stub=stub)
+        worker = Worker(ctx, aicu_instance=stub)
         result = worker.run(ctx)
         assert result == NodeStatus.FAILED
 
@@ -380,7 +380,7 @@ class TestRealMode:
         runtime = MockRuntimeGateway()
         aicu = MockAICU(result={"final_output_path": "/tmp/real/output.py"})
         ctx = _make_context(runtime=runtime)
-        worker = Worker(ctx, mode="real", aicu_instance=aicu)
+        worker = Worker(ctx, aicu_instance=aicu)
         result = worker.run(ctx)
         assert result == NodeStatus.COMPLETED
         _, _, updates = runtime.status_updates[-1]
@@ -392,7 +392,7 @@ class TestRealMode:
         runtime = MockRuntimeGateway()
         aicu = MockAICU(fail=True)
         ctx = _make_context(runtime=runtime)
-        worker = Worker(ctx, mode="real", aicu_instance=aicu)
+        worker = Worker(ctx, aicu_instance=aicu)
         result = worker.run(ctx)
         assert result == NodeStatus.FAILED
         _, _, updates = runtime.status_updates[-1]
@@ -405,7 +405,7 @@ class TestRealMode:
         runtime = MockRuntimeGateway()
         aicu = MockAICU()
         ctx = _make_context(runtime=runtime, config={"mode": "real"})
-        worker = Worker(ctx, mode="real", aicu_instance=aicu)
+        worker = Worker(ctx, aicu_instance=aicu)
         result = worker.run(ctx)
         assert result == NodeStatus.COMPLETED
 
@@ -419,7 +419,7 @@ class TestRealMode:
         aicu = MockAICU()
         node = _make_node(task="Special task for worker")
         ctx = _make_context(node=node, runtime=runtime)
-        worker = Worker(ctx, mode="real", aicu_instance=aicu)
+        worker = Worker(ctx, aicu_instance=aicu)
         worker.run(ctx)
         assert "Special task for worker" in aicu.last_question
 
@@ -435,7 +435,7 @@ class TestLifecycleMethods:
         """stop() 调用不抛出异常"""
         stub = SuccessStub()
         ctx = _make_context()
-        worker = Worker(ctx, mode="stub", stub=stub)
+        worker = Worker(ctx, aicu_instance=stub)
         worker.stop(ctx)  # 不应抛出
 
     def test_stop_after_run(self):
@@ -443,14 +443,14 @@ class TestLifecycleMethods:
         runtime = MockRuntimeGateway()
         stub = SuccessStub()
         ctx = _make_context(runtime=runtime)
-        worker = Worker(ctx, mode="stub", stub=stub)
+        worker = Worker(ctx, aicu_instance=stub)
         worker.run(ctx)
         worker.stop(ctx)  # 不应抛出
 
     def test_pause_does_not_raise(self):
         """pause() 调用不抛出异常"""
         ctx = _make_context()
-        worker = Worker(ctx, mode="stub", stub=SuccessStub())
+        worker = Worker(ctx, aicu_instance=SuccessStub())
         worker.pause(ctx)  # 不应抛出
 
     def test_resume_returns_node_status(self):
@@ -458,7 +458,7 @@ class TestLifecycleMethods:
         runtime = MockRuntimeGateway()
         stub = SuccessStub()
         ctx = _make_context(runtime=runtime)
-        worker = Worker(ctx, mode="stub", stub=stub)
+        worker = Worker(ctx, aicu_instance=stub)
         result = worker.resume(ctx)
         assert isinstance(result, NodeStatus)
         assert result == NodeStatus.COMPLETED
@@ -466,27 +466,27 @@ class TestLifecycleMethods:
     def test_cleanup_resources_does_not_raise(self):
         """cleanup_resources() 调用不抛出异常"""
         ctx = _make_context()
-        worker = Worker(ctx, mode="stub", stub=SuccessStub())
+        worker = Worker(ctx, aicu_instance=SuccessStub())
         worker.cleanup_resources(ctx)  # 不应抛出
 
     def test_cleanup_resources_idempotent(self):
         """cleanup_resources() 幂等"""
         ctx = _make_context()
-        worker = Worker(ctx, mode="stub", stub=SuccessStub())
+        worker = Worker(ctx, aicu_instance=SuccessStub())
         worker.cleanup_resources(ctx)
         worker.cleanup_resources(ctx)  # 第二次调用不应抛出
 
     def test_stop_called_multiple_times(self):
         """多次调用 stop() 幂等"""
         ctx = _make_context()
-        worker = Worker(ctx, mode="stub", stub=SuccessStub())
+        worker = Worker(ctx, aicu_instance=SuccessStub())
         worker.stop(ctx)
         worker.stop(ctx)  # 不应抛出
 
     def test_pause_called_multiple_times(self):
         """多次调用 pause() 幂等"""
         ctx = _make_context()
-        worker = Worker(ctx, mode="stub", stub=SuccessStub())
+        worker = Worker(ctx, aicu_instance=SuccessStub())
         worker.pause(ctx)
         worker.pause(ctx)  # 不应抛出
 
@@ -495,7 +495,7 @@ class TestLifecycleMethods:
         runtime = MockRuntimeGateway()
         stub = SuccessStub(result_dict={"final_output_path": "/tmp/life/output.py"})
         ctx = _make_context(runtime=runtime)
-        worker = Worker(ctx, mode="stub", stub=stub)
+        worker = Worker(ctx, aicu_instance=stub)
 
         # Run
         r1 = worker.run(ctx)
@@ -527,7 +527,7 @@ class TestLogHook:
         runtime = MockRuntimeGateway()
         stub = SuccessStub()
         ctx = _make_context(runtime=runtime)
-        worker = Worker(ctx, mode="stub", stub=stub)
+        worker = Worker(ctx, aicu_instance=stub)
         worker.run(ctx)
         _, _, updates = runtime.status_updates[-1]
         log_entries = updates.get("log", [])
@@ -545,7 +545,7 @@ class TestLogHook:
         runtime = MockRuntimeGateway()
         stub = FailureStub()
         ctx = _make_context(runtime=runtime)
-        worker = Worker(ctx, mode="stub", stub=stub)
+        worker = Worker(ctx, aicu_instance=stub)
         worker.run(ctx)
         _, _, updates = runtime.status_updates[-1]
         log_entries = updates.get("log", [])
@@ -556,7 +556,7 @@ class TestLogHook:
         runtime = MockRuntimeGateway()
         stub = SuccessStub()
         ctx = _make_context(runtime=runtime)
-        worker = Worker(ctx, mode="stub", stub=stub)
+        worker = Worker(ctx, aicu_instance=stub)
         worker.run(ctx)
         _, _, updates = runtime.status_updates[-1]
         log_entries = updates.get("log", [])
@@ -576,7 +576,7 @@ class TestNonJsonOutputStubCompatibility:
         runtime = MockRuntimeGateway()
         stub = NonJsonOutputStub(output_mode="markdown")
         ctx = _make_context(runtime=runtime)
-        worker = Worker(ctx, mode="stub", stub=stub)
+        worker = Worker(ctx, aicu_instance=stub)
         result = worker.run(ctx)
         # ask() 返回了一个有 final_output_path 的 dict
         assert result == NodeStatus.COMPLETED
@@ -586,7 +586,7 @@ class TestNonJsonOutputStubCompatibility:
         runtime = MockRuntimeGateway()
         stub = NonJsonOutputStub(output_mode="truncated_json")
         ctx = _make_context(runtime=runtime)
-        worker = Worker(ctx, mode="stub", stub=stub)
+        worker = Worker(ctx, aicu_instance=stub)
         result = worker.run(ctx)
         # 虽然缺少 consensus_reached，但 final_output_path 存在，Worker 应成功
         assert result == NodeStatus.COMPLETED
@@ -607,11 +607,11 @@ class TestAcceptanceCriteria:
         runtime = MockRuntimeGateway()
         stub = SuccessStub()
         ctx = _make_context(runtime=runtime)
-        worker_stub = Worker(ctx, mode="stub", stub=stub)
+        worker_stub = Worker(ctx, aicu_instance=stub)
         assert worker_stub.run(ctx) == NodeStatus.COMPLETED
 
         aicu = MockAICU()
-        worker_real = Worker(ctx, mode="real", aicu_instance=aicu)
+        worker_real = Worker(ctx, aicu_instance=aicu)
         assert worker_real.run(ctx) == NodeStatus.COMPLETED
 
     # AC 2: 真实模式异常→Failed + ErrorObject
@@ -620,7 +620,7 @@ class TestAcceptanceCriteria:
         runtime = MockRuntimeGateway()
         aicu = MockAICU(fail=True)
         ctx = _make_context(runtime=runtime)
-        worker = Worker(ctx, mode="real", aicu_instance=aicu)
+        worker = Worker(ctx, aicu_instance=aicu)
         result = worker.run(ctx)
         assert result == NodeStatus.FAILED
         _, _, updates = runtime.status_updates[-1]
@@ -632,13 +632,13 @@ class TestAcceptanceCriteria:
         runtime_s = MockRuntimeGateway()
         stub_s = SuccessStub()
         ctx_s = _make_context(runtime=runtime_s)
-        w_s = Worker(ctx_s, mode="stub", stub=stub_s)
+        w_s = Worker(ctx_s, aicu_instance=stub_s)
         assert w_s.run(ctx_s) == NodeStatus.COMPLETED
 
         runtime_f = MockRuntimeGateway()
         stub_f = FailureStub()
         ctx_f = _make_context(runtime=runtime_f)
-        w_f = Worker(ctx_f, mode="stub", stub=stub_f)
+        w_f = Worker(ctx_f, aicu_instance=stub_f)
         assert w_f.run(ctx_f) == NodeStatus.FAILED
 
     # AC 4: 成功→Completed + artifact_path
@@ -647,7 +647,7 @@ class TestAcceptanceCriteria:
         runtime = MockRuntimeGateway()
         stub = SuccessStub(result_dict={"final_output_path": "/tmp/ac4/output.py"})
         ctx = _make_context(runtime=runtime)
-        worker = Worker(ctx, mode="stub", stub=stub)
+        worker = Worker(ctx, aicu_instance=stub)
         worker.run(ctx)
         _, _, updates = runtime.status_updates[-1]
         assert updates.get("artifact_path") == "/tmp/ac4/output.py"
@@ -658,7 +658,7 @@ class TestAcceptanceCriteria:
         runtime = MockRuntimeGateway()
         stub = FailureStub()
         ctx = _make_context(runtime=runtime)
-        worker = Worker(ctx, mode="stub", stub=stub)
+        worker = Worker(ctx, aicu_instance=stub)
         worker.run(ctx)
         _, _, updates = runtime.status_updates[-1]
         error = updates.get("error")
@@ -673,7 +673,7 @@ class TestAcceptanceCriteria:
         runtime = MockRuntimeGateway()
         stub = SuccessStub()
         ctx = _make_context(runtime=runtime)
-        worker = Worker(ctx, mode="stub", stub=stub)
+        worker = Worker(ctx, aicu_instance=stub)
         worker.run(ctx)
         worker.stop(ctx)  # 不应抛出
 
@@ -683,7 +683,7 @@ class TestAcceptanceCriteria:
         runtime = MockRuntimeGateway()
         stub = SuccessStub()
         ctx = _make_context(runtime=runtime)
-        worker = Worker(ctx, mode="stub", stub=stub)
+        worker = Worker(ctx, aicu_instance=stub)
         worker.run(ctx)
         worker.cleanup_resources(ctx)  # 不应抛出
 

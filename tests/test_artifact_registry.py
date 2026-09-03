@@ -94,7 +94,7 @@ def _make_context(runtime, node):
 def _run_worker(workspace, stub, node):
     runtime = _TmpRuntime(workspace)
     ctx = _make_context(runtime, node)
-    worker = Worker(ctx, mode="stub", stub=stub)
+    worker = Worker(ctx, aicu_instance=stub)
     result = worker.run(ctx)
     return result, runtime
 
@@ -393,7 +393,7 @@ def test_dependency_block_prompt_injection(tmp_path, monkeypatch):
         return orig_ask(question, max_rounds)
 
     stub.ask = _capturing_ask
-    worker = Worker(ctx, mode="stub", stub=stub)
+    worker = Worker(ctx, aicu_instance=stub)
     result = worker.run(ctx)
 
     assert result == NodeStatus.COMPLETED

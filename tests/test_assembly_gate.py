@@ -442,7 +442,7 @@ def test_integration_assembly_blocking_repair(tmp_path, monkeypatch):
     gw.add_children(node.id, [c1])
     ctx = ExecutableContext(node=node, runtime=gw,
                             config={"workspace_dir": str(tmp_path), "mode": "stub"})
-    mgr = Manager(context=ctx, stub=_PassStub(["c1"]))
+    mgr = Manager(context=ctx, aicu_instance=_PassStub(["c1"]))
     result = mgr.run(ctx)
     assert result == NodeStatus.WAITING
     assert gw.fix_plans, "Assembly blocking 必须驱动 submit_fix_plan"
@@ -469,7 +469,7 @@ def test_integration_assembly_pass_delivers(tmp_path, monkeypatch):
     gw.add_children(node.id, [c1])
     ctx = ExecutableContext(node=node, runtime=gw,
                             config={"workspace_dir": str(tmp_path), "mode": "stub"})
-    mgr = Manager(context=ctx, stub=_PassStub(["c1"]))
+    mgr = Manager(context=ctx, aicu_instance=_PassStub(["c1"]))
     result = mgr.run(ctx)
     assert result == NodeStatus.COMPLETED
     completed = [u for _, s, u in gw.status_updates if s == NodeStatus.COMPLETED]
@@ -495,7 +495,7 @@ def test_integration_assembly_delivery_off_unchanged(tmp_path):
     gw.add_children(node.id, [c1])
     ctx = ExecutableContext(node=node, runtime=gw,
                             config={"workspace_dir": str(tmp_path), "mode": "stub"})
-    mgr = Manager(context=ctx, stub=_PassStub(["c1"]))
+    mgr = Manager(context=ctx, aicu_instance=_PassStub(["c1"]))
     result = mgr.run(ctx)
     assert result == NodeStatus.COMPLETED
     # 无 delivery_state 注入

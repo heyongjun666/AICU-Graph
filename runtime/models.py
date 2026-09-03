@@ -483,8 +483,8 @@ class Node:
     activation_count: int = 0
     pending_context: Optional[dict] = None
     pending_routing: Optional[RoutingDecision] = None
-    # 增量续跑（Revise）显式标记：区分普通 Manager Expand 与用户主动增量触发
-    # 的 Manager Expand。仅由 revise_manager_node 置位，Routing/Repair 保持 False。
+    # 增量续跑（Revise）显式标记：区分普通 Manager Expand 与增量触发的续跑。
+    # 由用户 Revise、事件重激活和复用既有节点等增量路径置位。
     pending_revise: bool = False
     # === 闭环协作台账（A2：Manager 逐轮 review 累积，业务产出 closed_loop.json） ===
     collaboration_ledger: list[dict] = field(default_factory=list)

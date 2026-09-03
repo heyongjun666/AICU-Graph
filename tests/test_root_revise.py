@@ -655,7 +655,9 @@ class TestExpandDuckTyping:
         prompt = aicu.incremental_prompts[0]
         assert "CURRENT_INCREMENTAL_TASK" in prompt
         assert "HISTORICAL_TASK" not in prompt
-        assert "Reuse Candidates" not in prompt
+        assert "Reuse Candidates" in prompt
+        assert "step_ref: `dev`" in prompt
+        assert "reuse_step_ref" in prompt
         assert "执行上下文快照" not in prompt
         assert "CodeGraph" not in prompt
         assert rt.submitted_revisions == ["M1"]

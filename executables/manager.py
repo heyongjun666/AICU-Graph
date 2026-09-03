@@ -1216,9 +1216,9 @@ class Manager(Executable):
     def _build_revise_incremental_prompt(self, ctx: ExecutableContext) -> str:
         """Build the only message sent for a Manager Revise generation turn.
 
-        The Manager's existing children, original task, and prior decisions are
-        already in the resumed CC conversation and workspace.  Repeating them
-        here makes stale plans compete with the current request.
+        The request stays incremental, while the current child candidates are
+        included explicitly so the Manager can make a deterministic reuse
+        decision instead of treating missing ``reuse_step_ref`` as a new node.
         """
         incremental = (
             (getattr(ctx.node, "pending_context", None) or {}).get("incremental_task")
@@ -1227,11 +1227,16 @@ class Manager(Executable):
         ).strip()
         if not incremental:
             raise ValueError("Manager Revise requires a non-empty incremental task")
-        return (
+
+        parts = [
             "这是当前最高优先级的增量请求。请基于已有会话、已有子节点和已有产物，"
-            "重新生成当前版本的 ExecutionPlan；不要直接沿用历史计划。\n\n"
-            f"当前增量请求:\n{incremental}"
-        )
+            "重新生成当前版本的 ExecutionPlan；不要直接沿用历史计划。",
+            f"当前增量请求:\n{incremental}",
+        ]
+        candidates = self._build_revise_candidates_block(ctx)
+        if candidates:
+            parts.append(candidates)
+        return "\n\n".join(parts)
 
     def _build_expand_prompt(self, ctx: ExecutableContext) -> str:
         """构造 Expand 阶段 prompt — 含执行上下文快照 + 原始task。

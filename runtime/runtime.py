@@ -1252,12 +1252,14 @@ class Runtime(RuntimeGateway, SchedulerDelegate):
                     f"expected FAILED or STOPPED"
                 )
 
-            common_reset = {
+            # 手动 Continue 的预算与 Manager 阶段是业务决策；公共字段更新和
+            # 状态迁移由 Scheduler.reactivate 统一承担。产物保持不变，符合
+            # Continue 的“保留已有产出”语义。
+            reactivation_updates = {
                 "error": None,
                 "started_at": None,
                 "finished_at": None,
             }
-
             if node.exec_type == "manager":
                 children = self.graph.children(node_id)
                 # 手动 Continue 是人工干预：额外授予 review 预算，避免原实现把
@@ -1269,42 +1271,37 @@ class Runtime(RuntimeGateway, SchedulerDelegate):
                     node.max_iterations or 0,
                     (node.iteration_count or 0) + MANUAL_CONTINUE_BUDGET,
                 )
+                target_status = NodeStatus.READY if children else NodeStatus.WAITING
+                reactivation_updates.update({
+                    "manager_phase": "review" if children else None,
+                    "max_iterations": granted_max,
+                })
                 if children:
-                    # 有子节点 → 仅重新 review（保留子节点/产物），授予额外预算
-                    self.graph.update_node(
-                        node_id,
-                        status=NodeStatus.READY,
-                        manager_phase="review",
-                        max_iterations=granted_max,
-                        **common_reset,
-                    )
-                    logger.info(
+                    log_message = (
                         "Manager '%s' continued (review-only, "
-                        "max_iterations granted=%d, %d children preserved)",
-                        node_id, granted_max, len(children),
+                        "max_iterations granted=%d, %d children preserved)"
                     )
+                    log_args = (node_id, granted_max, len(children))
                 else:
-                    # 无子节点 → 重新 expand，同样授予额外预算
-                    self.graph.update_node(
-                        node_id,
-                        status=NodeStatus.WAITING,
-                        manager_phase=None,
-                        max_iterations=granted_max,
-                        **common_reset,
-                    )
-                    logger.info(
+                    log_message = (
                         "Manager '%s' continued (re-expand, no children, "
-                        "max_iterations granted=%d)", node_id, granted_max,
+                        "max_iterations granted=%d)"
                     )
+                    log_args = (node_id, granted_max)
             else:
                 # Worker → 重新执行
-                self.graph.update_node(
-                    node_id,
-                    status=NodeStatus.WAITING,
-                    manager_phase=None,
-                    **common_reset,
-                )
-                logger.info("Worker '%s' continued", node_id)
+                children = []
+                target_status = NodeStatus.WAITING
+                reactivation_updates["manager_phase"] = None
+                log_message = "Worker '%s' continued"
+
+            self.graph.update_node(node_id, **reactivation_updates)
+            self.scheduler.reactivate(
+                node_id,
+                target_status=target_status,
+                emit_notification=True,
+            )
+            logger.info(log_message, *log_args)
 
             # 回退父 Manager 链
             self.planner.rewind_parent_chain_for_retry(

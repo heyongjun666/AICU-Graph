@@ -847,9 +847,14 @@ class TestReviseEndpoint:
             time.sleep(0.02)
         assert rt.graph.get_node(root_id).status == NodeStatus.COMPLETED
 
-        # 停掉后台 tick，确保后续状态断言确定（revise 内部 start 也被打桩）
+        # 停掉后台 tick，确保后续状态断言确定；Revise 不得重新启动 Scheduler。
         rt.scheduler.stop()
-        rt.scheduler.start = lambda: None  # type: ignore[method-assign]
+        start_calls: list[None] = []
+
+        def unexpected_start() -> None:
+            start_calls.append(None)
+
+        rt.scheduler.start = unexpected_start  # type: ignore[method-assign]
 
         ok = session_client.post(
             f"/v1/sessions/{sid}/nodes/{root_id}/revise",
@@ -857,6 +862,7 @@ class TestReviseEndpoint:
         )
         assert ok.status_code == 200, ok.text
         assert ok.json()["status"] == "revising"
+        assert start_calls == []
         node = rt.graph.get_node(root_id)
         assert node.status == NodeStatus.WAITING
         assert node.manager_phase == "expand"

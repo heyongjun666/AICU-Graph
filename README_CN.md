@@ -111,11 +111,6 @@ Role 和 Skills 是节点执行时使用的能力配置。它们保存在 `roles
 | **Triple** | `3` | 两个 Agent 独立产出，第三个 Agent 比较、选优和融合 | 需求分析、架构设计、重要技术决策 |
 | **Full** | `4` | 双方案产出、融合评审，再由独立 Agent 深度审计和推动修复 | 核心功能、高风险任务、发布前审计 |
 
-这些模式可以按节点配置分别选择。它们与 `EXEC_MODE` 是两个独立维度：
-
-- `EXEC_MODE=real`：调用实际配置的 Codex、Pi、Qwen、Claude 等 CLI；
-- `EXEC_MODE=stub`：使用确定性桩执行，用于离线测试和流程验收。
-
 ## 当前实现
 
 当前仓库已经包含：
@@ -126,7 +121,7 @@ Role 和 Skills 是节点执行时使用的能力配置。它们保存在 `roles
 - 共享工作区、Artifact 管理和交付检查；
 - 多种 AI Coding CLI 适配器及模型 / Provider 配置；
 - React 前端工作台；
-- Stub 模式和较完整的 Python / 前端测试套件。
+- 真实 CLI 执行和较完整的 Python / 前端测试套件。
 
 AICU-Graph 当前是一个可运行的研究与工程原型。部分 CLI、模型和外部服务的可用性取决于本机安装、账号权限、API Key 和厂商配额。
 
@@ -162,14 +157,6 @@ http://localhost:8080
 ```
 
 启动后可以访问前端工作台，或使用 REST API 创建会话和提交任务。API、凭证配置、CLI 安装和常见问题请参阅 [docs/INSTALL.md](docs/INSTALL.md)。
-
-### 离线测试
-
-不希望调用真实 AI CLI 时，可以使用桩模式：
-
-```bash
-EXEC_MODE=stub python main.py
-```
 
 ## 文档导航
 

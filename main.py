@@ -36,9 +36,9 @@ def main():
 
     logger.info("Starting cc_0 Runtime ...")
 
-    # 1. 创建 ExecutableRegistry 并注册 Manager/Worker
-    #    通过环境变量 EXEC_MODE=real 让 Worker/Manager 默认走真实 AICU 路径
-    os.environ.setdefault("EXEC_MODE", "real")
+    # 1. 创建 ExecutableRegistry 并注册 Manager/Worker。
+    #    服务入口始终使用真实 AICU；测试替身只能由测试代码显式注入。
+    logger.info("External CLI execution required")
     registry = ExecutableRegistry()
     registry.register("manager", Manager)
     registry.register("worker", Worker)

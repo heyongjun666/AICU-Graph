@@ -111,11 +111,6 @@ Each AICU node can configure `num_ccs` to select an internal peer collaboration 
 | **Triple** | `3` | Two agents produce independently; a third compares, selects, and merges | Requirements, architecture, important decisions |
 | **Full** | `4` | Two proposals, merge review, independent deep audit, and repair iterations | Core features, high-risk work, release audits |
 
-These modes can be selected independently for different nodes. They are separate from `EXEC_MODE`:
-
-- `EXEC_MODE=real`: invoke configured Codex, Pi, Qwen, Claude, or other CLI tools;
-- `EXEC_MODE=stub`: use deterministic stubs for offline tests and workflow validation.
-
 ## Current Implementation
 
 The repository currently includes:
@@ -126,7 +121,7 @@ The repository currently includes:
 - Shared workspaces, artifact management, and delivery checks;
 - Multiple AI coding CLI adapters and model / provider configuration;
 - A React workbench;
-- Stub execution and a substantial Python / frontend test suite.
+- Real CLI execution and a substantial Python / frontend test suite.
 
 AICU-Graph is currently a runnable research and engineering prototype. The availability of a specific CLI, model, or external service depends on local installation, account permissions, API keys, and provider quotas.
 
@@ -162,14 +157,6 @@ http://localhost:8080
 ```
 
 After startup, open the workbench or use the REST API to create sessions and submit tasks. For CLI installation, credential configuration, API details, and troubleshooting, see [docs/INSTALL.md](docs/INSTALL.md).
-
-### Offline testing
-
-To run the workflow without invoking a real AI coding CLI:
-
-```bash
-EXEC_MODE=stub python main.py
-```
 
 ## Documentation
 

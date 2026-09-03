@@ -12,20 +12,6 @@ from typing import Any, Optional, Protocol, runtime_checkable
 from runtime.models import ExecutionPlan, Node, NodeStatus
 
 
-def normalize_exec_mode(mode: str) -> str:
-    """Normalize supported execution modes and reject unsafe typos."""
-    if not isinstance(mode, str):
-        raise ValueError("EXEC_MODE must be 'stub', 'mock', or 'real'")
-    normalized = mode.strip().lower()
-    if normalized == "mock":
-        normalized = "stub"
-    if normalized not in {"stub", "real"}:
-        raise ValueError(
-            f"Unsupported EXEC_MODE '{mode}'; expected 'stub', 'mock', or 'real'"
-        )
-    return normalized
-
-
 # ============================================================================
 # RuntimeGateway Protocol
 # ============================================================================

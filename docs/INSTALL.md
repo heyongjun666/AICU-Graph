@@ -164,14 +164,6 @@ export ANTHROPIC_API_KEY="你的 API Key"
 
 不要把真实 API Key 写入源码、README、`.env` 文件或 Git 提交中。
 
-## 7. 离线运行
-
-不调用真实 AI CLI 时，可以使用 Stub 模式验证基础流程：
-
-```bash
-EXEC_MODE=stub python3 main.py
-```
-
 ## 8. 基本验证
 
 服务启动后，检查 API 是否正常响应：

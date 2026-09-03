@@ -3,7 +3,7 @@ runtime/server.py — FastAPI HTTP REST API + SSE 端点
 
 提供 20 个 REST API 端点（6 Graph 级 + 11 Node 级 + 1 全局日志 + 2 元数据 roles）
 和 SSE 事件流端点。通过 create_app(runtime, sse_manager) 工厂函数创建，
-便于测试时注入 mock 依赖。
+便于测试时注入依赖。
 """
 
 import logging

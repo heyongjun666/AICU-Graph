@@ -21,7 +21,7 @@ import { useSessionStore } from './stores/SessionStore';
 import { useUIStateStore } from './stores/UIStateStore';
 import { useEventStore } from './stores/EventStore';
 import { LinkCandidate, NodeConfig, SessionSummary } from './types';
-import { createSessionNode, getGlobalConfig, getLinkCandidates } from './utils/api';
+import { createSessionNode, getGlobalConfig, getGraphSnapshot, getLinkCandidates } from './utils/api';
 import { useI18n } from './i18n';
 import ToastContainer from './components/ToastContainer';
 import './workbench.css';
@@ -41,6 +41,7 @@ const App: React.FC = () => {
   const deleteSession = useSessionStore((state) => state.deleteSession);
   const resetGraph = useGraphStore((state) => state.resetGraph);
   const addNode = useGraphStore((state) => state.addNode);
+  const batchUpdate = useGraphStore((state) => state.batchUpdate);
   const nodes = useGraphStore((state) => state.nodes);
   const selectedNodeId = useGraphStore((state) => state.selectedNodeId);
   const clientStatus = useUIStateStore((state) => state.clientStatus);
@@ -136,7 +137,14 @@ const App: React.FC = () => {
         throw new Error(linkCandidateError || t('dialog.candidatesLoadFailed'));
       }
       const node = await createSessionNode(activeSessionId, payload);
-      addNode(node);
+      // 后端会为新节点生成 parent/dependency 边（随机 UUID，前端无法本地预测），
+      // 拉一次权威快照让结构/依赖连线立即出现；快照失败时降级为仅显示节点。
+      try {
+        const snapshot = await getGraphSnapshot(activeSessionId);
+        batchUpdate(snapshot.nodes, snapshot.edges);
+      } catch {
+        addNode(node);
+      }
       setNewNodeOpen(false);
       await refreshSessions();
     } finally {

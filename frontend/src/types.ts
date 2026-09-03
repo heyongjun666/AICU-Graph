@@ -134,7 +134,8 @@ export interface SessionSummary {
 
 /** 节点和会话的执行配置。API Key 仅保存环境变量名。 */
 export interface NodeConfig {
-  cli_name?: 'internal' | 'claude' | 'codex' | 'kimi' | 'qwen' | 'antigravity' | 'grok';
+  /** CLI 名称（来自后端 /v1/config 的动态 clis 注册表；缺省表示使用角色/会话默认）。 */
+  cli_name?: string;
   model?: string;
   api_base_url?: string;
   api_key_env?: string;

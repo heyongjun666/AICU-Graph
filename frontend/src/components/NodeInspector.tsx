@@ -34,6 +34,7 @@ import {
   updateSessionNode,
 } from '../utils/api';
 import { useI18n } from '../i18n';
+import { useAvailableClis } from '../hooks/useAvailableClis';
 
 type Tab = 'overview' | 'logs' | 'artifact' | 'events';
 
@@ -100,6 +101,7 @@ const NodeInspector: React.FC = () => {
   const [skillIds, setSkillIds] = useState('');
   const [skipPermissions, setSkipPermissions] = useState(true);
   const [error, setError] = useState('');
+  const { clis, defaultCli } = useAvailableClis();
 
   useEffect(() => {
     setNode(storeNode || null);
@@ -107,7 +109,7 @@ const NodeInspector: React.FC = () => {
       const config = storeNode.config || {};
       setTask(storeNode.task || '');
       setRole(storeNode.role || 'default');
-      setCliName(config.cli_name || 'internal');
+      setCliName(config.cli_name || '');
       setModel(config.model || '');
       setApiBaseUrl(config.api_base_url || '');
       setApiKeyEnv(config.api_key_env || '');
@@ -258,7 +260,7 @@ const NodeInspector: React.FC = () => {
     try {
       const config: NodeConfig = {
         ...(node.config || {}),
-        cli_name: cliName,
+        cli_name: cliName || undefined,
         model: model.trim() || undefined,
         api_base_url: apiBaseUrl.trim() || undefined,
         api_key_env: apiKeyEnv.trim() || undefined,
@@ -521,7 +523,7 @@ const NodeInspector: React.FC = () => {
       {editing && (
         <div className="inspector-editor">
           <div className="dialog-header"><h2>{t('inspector.editNode')}</h2><button className="icon-button" onClick={() => setEditing(false)}><X size={17} /></button></div>
-          <div className="form-grid two-columns"><label>{t('node.role')}<input value={role} onChange={(event) => setRole(event.target.value)} /></label><label>{t('dialog.cli')}<select value={cliName} onChange={(event) => setCliName(event.target.value as NodeConfig['cli_name'])}><option value="internal">Internal</option><option value="claude">Claude Code</option></select></label></div>
+          <div className="form-grid two-columns"><label>{t('node.role')}<input value={role} onChange={(event) => setRole(event.target.value)} /></label><label>{t('dialog.cli')}<select value={cliName} onChange={(event) => setCliName(event.target.value as NodeConfig['cli_name'])}><option value="">{t('settings.autoDetect')}{defaultCli ? ` (${defaultCli})` : ''}</option>{clis.map((cli) => <option key={cli.id} value={cli.id}>{cli.display_name}{cli.installed ? '' : t('settings.notInstalled')}</option>)}{cliName && !clis.some((cli) => cli.id === cliName) ? <option value={cliName}>{cliName}</option> : null}</select></label></div>
           <label>{t('dialog.task')}<textarea value={task} onChange={(event) => setTask(event.target.value)} rows={7} /></label>
           <div className="form-grid two-columns"><label>{t('dialog.model')}<input value={model} onChange={(event) => setModel(event.target.value)} placeholder={t('dialog.useSessionDefault')} /></label><label>{t('dialog.apiKeyEnv')}<input value={apiKeyEnv} onChange={(event) => setApiKeyEnv(event.target.value)} placeholder="ANTHROPIC_API_KEY" /></label><label className="full-field">{t('dialog.apiBaseUrl')}<input value={apiBaseUrl} onChange={(event) => setApiBaseUrl(event.target.value)} /></label><label className="full-field">{t('inspector.skillIds')}<input value={skillIds} onChange={(event) => setSkillIds(event.target.value)} placeholder="skill-one, focused-review" /></label></div>
           <label className="toggle-field"><input type="checkbox" checked={skipPermissions} onChange={(event) => setSkipPermissions(event.target.checked)} /><span>{t('dialog.runWithoutPerms')}</span></label>

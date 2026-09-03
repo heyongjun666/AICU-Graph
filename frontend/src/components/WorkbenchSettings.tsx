@@ -266,6 +266,12 @@ const WorkbenchSettings: React.FC<WorkbenchSettingsProps> = ({ open, onClose, on
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
+  // 成功提示 banner 自动消除（与 Toast 默认 3000ms 对齐），避免"已删除"等信息常驻不清。
+  useEffect(() => {
+    if (!notice) return;
+    const timer = setTimeout(() => setNotice(''), 3000);
+    return () => clearTimeout(timer);
+  }, [notice]);
   const [apiKey, setApiKey] = useState('');
   const [apiKeyVendor, setApiKeyVendor] = useState<string | null>(null);
   const [internalUsername, setInternalUsername] = useState('');
@@ -535,6 +541,7 @@ const WorkbenchSettings: React.FC<WorkbenchSettingsProps> = ({ open, onClose, on
       const nextRoles = await getRoles();
       setRoles(nextRoles);
       setNotice(t('settings.roleDeleted'));
+      addToast({ type: 'success', message: t('settings.roleDeleted') });
       const next = nextRoles[0];
       if (next) await chooseRole(`${next.type}:${next.id}`);
       else { setSelectedRole(''); setRoleId(''); setRoleType('worker'); setRoleConfig({}); setRoleSchema(await getRoleSchema('worker')); }
@@ -553,6 +560,7 @@ const WorkbenchSettings: React.FC<WorkbenchSettingsProps> = ({ open, onClose, on
       const nextSkills = await getSkills();
       setSkills(nextSkills);
       setNotice(t('settings.skillDeleted'));
+      addToast({ type: 'success', message: t('settings.skillDeleted') });
       const next = nextSkills[0];
       if (next) await chooseSkill(next.id);
       else { setSelectedSkill(''); setSkillId(''); setSkillContent('# Skill\n\n'); setSkillDetail(null); }

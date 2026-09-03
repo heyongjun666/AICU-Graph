@@ -2,6 +2,7 @@ import React, { FormEvent, useEffect, useState } from 'react';
 import { X } from 'lucide-react';
 import { GraphNode, LinkCandidate, NodeConfig, RoleInfo, SessionSummary, SkillInfo } from '../types';
 import { getRoles, getSkills } from '../utils/api';
+import { useAvailableClis } from '../hooks/useAvailableClis';
 import { useI18n, translate } from '../i18n';
 
 interface NewSessionDialogProps {
@@ -164,6 +165,7 @@ export const NewNodeDialog: React.FC<NodeDialogProps> = ({
   const [dependencyQuery, setDependencyQuery] = useState('');
   const [skillQuery, setSkillQuery] = useState('');
   const [error, setError] = useState('');
+  const { clis, defaultCli } = useAvailableClis();
 
   useEffect(() => {
     if (!open) return;
@@ -196,6 +198,12 @@ export const NewNodeDialog: React.FC<NodeDialogProps> = ({
       });
     return () => { cancelled = true; };
   }, [open]);
+
+  // CLI 选项可能晚于对话框打开到达：保留用户选择，仅当当前值不在权威列表中时回退为"自动（会话默认）"。
+  useEffect(() => {
+    if (clis.length === 0) return;
+    setCliName((current) => (current && clis.some((cli) => cli.id === current) ? current : ''));
+  }, [clis]);
 
   const availableCandidates = candidates;
   const parentCandidates = availableCandidates.filter(
@@ -262,7 +270,7 @@ export const NewNodeDialog: React.FC<NodeDialogProps> = ({
     try {
       setError('');
       const config: NodeConfig = {
-        cli_name: cliName,
+        cli_name: cliName || undefined,
         model: model.trim() || undefined,
         api_base_url: apiBaseUrl.trim() || undefined,
         api_key_env: apiKeyEnv.trim() || undefined,
@@ -299,7 +307,7 @@ export const NewNodeDialog: React.FC<NodeDialogProps> = ({
             setParentId(nextParentId);
             setDependencies((current) => current.filter((id) => id !== nextParentId));
           }}><option value="">{t('dialog.noParent')}</option>{parentCandidates.map((candidate) => <option key={candidate.id} value={candidate.id}>{candidate.label}</option>)}</select></label>
-          <label>{t('dialog.cli')}<select value={cliName} onChange={(event) => setCliName(event.target.value as NodeConfig['cli_name'])}><option value="internal">Internal</option><option value="claude">Claude Code</option></select></label>
+          <label>{t('dialog.cli')}<select value={cliName} onChange={(event) => setCliName(event.target.value as NodeConfig['cli_name'])}><option value="">{t('settings.autoDetect')}{defaultCli ? ` (${defaultCli})` : ''}</option>{clis.map((cli) => <option key={cli.id} value={cli.id}>{cli.display_name}{cli.installed ? '' : t('settings.notInstalled')}</option>)}</select></label>
         </div>
         <label>{t('dialog.task')}<textarea autoFocus value={task} onChange={(event) => setTask(event.target.value)} rows={5} placeholder={t('dialog.taskPlaceholder')} /></label>
         <div className="node-dialog-section"><div className="node-dialog-section-title">{t('dialog.dependencies')}</div>{candidateStatus === 'loading' && <div className="picker-status">{t('dialog.loadingCandidates')}</div>}{candidateStatus === 'error' && <div className="picker-status is-error">{candidateError || t('dialog.candidatesLoadFailed')}</div>}<SearchCheckboxPicker

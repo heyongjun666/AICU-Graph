@@ -55,9 +55,37 @@ class _FakeAICU:
 
 
 def _real_router(fake, graph):
-    router = AICURouter(mode="real", aicu_instance=fake)
+    router = AICURouter(aicu_instance=fake)
     router.attach_graph(graph)
     return router
+
+
+def test_real_router_passes_system_config_to_aicu(monkeypatch, tmp_path):
+    captured = {}
+
+    class _ConfiguredAICU:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+    import aicu
+
+    monkeypatch.setattr(aicu, "AICU", _ConfiguredAICU)
+    router = AICURouter(
+        workspace_root=str(tmp_path),
+        config={
+            "model": "system-model",
+            "cli_name": "system-cli",
+            "api_base_url": "https://system.example/v1",
+            "api_key_env": "SYSTEM_API_KEY",
+        },
+    )
+
+    router._create_real_aicu()
+
+    assert captured["model"] == "system-model"
+    assert captured["cli_name"] == "system-cli"
+    assert captured["api_base_url"] == "https://system.example/v1"
+    assert captured["api_key_env"] == "SYSTEM_API_KEY"
 
 
 # ---------------------------------------------------------------------------
@@ -214,7 +242,7 @@ def test_conversation_reset_on_structural_change_not_status():
 def test_stub_mode_structure_change_is_noop():
     g = Graph()
     g.add_node(_node("n1"))
-    router = AICURouter(mode="stub")
+    router = AICURouter(aicu_instance=_FakeAICU())
     router.attach_graph(g)
 
     router.route(_event())                      # 初始化 epoch

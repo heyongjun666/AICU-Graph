@@ -533,10 +533,7 @@ class AgentEventManager:
         if self._graph is None:
             return
         if self._router is None:
-            # 未注入 Router 时惰性创建默认 no-op 桩（事件不被路由，保持可独立使用）
-            from runtime.router import AICURouter
-            self._router = AICURouter(mode="stub")
-            self._router.attach_graph(self._graph)
+            raise RuntimeError("AgentEventManager requires a configured AICURouter")
         for msg in messages:
             attempt = self._route_attempts.get(msg.event_id, 0) + 1
             self._route_attempts[msg.event_id] = attempt

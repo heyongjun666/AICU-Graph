@@ -77,7 +77,8 @@ class Runtime(RuntimeGateway, SchedulerDelegate):
         max_concurrency: int = 4,
         workspace_root: Optional[str] = None,
         roles_dir: Optional[str] = None,
-        router_stub: Optional[Any] = None,
+        router_aicu_instance: Optional[Any] = None,
+        router_config: Optional[dict[str, Any]] = None,
     ):
         self.max_concurrency = max_concurrency
         self.workspace_root = workspace_root or os.getcwd()

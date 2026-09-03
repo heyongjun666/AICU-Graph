@@ -9,18 +9,14 @@ runtime/router.py — AICU Router：独立事件路由决策器
   - Router 决定「一个 Event 该交给哪些 Node」，输入 = Event + 当前组织图上下文；
     输出 = 目标 node_id 列表（空 = 无人接收）。
   - **Event.content 只描述事件本身，不得携带任何 Router 指令 / 目标声明**。
-    本模块（及任何 stub）绝不解析 content 中的 target/to/route_to 之类字段。
+    本模块绝不解析 content 中的 target/to/route_to 之类字段。
   - **Router 内部不发展第二套"确定性路由规则"**：无 Subscription Router /
     Collaboration Router / Rule Router / "if content contains ..." 特判。
     组织图遍历即唯一上下文来源，不建立 Capability Graph / Candidate Resolver /
     Routing Index 等第二套索引体系。
   - Router 目标可以是任意 Node（Worker→Worker / Worker→Manager / Manager→Manager）。
 
-stub/real 双模式复用 Executable 的 ``mode``/``stub``/``aicu_instance`` 三参数模式
-（参考 executables/worker.py Worker.__init__ 与 executables/manager.py
-_call_aiCU_with_retry）。默认 stub 为空决策（不路由）；测试/e2e 注入的桩基于
-Router prompt（Event + Producer + 组织图）用**测试专用映射表**决策并返回
-``{"targets": [...]}``。
+Router 使用真实 AICU；测试可通过 ``aicu_instance`` 显式注入实现 ``ask()`` 的 fake。
 """
 
 import json
@@ -33,44 +29,22 @@ from runtime.models import EventMessage
 logger = logging.getLogger(__name__)
 
 
-class DefaultRouterStub:
-    """默认 Router 桩：空决策（无人接收）。
-
-    测试/e2e 注入自定义桩（必须实现 ``ask()``）处理 ``## Route Event`` prompt，
-    基于 prompt 中的 Event + Producer + 组织图返回 ``{"targets": [...]}``。
-    桩内部用测试专用映射表做固定决策——映射表是测试代码，**不进入 Event.content、
-    不作为框架逻辑**。
-    """
-
-    def ask(self, prompt: str) -> str:  # noqa: ARG002
-        """空决策：不路由给任何节点。"""
-        return '{"targets": []}'
-
-
 class AICURouter:
     """决定一个 Event 该交给哪些 Node。
 
-    LLM 决策；stub/real 双模式。组织图快照是 Router 的唯一外部输入。producer
-    上下文以 node_id 为准，step_ref 仅经兼容层解析。
+    LLM 决策。组织图快照是 Router 的唯一外部输入。producer 上下文以 node_id
+    为准，step_ref 仅经兼容层解析。
     """
 
     def __init__(
         self,
-        mode: Optional[str] = None,
-        stub: Optional[Any] = None,
         aicu_instance: Optional[Any] = None,
         workspace_root: Optional[str] = None,
+        config: Optional[dict[str, Any]] = None,
     ):
-        from executables.base import normalize_exec_mode
-
-        if mode is None:
-            mode = os.environ.get("EXEC_MODE", "stub")
-        self._mode = normalize_exec_mode(mode)
-        self._stub = stub if stub is not None else (
-            DefaultRouterStub() if self._mode == "stub" else None
-        )
         self._aicu = aicu_instance
         self._workspace_root = os.path.abspath(workspace_root or os.getcwd())
+        self._config = dict(config or {})
         self._graph: Any = None
         # 快照缓存：graph_version 未变化时复用（图没变不扫全量节点）。
         self._snapshot_version: Optional[int] = None
@@ -104,7 +78,7 @@ class AICURouter:
         """决定 Event 该交给哪些 Node，返回目标 node_id 列表（空 = 无人接收）。
 
         流程：组织图快照 → 结构版本检查（变化则重置会话）→ build prompt → ask
-        （stub/real）→ parse targets。不解析 Event.content 中的任何"目标声明"——
+        真实 AICU → parse targets。不解析 Event.content 中的任何"目标声明"——
         content 只作为事件本身的描述传给 LLM/桩。
         """
         self._last_trace = {}
@@ -128,7 +102,6 @@ class AICURouter:
             "candidate_nodes": [dict(item) for item in snapshot],
             "graph_version": getattr(self._graph, "graph_version", None),
             "structure_epoch": self._structure_epoch,
-            "mode": self._mode,
         }
         prompt = self._build_prompt(event, producer_id, snapshot)
         try:
@@ -173,7 +146,7 @@ class AICURouter:
 
         只响应结构变更（新增/删除节点或边、换 parent、改 exec_type/role/
         step_ref）；运行状态变化（running/completed/failed）不切换——否则一个
-        Node 状态变一次就重建一次 Router，失去意义。stub 模式无会话，no-op。
+        Node 状态变一次就重建一次 Router，失去意义。AICU 尚未创建时 no-op。
         """
         if self._graph is None:
             return
@@ -189,23 +162,19 @@ class AICURouter:
     def _reset_conversation(self) -> None:
         """重置 AICU 会话（只清 conversation_id，不起新进程/不重建实例）。
 
-        stub 模式无会话；AICU 尚未创建时首次路由即全新会话，均 no-op。
+        AICU 尚未创建时首次路由即全新会话，no-op。
         """
-        if self._mode == "stub" or self._aicu is None:
+        if self._aicu is None:
             return
         for cc in getattr(self._aicu, "ccs", []):
             cc.reset_conversation()
 
     # ------------------------------------------------------------------
-    # AI 调用（stub / real 双模式）
+    # AI 调用
     # ------------------------------------------------------------------
 
     def _ai(self) -> Any:
-        """返回当前模式的 AI 实例（stub 桩 或 real AICU）。"""
-        if self._mode == "stub":
-            if self._stub is None:
-                self._stub = DefaultRouterStub()
-            return self._stub
+        """返回注入或创建的真实 AICU 实例。"""
         if self._aicu is None:
             self._aicu = self._create_real_aicu()
         return self._aicu
@@ -225,6 +194,10 @@ class AICURouter:
             parent_workspace=workspace_dir,
             role="router",
             num_ccs=1,
+            model=self._config.get("model"),
+            cli_name=self._config.get("cli_name"),
+            api_base_url=self._config.get("api_base_url"),
+            api_key_env=self._config.get("api_key_env"),
             skip_permissions=True,
         )
 
@@ -432,7 +405,7 @@ class AICURouter:
 
         real 模式下 ``AICU.ask()`` 返回**元数据 dict**（``content`` / ``content_parsed`` /
         ``final_output_path``，与 manager._extract_review_content 同源问题），顶层没有
-        ``targets`` 键。因此先做一次归一化：顶层有 ``targets``（stub 直传 dict 兼容）直接用；
+        ``targets`` 键。因此先做一次归一化：顶层有 ``targets`` 直接用；
         否则按 content_parsed → content → final_output_path 优先级提取真实决策载荷。
         """
         # ---- real AICU 元数据 dict 归一化（顶层无 targets 时） ----

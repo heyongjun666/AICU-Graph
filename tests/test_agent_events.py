@@ -82,7 +82,7 @@ class _RouteMapStub:
 def _make_runtime(tmp_path, route_map=None):
     rt = Runtime(
         workspace_root=str(tmp_path),
-        router_stub=_RouteMapStub(route_map),
+        router_aicu_instance=_RouteMapStub(route_map),
     )
     rt.registry.register("manager", _TestExecutable)
     rt.registry.register("worker", _TestExecutable)
@@ -592,7 +592,7 @@ class TestWorkerRunFlush:
         ]))
         backend, frontend = nodes
         stub = _EventPublishingStub()
-        worker = Worker(ExecutableContext(node=backend, runtime=rt, config=backend.config), stub=stub)
+        worker = Worker(ExecutableContext(node=backend, runtime=rt, config=backend.config), aicu_instance=stub)
         status = worker.run(ExecutableContext(node=backend, runtime=rt, config=backend.config))
         assert status == NodeStatus.COMPLETED
 
@@ -653,7 +653,7 @@ class TestRouterDelivery:
         ]))
         backend, frontend = nodes
         # Router 桩直接返回目标 node_id（经 _parse_targets 解析为图中 id 投递）
-        runtime.router._stub.mapping = {"t": [frontend.id]}
+        runtime.router._aicu.mapping = {"t": [frontend.id]}
         runtime.publish_events(backend.id, [{"content": "t 信号"}])
         inbox = os.path.join(runtime.get_node_workspace(frontend.id), "event_inbox")
         assert len(os.listdir(inbox)) == 1

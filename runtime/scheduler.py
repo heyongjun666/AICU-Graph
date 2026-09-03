@@ -1171,14 +1171,14 @@ class Scheduler:
             and children
             and all(c.status in terminal_statuses for c in children)
         ):
+            self.reactivate(
+                failed_node_id,
+                target_status=NodeStatus.READY,
+                reset_artifacts=True,
+            )
             self.graph.update_node(
                 failed_node_id,
-                status=NodeStatus.READY,
-                artifact_path=None,
-                error=None,
                 manager_phase="review",
-                started_at=None,
-                finished_at=None,
                 iteration_count=new_iteration,
                 log=[],  # 清空上次执行日志
             )
@@ -1195,14 +1195,14 @@ class Scheduler:
         # Manager 有子节点但未全部终态 → 不消耗重试次数，先回退 WAITING 等子节点跑完，
         # 由 _check_manager_children_completed → on_manager_children_completed 驱动评审。
         if failed_node.exec_type == "manager" and children:
+            self.reactivate(
+                failed_node_id,
+                target_status=NodeStatus.WAITING,
+                reset_artifacts=True,
+            )
             self.graph.update_node(
                 failed_node_id,
-                status=NodeStatus.WAITING,
-                artifact_path=None,
-                error=None,
                 manager_phase="waiting",
-                started_at=None,
-                finished_at=None,
                 log=[],  # 清空上次执行日志
             )
             # 清除自身通知记录，确保子节点全部终态后能重新触发 children-completed 回调
@@ -1215,14 +1215,14 @@ class Scheduler:
             return
 
         # Worker 或 Manager 无子节点 → WAITING + 延迟调度
+        self.reactivate(
+            failed_node_id,
+            target_status=NodeStatus.WAITING,
+            reset_artifacts=True,
+        )
         self.graph.update_node(
             failed_node_id,
-            status=NodeStatus.WAITING,
-            artifact_path=None,
-            error=None,
             manager_phase=None,
-            started_at=None,
-            finished_at=None,
             iteration_count=new_iteration,
             log=[],  # 清空上次执行日志
         )

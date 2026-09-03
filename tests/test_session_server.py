@@ -933,3 +933,17 @@ def test_api_key_delete_by_vendor(session_client):
         "/v1/config/api-key", params={"model": "deepseek-v4-pro"}
     ).json()["api_key"] is None
 
+
+def test_internal_username_save_and_echo(session_client):
+    resp = session_client.put("/v1/config/internal-username", json={"username": "  v-user  "})
+    assert resp.status_code == 200
+    assert resp.json() == {"username": "v-user", "saved": True}
+    assert session_client.get("/v1/config/internal-username").json() == {"username": "v-user"}
+
+
+def test_internal_username_empty_value_deletes(session_client):
+    session_client.put("/v1/config/internal-username", json={"username": "v-user"})
+    resp = session_client.put("/v1/config/internal-username", json={"username": "  "})
+    assert resp.status_code == 200
+    assert resp.json() == {"username": None, "saved": False}
+    assert session_client.get("/v1/config/internal-username").json() == {"username": None}

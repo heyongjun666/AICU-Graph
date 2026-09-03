@@ -156,7 +156,7 @@ export const NewNodeDialog: React.FC<NodeDialogProps> = ({
   const [roles, setRoles] = useState<RoleInfo[]>([]);
   const [skills, setSkills] = useState<SkillInfo[]>([]);
   const [selectedSkills, setSelectedSkills] = useState<string[]>([]);
-  const [cliName, setCliName] = useState<NodeConfig['cli_name']>('claude');
+  const [cliName, setCliName] = useState<NodeConfig['cli_name']>('internal');
   const [model, setModel] = useState('');
   const [apiBaseUrl, setApiBaseUrl] = useState('');
   const [apiKeyEnv, setApiKeyEnv] = useState('');
@@ -173,7 +173,7 @@ export const NewNodeDialog: React.FC<NodeDialogProps> = ({
     setParentId(nodes.find((node) => node.exec_type === 'M')?.id || '');
     setDependencies([]);
     setSelectedSkills([]);
-    setCliName('claude');
+    setCliName('internal');
     setModel('');
     setApiBaseUrl('');
     setApiKeyEnv('');
@@ -299,7 +299,7 @@ export const NewNodeDialog: React.FC<NodeDialogProps> = ({
             setParentId(nextParentId);
             setDependencies((current) => current.filter((id) => id !== nextParentId));
           }}><option value="">{t('dialog.noParent')}</option>{parentCandidates.map((candidate) => <option key={candidate.id} value={candidate.id}>{candidate.label}</option>)}</select></label>
-          <label>{t('dialog.cli')}<select value={cliName} onChange={(event) => setCliName(event.target.value as NodeConfig['cli_name'])}><option value="claude">Claude Code</option></select></label>
+          <label>{t('dialog.cli')}<select value={cliName} onChange={(event) => setCliName(event.target.value as NodeConfig['cli_name'])}><option value="internal">Internal</option><option value="claude">Claude Code</option></select></label>
         </div>
         <label>{t('dialog.task')}<textarea autoFocus value={task} onChange={(event) => setTask(event.target.value)} rows={5} placeholder={t('dialog.taskPlaceholder')} /></label>
         <div className="node-dialog-section"><div className="node-dialog-section-title">{t('dialog.dependencies')}</div>{candidateStatus === 'loading' && <div className="picker-status">{t('dialog.loadingCandidates')}</div>}{candidateStatus === 'error' && <div className="picker-status is-error">{candidateError || t('dialog.candidatesLoadFailed')}</div>}<SearchCheckboxPicker

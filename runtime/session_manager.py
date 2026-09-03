@@ -252,6 +252,15 @@ class SessionManager:
     def list_api_key_vendors(self) -> list[str]:
         return self.credential_store.vendors()
 
+    def get_internal_username(self) -> Optional[str]:
+        return self.credential_store.get_username()
+
+    def set_internal_username(self, username: str) -> None:
+        self.credential_store.set_username(username)
+
+    def delete_internal_username(self) -> None:
+        self.credential_store.delete_username()
+
     def _load_global_config(self) -> dict[str, Any]:
         if not os.path.exists(self._config_path):
             return dict(_GLOBAL_CONFIG_DEFAULTS)

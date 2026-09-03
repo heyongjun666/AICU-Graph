@@ -587,15 +587,25 @@ class Runtime(RuntimeGateway, SchedulerDelegate):
         infer channel semantics or provide an ``auto`` mode; the existing
         inject/submit entry points remain available for protocol-specific flows.
         """
+        return self._apply_plan(parent_node_id, plan, channel=channel)
+
+    def _apply_plan(
+        self, parent_node_id: str, plan: ExecutionPlan, *, channel: str
+    ) -> list[Node]:
+        """Dispatch to one explicit plan application implementation."""
         if channel == "full":
-            return self.inject_plan(parent_node_id, plan)
+            return self._apply_full_plan(parent_node_id, plan)
         if channel == "revision":
-            return self.inject_revision_plan(parent_node_id, plan)
+            return self._apply_revision_plan(parent_node_id, plan)
         raise ValueError(
             f"Unsupported plan channel '{channel}'; expected 'full' or 'revision'"
         )
 
     def inject_plan(self, parent_node_id: str, plan: ExecutionPlan) -> list[Node]:
+        """Apply a full plan through the shared dispatcher."""
+        return self._apply_plan(parent_node_id, plan, channel="full")
+
+    def _apply_full_plan(self, parent_node_id: str, plan: ExecutionPlan) -> list[Node]:
         """提交 ExecutionPlan，经 Planner 翻译后注入 Graph。
 
         全量重建通道：仅允许注入到「没有子节点」的父节点（首跑 / 无子节点重试）。
@@ -1033,6 +1043,12 @@ class Runtime(RuntimeGateway, SchedulerDelegate):
                 )
 
     def inject_revision_plan(
+        self, parent_node_id: str, plan: ExecutionPlan
+    ) -> list[Node]:
+        """Apply a revision plan through the shared dispatcher."""
+        return self._apply_plan(parent_node_id, plan, channel="revision")
+
+    def _apply_revision_plan(
         self, parent_node_id: str, plan: ExecutionPlan
     ) -> list[Node]:
         """注入增量 ExecutionPlan：选择性复用既有子节点，不删除未引用节点。

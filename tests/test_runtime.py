@@ -380,7 +380,7 @@ class TestSubmitPlan:
             calls.append((parent_id, received_plan))
             return expected
 
-        monkeypatch.setattr(runtime, "inject_plan", apply_full)
+        monkeypatch.setattr(runtime, "_apply_full_plan", apply_full)
         result = runtime.apply_plan("parent", plan, channel="full")
 
         assert result is expected
@@ -395,7 +395,7 @@ class TestSubmitPlan:
             calls.append((parent_id, received_plan))
             return expected
 
-        monkeypatch.setattr(runtime, "inject_revision_plan", apply_revision)
+        monkeypatch.setattr(runtime, "_apply_revision_plan", apply_revision)
         result = runtime.apply_plan("parent", plan, channel="revision")
 
         assert result is expected

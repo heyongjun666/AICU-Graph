@@ -662,6 +662,64 @@ class Scheduler:
         except Exception as exc:
             logger.error("on_node_status_changed failed for node '%s': %s", node_id, exc)
 
+    def reactivate(
+        self,
+        node_id: str,
+        *,
+        target_status: NodeStatus,
+        pending_context: Optional[dict] = None,
+        clear_pending_revise: bool = False,
+        rewind_parent: bool = False,
+        bump_activation: bool = False,
+        reset_artifacts: bool = False,
+        emit_notification: bool = False,
+    ) -> bool:
+        """Apply shared lifecycle changes for an existing node reactivation.
+
+        Callers remain responsible for business-specific work such as retry
+        registration, cache eviction, step versioning, and Manager phase.
+        ``pending_context`` is merged into the existing context when supplied.
+        """
+        node = self.graph.get_node(node_id)
+        if node is None:
+            return False
+
+        updates: dict[str, Any] = {}
+        if pending_context is not None:
+            existing_context = getattr(node, "pending_context", None) or {}
+            updates["pending_context"] = {
+                **existing_context,
+                **pending_context,
+            }
+        if clear_pending_revise:
+            updates["pending_revise"] = False
+        if bump_activation:
+            updates["activation_count"] = getattr(node, "activation_count", 0) + 1
+        if reset_artifacts:
+            updates.update({
+                "artifact_path": None,
+                "error": None,
+                "started_at": None,
+                "finished_at": None,
+            })
+
+        # Keep the state transition and its optional notification in one place.
+        transitioned = node.status != target_status
+        if transitioned:
+            self._transition_node(node_id, target_status)
+        if updates:
+            self.graph.update_node(node_id, **updates)
+
+        if rewind_parent and node.parent_id is not None:
+            self.clear_manager_notification(node.parent_id)
+            if self.planner is not None:
+                self.planner.rewind_parent_chain_for_retry(
+                    node.parent_id, self.clear_manager_notification,
+                )
+        if emit_notification and not transitioned:
+            self._notify_status_changed(node_id, target_status)
+        return True
+
     # ========================================================================
     # Manager 子节点完成检测
     # ========================================================================
@@ -862,11 +920,7 @@ class Scheduler:
                 source_node.id[:8], target.id[:8], step_id,
             )
 
-        # 合并到已有 pending_context（如果之前被激活过）
-        existing_ctx = getattr(target, 'pending_context', None) or {}
-        merged_ctx = {**existing_ctx, **ctx}
-
-        # 记录路由历史
+        # 记录路由历史；生命周期状态由统一原语负责，历史仍由路由路径维护。
         history = list(getattr(target, 'routing_history', []) or [])
         history.append({
             'from': source_node.id,
@@ -876,26 +930,18 @@ class Scheduler:
             'timestamp': now_ts,
         })
 
-        # 回退到 WAITING 并注入上下文
-        self.graph.update_node(
+        reactivated = self.reactivate(
             target.id,
-            status=NodeStatus.WAITING,
-            pending_context=merged_ctx,
-            activation_count=current_activations + 1,
-            routing_history=history,
-            artifact_path=None,
-            error=None,
-            started_at=None,
-            finished_at=None,
+            target_status=NodeStatus.WAITING,
+            pending_context=ctx,
+            rewind_parent=True,
+            bump_activation=True,
+            reset_artifacts=True,
         )
-
-        # 清除父 Manager 的通知记录，使其可以重新触发 on_children_completed
-        if target.parent_id is not None:
-            self.clear_manager_notification(target.parent_id)
-            if self.planner is not None:
-                self.planner.rewind_parent_chain_for_retry(
-                    target.parent_id, self.clear_manager_notification,
-                )
+        if not reactivated:
+            return False
+        self.graph.update_node(target.id, routing_history=history)
+        merged_ctx = getattr(target, 'pending_context', None) or {}
 
         logger.info(
             "Routing: activated '%s' (step=%s, activation #%d), context_keys=%s",

@@ -732,11 +732,10 @@ class Runtime(RuntimeGateway, SchedulerDelegate):
                 parent_node_id, a, iteration_count,
             )
             updates: dict[str, Any] = {
-                "status": NodeStatus.READY,
                 "task": step.task,
+                # Repair context is intentionally replaced, not merged: it is the
+                # complete defect instruction for this retry activation.
                 "pending_context": fix_ctx,
-                "artifact_path": None,
-                "error": None,
                 "log": [],
             }
             role_changed = child is not None and step.role != child.role
@@ -755,6 +754,11 @@ class Runtime(RuntimeGateway, SchedulerDelegate):
                 merged = dict(child.config or {}) if child is not None else {}
                 merged.update(step.config)
                 updates["config"] = merged
+            self.scheduler.reactivate(
+                child.id,
+                target_status=NodeStatus.READY,
+                reset_artifacts=True,
+            )
             self.graph.update_node(child.id, **updates)
             affected.append(child)
             logger.info(

@@ -1334,7 +1334,7 @@ class Runtime(RuntimeGateway, SchedulerDelegate):
             self.scheduler.reactivate(
                 node_id,
                 target_status=target_status,
-                emit_notification=True,
+                emit_notification=False,
             )
             logger.info(log_message, *log_args)
 
@@ -1424,7 +1424,7 @@ class Runtime(RuntimeGateway, SchedulerDelegate):
             self.scheduler.reactivate(
                 node_id,
                 target_status=NodeStatus.WAITING,
-                emit_notification=True,
+                emit_notification=False,
             )
         logger.info(
             "Manager '%s' revised: COMPLETED/terminal → WAITING(expand) with "

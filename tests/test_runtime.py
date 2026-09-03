@@ -825,9 +825,15 @@ class TestContinueNodeBudget:
         """有子节点 → 仅 re-review，max_iterations 提升为 iteration_count + 预算。"""
         runtime.global_pause()  # 阻止调度器立即派发，确定性断言 continue 决策
         nid = self._add_failed_manager(runtime, iteration_count=3, max_iterations=3)
+        status_events = []
+        runtime.event_bus.subscribe(
+            "node_status_changed", status_events.append
+        )
         runtime.continue_node(nid)
         node = runtime.get_node(nid)
         assert node.status == NodeStatus.READY
+        assert [event for event in status_events
+                if event.payload.get("node_id") == nid] == []
         assert node.manager_phase == "review"
         assert node.iteration_count == 3  # 当前迭代不动
         assert node.max_iterations == 3 + MANUAL_CONTINUE_BUDGET

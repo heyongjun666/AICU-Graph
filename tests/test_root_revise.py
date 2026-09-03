@@ -131,11 +131,16 @@ class TestReviseManagerNode:
     def test_revise_legal_completed_to_waiting(self, tmp_path):
         rt = _make_runtime(tmp_path)
         mgr_id = self._completed_root(rt)
+        status_events = []
+        rt.event_bus.subscribe(
+            "node_status_changed", status_events.append
+        )
 
         rt.revise_manager_node(mgr_id, "Add pagination", config={"num_ccs": 3})
 
         node = rt.graph.get_node(mgr_id)
         assert node.status == NodeStatus.WAITING
+        assert status_events == []
         assert node.manager_phase == "expand"
         assert node.pending_revise is True
         assert node.task == "Add pagination"

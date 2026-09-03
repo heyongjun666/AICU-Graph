@@ -497,49 +497,6 @@ def test_running_session_restores_to_recovery_required(runtime, tmp_path):
         restored.shutdown()
 
 
-def test_mock_mode_runs_new_session_without_real_aicu(monkeypatch, tmp_path):
-    monkeypatch.setenv("EXEC_MODE", "mock")
-
-    def fail_if_real_aicu_is_used(_ctx):
-        raise AssertionError("mock mode attempted to create a real AICU")
-
-    monkeypatch.setattr(
-        "executables.worker._create_real_aicu", fail_if_real_aicu_is_used
-    )
-
-    registry = ExecutableRegistry()
-    registry.register("manager", Manager)
-    registry.register("worker", Worker)
-    manager = SessionManager(
-        registry=registry,
-        root_dir=str(tmp_path / "sessions"),
-        workspace_root=str(tmp_path),
-        restore=False,
-    )
-
-    try:
-        with TestClient(create_session_app(manager)) as client:
-            session = _create_session(client, "Run entirely in mock mode")
-            deadline = time.monotonic() + 3
-            statuses = []
-            while time.monotonic() < deadline:
-                graph = client.get(
-                    f"/v1/sessions/{session['id']}/graph"
-                ).json()
-                statuses = [node["status"] for node in graph["nodes"]]
-                if statuses and all(
-                    status in {"Completed", "Failed"} for status in statuses
-                ):
-                    break
-                time.sleep(0.02)
-
-            assert statuses
-            assert "Failed" not in statuses
-            assert statuses == ["Completed", "Completed"]
-    finally:
-        manager.shutdown()
-
-
 def test_sessions_restore_from_independent_state_files(session_manager):
     created = session_manager.create_session(task="Persist this graph", title="Persistent")
     root_dir = session_manager.root_dir
@@ -927,6 +884,13 @@ def test_agent_events_empty_then_published(session_client, session_manager):
 
     # 发布两个事件（经 Runtime.publish_events → AgentEventManager 摄取 + 路由）
     runtime = session_manager.get_session(sid).runtime
+
+    class _NoRouteAICU:
+        def ask(self, prompt):
+            return {"targets": []}
+
+    # The production Router is always real; inject a deterministic test fake explicitly.
+    runtime.router._aicu = _NoRouteAICU()
     runtime.publish_events(
         root_id,
         [{"objective": "hello world"}, {"objective": "second event"}],

@@ -9,7 +9,7 @@ runtime/models.py — v1 核心数据模型与字段约束
 
 import json
 import warnings
-from dataclasses import dataclass, field, asdict
+from dataclasses import asdict, dataclass, field, fields
 from datetime import datetime
 from enum import Enum
 from typing import Any, Optional
@@ -606,6 +606,17 @@ class Node:
         # 反序列化 pending_routing
         if data.get("pending_routing") is not None and isinstance(data["pending_routing"], dict):
             data["pending_routing"] = RoutingDecision.from_dict(data["pending_routing"])
+
+        # Keep persisted graphs forward-compatible when fields are removed from Node.
+        known_fields = {item.name for item in fields(cls)}
+        unknown_fields = sorted(set(data) - known_fields)
+        if unknown_fields:
+            warnings.warn(
+                "Ignoring unknown persisted Node fields: " + ", ".join(unknown_fields),
+                RuntimeWarning,
+                stacklevel=2,
+            )
+            data = {key: value for key, value in data.items() if key in known_fields}
 
         return cls(**data)
 

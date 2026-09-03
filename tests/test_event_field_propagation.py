@@ -86,7 +86,7 @@ class TestFieldPropagation:
 
     def test_build_prompt_renders_all_new_fields(self):
         """Router prompt 渲染全部新字段（而非仅 content）（断裂点③）。"""
-        router = AICURouter(mode="stub")
+        router = AICURouter(aicu_instance=object())
         msg = _full_field_event()
         prompt = router._build_prompt(msg, "producer_node", [])
         assert "login API 契约已变更" in prompt
@@ -131,7 +131,12 @@ class _TargetRouter:
         return list(self.targets)
 
     def decision_trace(self):
-        return {"mode": "stub", "candidate_nodes": []}
+        return {
+            "candidate_nodes": [
+                {"id": node.id}
+                for node in getattr(self, "graph", Graph()).all_nodes()
+            ]
+        }
 
 
 class TestRouterTrace:

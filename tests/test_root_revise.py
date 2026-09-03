@@ -660,7 +660,7 @@ class TestExpandDuckTyping:
         node = _manager_node(pending_revise=True)
         rt.add_node(node)
         ctx = ExecutableContext(node=node, runtime=rt)
-        mgr = Manager(context=ctx, stub=_ExpandStub())
+        mgr = Manager(context=ctx, aicu_instance=_ExpandStub())
 
         result = mgr.run(ctx)
 
@@ -673,7 +673,7 @@ class TestExpandDuckTyping:
         node = _manager_node(pending_revise=True)
         rt.add_node(node)
         ctx = ExecutableContext(node=node, runtime=rt)
-        mgr = Manager(context=ctx, stub=_ExpandStub())
+        mgr = Manager(context=ctx, aicu_instance=_ExpandStub())
 
         result = mgr.run(ctx)
 
@@ -686,7 +686,7 @@ class TestExpandDuckTyping:
         node = _manager_node(pending_revise=False)
         rt.add_node(node)
         ctx = ExecutableContext(node=node, runtime=rt)
-        mgr = Manager(context=ctx, stub=_ExpandStub())
+        mgr = Manager(context=ctx, aicu_instance=_ExpandStub())
 
         mgr.run(ctx)
 
@@ -706,7 +706,7 @@ class TestExpandDuckTyping:
             _worker_node("A1", "M1", role="dev", status=NodeStatus.COMPLETED, step_ref="dev"),
         ])
         ctx = ExecutableContext(node=node, runtime=rt)
-        mgr = Manager(context=ctx, stub=_ExpandStub())
+        mgr = Manager(context=ctx, aicu_instance=_ExpandStub())
 
         mgr.run(ctx)
 
@@ -776,7 +776,7 @@ class TestExpandDuckTyping:
         }
         rt.add_node(node)
         ctx = ExecutableContext(node=node, runtime=rt)
-        mgr = Manager(context=ctx, stub=_ExpandStub())
+        mgr = Manager(context=ctx, aicu_instance=_ExpandStub())
 
         block = mgr._build_repair_context_block(ctx)
 
@@ -792,7 +792,7 @@ class TestExpandDuckTyping:
         node.pending_context = {"collaboration_type": "revise", "incremental_task": "t"}
         rt.add_node(node)
         ctx = ExecutableContext(node=node, runtime=rt)
-        mgr = Manager(context=ctx, stub=_ExpandStub())
+        mgr = Manager(context=ctx, aicu_instance=_ExpandStub())
 
         assert mgr._build_repair_context_block(ctx) == ""
 
@@ -810,7 +810,7 @@ class TestReviseCandidatesBlock:
         c1 = _worker_node("A1", "M1", role="dev", status=NodeStatus.COMPLETED, step_ref="dev")
         rt.add_children("M1", [c1])
         ctx = ExecutableContext(node=node, runtime=rt)
-        mgr = Manager(context=ctx, stub=_ExpandStub())
+        mgr = Manager(context=ctx, aicu_instance=_ExpandStub())
 
         block = mgr._build_revise_candidates_block(ctx)
 
@@ -948,7 +948,7 @@ class TestWorkerResumeFallback:
         ctx = ExecutableContext(node=node, runtime=rt)
 
         flaky = _FlakyAsk(str(tmp_path))
-        worker = Worker(context=ctx, mode="real", aicu_instance=flaky)
+        worker = Worker(context=ctx, aicu_instance=flaky)
 
         sentinel = object()
         with Worker._aicu_cache_lock:
@@ -982,7 +982,7 @@ class TestWorkerResumeFallback:
         )
         ctx = ExecutableContext(node=node, runtime=rt)
         flaky = _FlakyAsk(str(tmp_path))
-        worker = Worker(context=ctx, mode="real", aicu_instance=flaky)
+        worker = Worker(context=ctx, aicu_instance=flaky)
         with Worker._aicu_cache_lock:
             Worker._aicu_cache[node.id] = object()
         try:

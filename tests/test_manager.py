@@ -559,7 +559,8 @@ class TestManagerReviewPhase:
         """review prompt 不重新注入 Manager 的完整 Main Task，只展示子节点元数据。
 
         Context 规则：Main Task 只在同一 AICU 会话首次初始化注入一次；review 是
-        增量阶段，只能注入子节点元数据 + 按需核验提示，不得重新拼接 Main Task。
+        增量阶段，只能注入子节点元数据 + 关键产物定向检查流程，不得重新拼接 Main
+        Task，也不得包含逐个 Artifact 全量读取或截断读取提示。
         """
         node = _make_manager_node(
             manager_phase="review", task="MAIN_TASK_MUST_NOT_REPEAT"
@@ -574,10 +575,8 @@ class TestManagerReviewPhase:
             "role": "dev",
             "task": "child task",
             "status": NodeStatus.COMPLETED,
-            "artifact_path": "/tmp/out/c1",
             "shared_workspace": "/tmp/shared",
             "output_path": "code",
-            "artifact_content": "",
         }]
 
         prompt = Manager._build_review_prompt(ctx, children_info)
@@ -586,9 +585,78 @@ class TestManagerReviewPhase:
         assert "MAIN_TASK_MUST_NOT_REPEAT" not in prompt, (
             "review prompt 不得重新注入 Main Task"
         )
-        assert "Artifact Path" in prompt, "review prompt 应保留子节点产物路径"
-        assert "Shared Partition" in prompt, "review prompt 应保留共享分区根"
-        assert "未预加载" in prompt, "review prompt 应提示按需读取产物"
+        # B9：只定位关键产物，不逐项读取全部 Artifact
+        assert "Shared Workspace Partition" in prompt, (
+            "review prompt 应保留共享分区根"
+        )
+        assert "child task" in prompt, "review prompt 应保留子节点 task"
+        assert "Completed" in prompt, "review prompt 应保留子节点状态"
+        assert "关键产物" in prompt, "review prompt 应要求先识别关键产物再定向检查"
+        assert "目录/文件清单" in prompt, (
+            "review prompt 应要求先查看目录/文件清单完成筛选"
+        )
+        for forbidden in ("未预加载", "Artifact Path", "读取前 400", "content[:400]"):
+            assert forbidden not in prompt, (
+                "review prompt 不得包含 Artifact 全量读取/截断读取提示"
+            )
+        assert not hasattr(Manager, "_resolve_review_artifact_path"), (
+            "Review 不再解析/展示子节点产物路径，_resolve_review_artifact_path 应已删除"
+        )
+
+    def test_review_prompt_has_key_deliverable_flow(self):
+        """review prompt 含 4 步关键产物流程及「无法确认」边界处理。"""
+        node = _make_manager_node(manager_phase="review")
+        self.runtime.add_node(node)
+        ctx = ExecutableContext(node=node, runtime=self.runtime)
+
+        children_info = [{
+            "step_ref": "s1",
+            "node_id": "c1",
+            "exec_type": "worker",
+            "role": "dev",
+            "task": "child task",
+            "status": NodeStatus.COMPLETED,
+            "shared_workspace": "/tmp/shared",
+            "output_path": "code",
+        }]
+
+        prompt = Manager._build_review_prompt(ctx, children_info)
+
+        # 1. 先选关键产物 → 2. 看目录/文件清单或产物索引完成筛选 → 3. 只读关键产物
+        # → 4. 不遍历 + 未读非关键文件缺失不判失败；边界：无法确认 → 说明原因
+        assert "关键产物" in prompt
+        assert "目录/文件清单" in prompt
+        assert "已有产物索引" in prompt
+        assert "不遍历" in prompt
+        assert "非关键" in prompt, "未读取的非关键文件缺失不判失败"
+        assert "无法确认" in prompt, "无法从目录清单确定关键产物时的边界处理"
+        for forbidden in ("未预加载", "Artifact Path", "读取前 400", "content[:400]"):
+            assert forbidden not in prompt
+
+    def test_review_does_not_read_child_artifacts(self):
+        """正常 Review 不调用 Python 侧子节点全文读取（read_artifact 被禁止）。
+
+        B9：Review 改为「先选关键产物、再定向检查」——关键产物的读取决策交给 AICU
+        （Read/Glob），Python 侧 _review 不再读取子节点 Artifact 内容。若 _review
+        尝试读取，_NoReadGateway.read_artifact 会立即失败。
+        """
+        node = _make_manager_node(manager_phase="review")
+        runtime = _NoReadGateway()
+        runtime.add_node(node)
+        children = [
+            Node(id="c1", exec_type="worker", role="dev", task="t1",
+                 config={}, status=NodeStatus.COMPLETED),
+            Node(id="c2", exec_type="worker", role="dev", task="t2",
+                 config={}, status=NodeStatus.COMPLETED),
+        ]
+        runtime.add_children(node.id, children)
+
+        ctx = ExecutableContext(node=node, runtime=runtime)
+        mgr = Manager(context=ctx, aicu_instance=_ReviewStub(review_passed=True))
+
+        result = mgr.run(ctx)
+
+        assert result == NodeStatus.COMPLETED
 
 
 class _UnparseableAuditPassStub:
@@ -632,6 +700,16 @@ class _FixPlanRecordingGateway(_MockRuntimeGateway):
     ) -> list[Node]:
         self.fix_plans.append((manager_node_id, failed_assessments, iteration_count))
         return []
+
+
+class _NoReadGateway(_MockRuntimeGateway):
+    """Review 阶段禁止 Python 侧读取子节点产物 —— read_artifact 一旦被调用即失败。"""
+
+    def read_artifact(self, node_id: str, path: str) -> str:
+        pytest.fail(
+            "B9 Review 不得调用 Python 侧子节点全文读取 "
+            f"(read_artifact({node_id!r}, {path!r}))"
+        )
 
 
 class TestManagerReviewDegradation:

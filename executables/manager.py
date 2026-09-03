@@ -323,10 +323,10 @@ class Manager(Executable):
     # ------------------------------------------------------------------
 
     def _review(self, ctx: ExecutableContext) -> NodeStatus:
-        """Review 阶段 — 逐子节点评估，精准修复不合格项。
+        """Review 阶段 — 基于关键产物的目标一致性判断，精准修复不合格项。
 
-        1. 收集子节点信息（step_ref, role, task, artifact）
-        2. 调用 AICU 逐节点评估 → 结构化 JSON（per-child pass/fail + fix 指令）
+        1. 收集子节点信息（step_ref, role, task, status, shared workspace partition）
+        2. AICU 先识别关键产物，再定向检查关键内容并输出结构化评估
         3. 全部通过 → COMPLETED
         4. 部分失败 + 有剩余迭代 → 精准修复（仅重建失败子节点，保留合格子节点）
         5. 全部/部分失败 + 无剩余迭代 → FAILED
@@ -334,27 +334,11 @@ class Manager(Executable):
         # 1. 获取子节点
         children = ctx.runtime.get_children(ctx.node.id)
 
-        # 2. 收集子节点元数据（暂不读取全部 artifact，供 review 按需检查路径）。
+        # 2. 收集子节点元数据；Review 只定位关键产物，不预加载或逐项读取全部 Artifact。
         children_info: list[dict] = []
         artifacts_for_file: dict[str, str] = {}
         for child in children:
             step_ref = child.step_ref or child.id
-            # 暂停 review 阶段的全量产物读取：
-            # if child.status == NodeStatus.COMPLETED and child.artifact_path:
-            #     try:
-            #         artifact_content = ctx.runtime.read_artifact(
-            #             child.id, child.artifact_path,
-            #         )
-            #         artifacts_for_file[step_ref] = artifact_content
-            #     except IsADirectoryError:
-            #         artifact_content = _build_dir_index(child.artifact_path)
-            #         artifacts_for_file[step_ref] = artifact_content
-            #     except Exception as exc:
-            #         logger.warning(
-            #             "Failed to read artifact for child '%s': %s",
-            #             child.id, exc,
-            #         )
-            artifact_content = ""
             child_cfg = child.config or {}
             children_info.append({
                 "step_ref": step_ref,
@@ -363,10 +347,8 @@ class Manager(Executable):
                 "role": child.role,
                 "task": child.task,
                 "status": child.status,
-                "artifact_path": child.artifact_path,
                 "shared_workspace": child_cfg.get("_shared_workspace"),
                 "output_path": child_cfg.get("_output_path"),
-                "artifact_content": artifact_content,
             })
 
         # 3. 构造 prompt 并调用 AICU
@@ -1776,39 +1758,15 @@ class Manager(Executable):
         return "\n".join(lines)
 
     @staticmethod
-    def _resolve_review_artifact_path(child: dict) -> str:
-        """Delivery 开启时经 Registry 解析子节点产物的确定性绝对路径。
-
-        解析失败/未开启降级 = 现状（child.artifact_path 直传），不引入新错误面。
-        Symbolic Reference（@{step_ref}）只解析身份，内容正确性仍由 review LLM
-        Read/Glob 确认。
-        """
-        try:
-            from runtime.delivery import delivery_enabled
-
-            if delivery_enabled():
-                shared_root = child.get("shared_workspace")
-                step_ref = child.get("step_ref") or ""
-                if shared_root and step_ref:
-                    from runtime.delivery.registry import FilesystemRegistry
-
-                    resolved = FilesystemRegistry(shared_root).resolve(f"@{step_ref}")
-                    if resolved:
-                        return resolved
-        except Exception:  # noqa: BLE001
-            pass
-        return child.get("artifact_path", "")
-
-    @staticmethod
     def _build_review_prompt(
         ctx: ExecutableContext,
         children_info: list[dict],
     ) -> str:
-        """构造 Review 阶段 prompt — 逐子节点评估，输出结构化 JSON。
+        """构造 Review 阶段 prompt — 先识别关键产物，再输出结构化 JSON。
 
-        每个 child_info 包含: step_ref, role, task, artifact_path 等元数据。
-        产物不预加载，AICU 需按路径按需核验；输出 per-child pass/fail + fix 指令，
-        用于精准修复而非全量重建。
+        每个 child_info 包含 step_ref、role、task、status 和 Shared Workspace 分区。
+        AICU 只定向检查与目标直接相关的关键产物，不遍历全部子节点输出；结果用于
+        精准修复而非全量重建。
         """
         node_ref = ctx.node.step_ref or ctx.node.id
         parts = [
@@ -1841,47 +1799,22 @@ class Manager(Executable):
                 f"role: {child.get('role', 'unknown')})"
             )
             parts.append(f"**Task**: {child.get('task', 'N/A')}")
-            artifact_path = Manager._resolve_review_artifact_path(child)
-            if artifact_path:
-                parts.append(f"**Artifact Path**: {artifact_path}")
+            if child.get("status") is not None:
+                parts.append(
+                    f"**Status**: {getattr(child.get('status'), 'value', child.get('status'))}"
+                )
             if child.get("shared_workspace"):
                 partition = _partition_of(
                     child["shared_workspace"], child.get("output_path") or ""
                 )
-                parts.append(f"**Shared Partition (共享分区根)**: {partition}")
+                parts.append(f"**Shared Workspace Partition**: {partition}")
             parts.append("")
             parts.append(
                 _L(
                     ctx,
-                    "**Artifact**: 未预加载；如需核验，请根据上述 Artifact Path "
-                    "或 Shared Partition 按需读取。",
-                    "**Artifact**: not preloaded; to verify, read on demand from the "
-                    "Artifact Path or Shared Partition above.",
-                )
-            )
-            parts.append("")
-            parts.append(
-                _L(
-                    ctx,
-                    "> 读取提示：若上方 Artifact 为目录清单或为空，请使用 Read / Glob / Bash 工具",
-                    "> Reading hint: if the Artifact above is a directory listing or empty, "
-                    "use the Read / Glob / Bash tools",
-                )
-            )
-            parts.append(
-                _L(
-                    ctx,
-                    "> 直接读取 Artifact Path / Shared Partition 下的真实文件（含 openapi.yaml 等契约），",
-                    "> to directly read the real files under Artifact Path / Shared Partition "
-                    "(including contracts such as openapi.yaml),",
-                )
-            )
-            parts.append(
-                _L(
-                    ctx,
-                    "> 再判断交付物是否满足 task 要求，切勿仅因读取不到内容而判失败。",
-                    "> then judge whether the deliverable meets the task; do not mark as failed "
-                    "merely because content could not be read.",
+                    "按下方「关键产物检查流程」，仅检查该分区的关键产物，不要遍历全部产出、源码或日志。",
+                    "Follow the \"Key-deliverable inspection flow\" below: inspect only this partition's key "
+                    "deliverables; do not traverse all outputs, source files, or logs.",
                 )
             )
             parts.append("")
@@ -1912,6 +1845,44 @@ class Manager(Executable):
             "---",
             "",
             "## Instructions",
+            "",
+            _L(
+                ctx,
+                "**关键产物检查流程（对每个子节点依次执行）**:",
+                "**Key-deliverable inspection flow (apply to each child)**:",
+            ),
+            _L(
+                ctx,
+                "1. 先根据子节点 task 与当前整体目标，判断其分区中哪些文件/目录是完成目标所必需的关键产物；",
+                "1. Based on each child's task and the overall goal, first judge which files/directories in its "
+                "partition are essential deliverables;",
+            ),
+            _L(
+                ctx,
+                "2. 查看该分区的目录/文件清单或已有产物索引，完成关键产物筛选；",
+                "2. View the partition's directory/file listing or existing artifact index to confirm and complete "
+                "the key-deliverable selection;",
+            ),
+            _L(
+                ctx,
+                "3. 只读取筛选出的关键产物的内容做目标一致性判断；关键产物本身是目录时，先查看其清单，再只打开与目标相关的文件；",
+                "3. Read the content of only the selected key deliverables to judge goal alignment; if a key "
+                "deliverable is itself a directory, view its listing first, then open only the goal-relevant files;",
+            ),
+            _L(
+                ctx,
+                "4. 不遍历全部产出、无关源码或完整日志；未读取的非关键文件缺失不判失败。",
+                "4. Do not traverse all outputs, unrelated source files, or full logs; missing non-key files that "
+                "you did not read must not cause failure.",
+            ),
+            _L(
+                ctx,
+                "若无法从目录清单确定关键产物，按“无法确认”处理，并在该子节点 assessment 的 reason 中说明，"
+                "不要读取整个 Shared Workspace。",
+                "If you cannot determine the key deliverables from the directory listing, treat them as "
+                "\"unconfirmed\" and state so in that child's assessment reason; do not read the entire shared "
+                "workspace.",
+            ),
             "",
             "Evaluate each child's output against its task description.",
             "For each child, determine whether the output meets the requirements.",

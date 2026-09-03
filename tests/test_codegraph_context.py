@@ -66,9 +66,9 @@ class _FakeRuntime:
         return self._deps
 
 
-def _ctx(node, mode="real", deps=None):
+def _ctx(node, deps=None):
     return SimpleNamespace(
-        config={"mode": mode},
+        config={},
         node=node,
         runtime=_FakeRuntime(deps or []),
     )
@@ -90,18 +90,6 @@ def test_flag_off_noop(monkeypatch):
     monkeypatch.delenv("AICU_CODEGRAPH", raising=False)
     node = _node(task="fix create_article in src/app.py")
     assert build_codegraph_context(node, _ctx(node)) == ""
-
-
-def test_flag_on_but_stub_noop(monkeypatch):
-    monkeypatch.setenv("AICU_CODEGRAPH", "1")
-    node = _node(task="fix create_article in src/app.py")
-    assert build_codegraph_context(node, _ctx(node, mode="stub")) == ""
-
-
-def test_flag_on_but_mock_noop(monkeypatch):
-    monkeypatch.setenv("AICU_CODEGRAPH", "1")
-    node = _node(task="fix create_article in src/app.py")
-    assert build_codegraph_context(node, _ctx(node, mode="mock")) == ""
 
 
 def test_no_extractable_candidates_returns_empty(monkeypatch, tmp_path):

@@ -1130,29 +1130,28 @@ class Runtime(RuntimeGateway, SchedulerDelegate):
             "task": new_step.task,
             "config": prepared_config,
             "pending_revise": True,
+            # Revise 复用路径原本整体替换 pending_context；先写入业务字段，
+            # 不使用 reactivate 的 merge 语义，避免残留旧轮次上下文。
             "pending_context": pending_context,
             # 复用即一次新的激活（与 routing 重激活一致：每次复用/路由均 +1），
             # 使增量续跑在节点生命周期中可观测、可计入激活预算。
             "activation_count": getattr(node, "activation_count", 0) + 1,
             "iteration_count": 0,
-            "error": None,
         }
         if node.exec_type == "manager":
             # 复用的子 Manager → 自身重进 expand，递归复用其子节点
-            self.update_node_status(
-                node.id,
-                NodeStatus.WAITING,
-                manager_phase="expand",
-                **common,
-            )
+            common["manager_phase"] = "expand"
         else:
-            self.update_node_status(
-                node.id,
-                NodeStatus.WAITING,
-                manager_phase=None,
-                pending_routing=None,
-                **common,
-            )
+            common.update({
+                "manager_phase": None,
+                "pending_routing": None,
+            })
+        self.graph.update_node(node.id, **common)
+        self.scheduler.reactivate(
+            node.id,
+            target_status=NodeStatus.WAITING,
+            emit_notification=True,
+        )
         logger.info(
             "Reused child '%s' reactivated for incremental task (session resumed: %s)",
             node.id, new_step.role == node.role and not ws_missing,

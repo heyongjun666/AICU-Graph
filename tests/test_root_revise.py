@@ -201,6 +201,38 @@ class TestReviseManagerNode:
 
         assert mgr_id not in rt.scheduler._notified_managers
 
+    def test_revise_expand_survives_runtime_restore(self, tmp_path):
+        """恢复时不能把 Revise 的 expand 误判为旧 waiting 阶段。"""
+        state_file = tmp_path / "state.json"
+        rt1 = Runtime(
+            workspace_root=str(tmp_path),
+            persistence=Persistence(file_path=str(state_file)),
+        )
+        mgr_id = rt1.submit_root_manager("Build feature")
+        child = _worker_node("child", mgr_id, status=NodeStatus.COMPLETED)
+        rt1.graph.add_node(child)
+        _add_parent_edge(rt1.graph, mgr_id, child.id)
+        rt1.graph.update_node(
+            mgr_id,
+            status=NodeStatus.WAITING,
+            manager_phase="expand",
+            pending_revise=True,
+        )
+        rt1.persistence.save(rt1.graph)
+
+        rt2 = Runtime(
+            workspace_root=str(tmp_path),
+            persistence=Persistence(file_path=str(state_file)),
+        )
+        rt2.scheduler.start = lambda: None  # type: ignore[method-assign]
+        rt2.start()
+
+        restored = rt2.graph.get_node(mgr_id)
+        assert restored is not None
+        assert restored.status == NodeStatus.WAITING
+        assert restored.manager_phase == "expand"
+        assert restored.pending_revise is True
+
 
 # ============================================================================
 # Test 4: _prevalidate_reuse

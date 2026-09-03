@@ -187,6 +187,23 @@ class TestBridgeReactivation:
         assert len(b.routing_history) == 1
         assert b.routing_history[0]["from"] == "T1"
         assert b.routing_history[0]["to"] == "B1"
+        # Reactivation's intermediate COMPLETED → WAITING transition is silent;
+        # only the event bridge's final WAITING → READY transition is published.
+        assert h.delegate.status_changes == [("B1", NodeStatus.READY)]
+
+    def test_reactivate_notification_is_explicit_for_real_transitions(self, tmp_path):
+        h = _BridgeHarness(tmp_path)
+        h.delegate.status_changes.clear()
+
+        assert h.scheduler.reactivate(
+            "B1", target_status=NodeStatus.WAITING, emit_notification=False
+        )
+        assert h.delegate.status_changes == []
+
+        assert h.scheduler.reactivate(
+            "B1", target_status=NodeStatus.READY, emit_notification=True
+        )
+        assert h.delegate.status_changes == [("B1", NodeStatus.READY)]
 
     def test_inbox_file_deleted_after_consume(self, tmp_path):
         """转换后被拦截/成功均删除 inbox 事件文件（delete-on-consume）。"""

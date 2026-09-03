@@ -625,8 +625,14 @@ class Scheduler:
     # 状态转换
     # ========================================================================
 
-    def _transition_node(self, node_id: str, target_status: NodeStatus) -> None:
-        """将节点转换到目标状态，并通过 delegate 通知。
+    def _transition_node(
+        self,
+        node_id: str,
+        target_status: NodeStatus,
+        *,
+        emit_notification: bool = True,
+    ) -> None:
+        """将节点转换到目标状态，并按需通过 delegate 通知。
 
         尽可能通过 StateMachine 校验合法性，校验失败则降级为直接 setattr。
         """
@@ -653,7 +659,8 @@ class Scheduler:
 
         # 更新状态
         self.graph.update_node(node_id, status=target_status)
-        self._notify_status_changed(node_id, target_status)
+        if emit_notification:
+            self._notify_status_changed(node_id, target_status)
 
     def _notify_status_changed(self, node_id: str, status: NodeStatus) -> None:
         """通过 Delegate 通知 Runtime 节点状态变更。"""
@@ -706,7 +713,11 @@ class Scheduler:
         # Keep the state transition and its optional notification in one place.
         transitioned = node.status != target_status
         if transitioned:
-            self._transition_node(node_id, target_status)
+            self._transition_node(
+                node_id,
+                target_status,
+                emit_notification=emit_notification,
+            )
         if updates:
             self.graph.update_node(node_id, **updates)
 

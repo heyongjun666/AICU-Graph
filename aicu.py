@@ -1329,16 +1329,22 @@ class AICU:
     # 形成「生成 → 评审 → 审计 → 修复 → 交付」完整闭环。
     # 适合：架构设计、QA、复杂开发和关键决策场景。
 
-    def _ask_peer_full(self, question: str, max_rounds: int = 3) -> dict:
+    def _ask_peer_full(
+        self, question: str, max_rounds: int = 3, incremental: bool = False
+    ) -> dict:
         # ---- 双 CC 并行生成 ----
         print(f"\n[AICU-full] 阶段1: CC-0/CC-1 并行生成")
-        gen_instr = self._format_instruction()
         with ThreadPoolExecutor(max_workers=2) as pool:
             futures = [
-                pool.submit(self._cc_chat_with_retry, self.ccs[0],
-                            f"{gen_instr}\n\n问题: {question}", 86400),
-                pool.submit(self._cc_chat_with_retry, self.ccs[1],
-                            f"{gen_instr}\n\n问题: {question}", 86400),
+                pool.submit(
+                    self._cc_chat_with_retry,
+                    self.ccs[i],
+                    self._build_generation_prompt(
+                        question, incremental, self.ccs[i]
+                    ),
+                    86400,
+                )
+                for i in range(2)
             ]
             responses = []
             for i, f in enumerate(futures):

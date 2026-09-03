@@ -577,6 +577,24 @@ class Runtime(RuntimeGateway, SchedulerDelegate):
         logger.info("Root manager created: node_id=%s", node.id)
         return node.id
 
+    def apply_plan(
+        self, parent_node_id: str, plan: ExecutionPlan, *, channel: str
+    ) -> list[Node]:
+        """Apply a plan through an explicitly selected business channel.
+
+        This is a narrow facade for callers that already know whether the plan is
+        a full initial plan or a selective revision.  It deliberately does not
+        infer channel semantics or provide an ``auto`` mode; the existing
+        inject/submit entry points remain available for protocol-specific flows.
+        """
+        if channel == "full":
+            return self.inject_plan(parent_node_id, plan)
+        if channel == "revision":
+            return self.inject_revision_plan(parent_node_id, plan)
+        raise ValueError(
+            f"Unsupported plan channel '{channel}'; expected 'full' or 'revision'"
+        )
+
     def inject_plan(self, parent_node_id: str, plan: ExecutionPlan) -> list[Node]:
         """提交 ExecutionPlan，经 Planner 翻译后注入 Graph。
 

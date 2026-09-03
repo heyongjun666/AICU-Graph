@@ -371,6 +371,40 @@ class TestSubmitRootManager:
 class TestSubmitPlan:
     """AC 3: submit_plan translates via Planner and injects into Graph."""
 
+    def test_apply_plan_requires_explicit_full_channel(self, runtime, monkeypatch):
+        plan = _make_plan()
+        expected = [object()]
+        calls = []
+
+        def apply_full(parent_id, received_plan):
+            calls.append((parent_id, received_plan))
+            return expected
+
+        monkeypatch.setattr(runtime, "inject_plan", apply_full)
+        result = runtime.apply_plan("parent", plan, channel="full")
+
+        assert result is expected
+        assert calls == [("parent", plan)]
+
+    def test_apply_plan_dispatches_revision_without_guessing(self, runtime, monkeypatch):
+        plan = _make_plan()
+        expected = [object()]
+        calls = []
+
+        def apply_revision(parent_id, received_plan):
+            calls.append((parent_id, received_plan))
+            return expected
+
+        monkeypatch.setattr(runtime, "inject_revision_plan", apply_revision)
+        result = runtime.apply_plan("parent", plan, channel="revision")
+
+        assert result is expected
+        assert calls == [("parent", plan)]
+
+    def test_apply_plan_rejects_implicit_channel(self, runtime):
+        with pytest.raises(ValueError, match="full.*revision"):
+            runtime.apply_plan("parent", _make_plan(), channel="auto")
+
     def test_submit_plan_creates_nodes(self, runtime):
         """submit_plan should create nodes via Planner."""
         runtime.start()

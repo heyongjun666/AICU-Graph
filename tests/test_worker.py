@@ -742,6 +742,8 @@ class TestRoutingPromptDomainNeutral:
         text = Worker._build_event_publish_instructions(node)
         assert "不要指定目标" in text
         assert '"objective"' in text
+        assert "只有确实需要其他节点进行协作" in text
+        assert "任务完成、验证成功、产物已生成" in text
         # 不再出现 target/type/payload 反馈契约
         assert "带 target 的事件" not in text
         assert "payload.feedback" not in text

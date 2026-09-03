@@ -1,9 +1,7 @@
 """
-executables/worker.py — Worker 执行单元（双模式）
+executables/worker.py — Worker 执行单元
 
-Worker 是 Executable 的具体实现，支持 real/stub 双模式：
-- stub 模式：使用集成测试桩（SuccessStub/FailureStub/TimeoutStub）
-- real 模式：使用真实 AICU 实例
+Worker 是 Executable 的具体实现，使用真实 AICU 实例执行任务；测试替身仅通过依赖注入提供。
 
 Worker.run() 在线程池中执行 AICU.ask()，避免阻塞主线程调度循环。
 """
@@ -19,8 +17,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from typing import Any, Optional
 
-from executables.base import Executable, ExecutableContext, normalize_exec_mode
-from executables.default_stub import DefaultStubAICU
+from executables.base import Executable, ExecutableContext
 from runtime.agent_events import event_queue_dirs
 from runtime.context import build_codegraph_context, notify_artifact_updated
 from runtime.delivery import delivery_enabled as _delivery_enabled
@@ -42,7 +39,7 @@ def _normalize_worker_artifact(ctx: ExecutableContext, artifact_path: str) -> st
     所有节点自动挂载共享区（config 含 ``_shared_workspace``，会话级单一共享根），
     V3-2.1 起共享分区 = Worker 产物唯一事实源：本函数只做「事实认定」，**绝不
     copy/move 修复事实**（Runtime 只证明事实，不修复事实）：
-      - 声明路径已在分区内（CC 直写 / AICU shared_target / stub 直写）→ 幂等返回
+      - 声明路径已在分区内（CC 直写 / AICU shared_target 直写）→ 幂等返回
       - 声明路径在分区外 → 产物权威 = 分区（Runtime 事实），返回分区，不复制
     空分区由 Gate ``non_empty`` 拦下 → delivery_state=invalid → auto-retry/repair，
     不静默救援。
@@ -63,7 +60,7 @@ def _normalize_worker_artifact(ctx: ExecutableContext, artifact_path: str) -> st
     if shared_root:
         partition = resolve_partition(config)
         os.makedirs(partition, exist_ok=True)
-        # 已在分区内（CC 直写 / AICU shared_target / stub）→ 幂等返回
+        # 已在分区内（CC 直写 / AICU shared_target）→ 幂等返回
         if os.path.commonpath([partition, source]) == partition:
             return source
         # 分区外声明 → 产物权威 = 分区（Runtime 事实），不复制；
@@ -91,7 +88,7 @@ def _load_worker_artifact_contract(ctx: ExecutableContext) -> Any:
     """从角色 yaml 读取 ``artifact_contract:``；失败回退默认契约（fail-silent）。
 
     roles_dir 与 aicu.py 一致：项目根 ``roles/``（Worker 由 aicu 按同一目录解析
-    角色配置，契约声明与运行时角色配置天然对齐）。stub/测试角色缺省走默认契约。
+    角色配置，契约声明与运行时角色配置天然对齐）。测试角色缺省走默认契约。
     """
     from runtime.delivery.contracts import ArtifactContract
 
@@ -415,10 +412,6 @@ def _create_real_aicu(ctx: ExecutableContext) -> Any:
 class Worker(Executable):
     """Worker 执行单元 — 在子进程中运行 AICU.ask() 并回填结果。
 
-    双模式：
-    - mode="stub"：使用集成测试桩，适用于单元测试
-    - mode="real"：使用真实 AICU 实例，适用于生产
-
     生命周期:
         run() → (pause() ↔ resume())* → stop() / 自然结束
         cleanup_resources() 在最终清理时调用，幂等。
@@ -427,25 +420,14 @@ class Worker(Executable):
     def __init__(
         self,
         context: ExecutableContext,
-        mode: Optional[str] = None,
-        stub: Optional[Any] = None,
         aicu_instance: Optional[Any] = None,
     ):
         """
         Args:
-            ctx:           执行上下文（含 Node、RuntimeGateway、配置）。
-            mode:          运行模式（"stub" | "real"）。None 时从环境变量 EXEC_MODE 读取，默认 "stub"。
-            stub:          stub 模式下使用的测试桩实例（须实现 ask() 方法）。
-            aicu_instance: real 模式下使用的 AICU 实例（None 时按节点 role 自动创建）。
+            context:       执行上下文（含 Node、RuntimeGateway、配置）。
+            aicu_instance: 可选的 AICU 实例；未提供时创建或复用真实实例。
         """
         super().__init__(context)
-        if mode is None:
-            mode = os.environ.get("EXEC_MODE", "stub")
-        self._mode = normalize_exec_mode(mode)
-        # mode="stub" 但未提供 stub 时，自动使用 DefaultStubAICU，让 demo 能跑通
-        self._stub = stub if stub is not None else (
-            DefaultStubAICU() if self._mode == "stub" else None
-        )
         self._aicu = aicu_instance
         self._process_pid: Optional[int] = None
 
@@ -1006,15 +988,11 @@ class Worker(Executable):
         成功 → COMPLETED + artifact_path + 路由决策（如有）
         失败 → FAILED + ErrorObject + 路由决策（如有）
         """
-        mode = normalize_exec_mode(ctx.config.get("mode", self._mode))
-
         # 判断是否为会话续接（必须在 _create_real_aicu 之前检查，
-        # 因为 _create_real_aicu 会把首次创建的 AICU 写入缓存）
+        # 因为 _create_real_aicu 会把首次创建的 AICU 写入缓存）。
+        # 测试 fake 也可通过 aicu_instance 注入，但不参与节点级真实会话缓存。
         with Worker._aicu_cache_lock:
-            is_continuation = (
-                mode != "stub"
-                and Worker._aicu_cache.get(ctx.node.id) is not None
-            )
+            is_continuation = Worker._aicu_cache.get(ctx.node.id) is not None
 
         # 捕获 Revise 复用标记（必须在使用前捕获：下方 _build_routing_context
         # 读取 pending_context 后会被清除，先捕获才能判断「resume 失败 → 新建会话」兜底）
@@ -1024,14 +1002,10 @@ class Worker(Executable):
             .get('collaboration_type') == 'revise'
         )
 
-        # Select the appropriate AICU/stub instance
-        if mode == "stub":
-            aicu = ctx.config.get("stub_instance", self._stub)
-        else:
-            # real 模式：优先用注入的 aicu_instance，否则按节点 role 创建/复用
-            aicu = self._aicu
-            if aicu is None:
-                aicu = _create_real_aicu(ctx)
+        # 真实 AICU；测试替身只能通过 aicu_instance 显式注入。
+        aicu = self._aicu
+        if aicu is None:
+            aicu = _create_real_aicu(ctx)
 
         # Update status to RUNNING
         ctx.runtime.update_node_status(ctx.node.id, NodeStatus.RUNNING)
@@ -1072,7 +1046,7 @@ class Worker(Executable):
         # The AICU owns individual CC start/finish/failure events. Worker owns
         # the outer task handoff so the timeline also explains what entered the
         # CC pool, including injected AICU-compatible implementations.
-        cc_ids = _aicu_cc_ids(aicu) if mode != "stub" else []
+        cc_ids = _aicu_cc_ids(aicu)
         for cc_id in cc_ids:
             _log_cc_lifecycle(
                 ctx.runtime,

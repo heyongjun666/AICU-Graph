@@ -45,13 +45,6 @@ def _enabled() -> bool:
     return os.environ.get("AICU_CODEGRAPH") == "1"
 
 
-def _is_real(ctx) -> bool:
-    """stub/mock 一律 no-op（stub E2E 字节级不变）。"""
-    mode = (ctx.config or {}).get("mode") or os.environ.get("EXEC_MODE", "stub")
-    mode = str(mode).lower()
-    return mode not in ("stub", "mock")
-
-
 def notify_artifact_updated(shared_workspace: str) -> None:
     """上下文失效边界：Worker 只知"有产出写入共享组"，不知 CodeGraph。
 
@@ -68,7 +61,7 @@ def notify_artifact_updated(shared_workspace: str) -> None:
 
 def build_codegraph_context(node, ctx) -> str:
     """Worker/Manager 开工前的代码图谱上下文（Push）。禁用/失败返回 ""。"""
-    if not _enabled() or not _is_real(ctx):
+    if not _enabled():
         return ""
     t0 = time.time()
     try:
@@ -101,7 +94,7 @@ def build_codegraph_context(node, ctx) -> str:
 
 def build_review_context(ctx, children_info) -> str:
     """Manager Review：子节点共享组代码影响面摘要。禁用/失败返回 ""。"""
-    if not _enabled() or not _is_real(ctx):
+    if not _enabled():
         return ""
     t0 = time.time()
     try:

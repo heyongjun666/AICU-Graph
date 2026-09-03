@@ -17,8 +17,7 @@ import traceback
 from datetime import datetime
 from typing import Any, Optional
 
-from executables.base import Executable, ExecutableContext, normalize_exec_mode
-from executables.default_stub import DefaultStubAICU
+from executables.base import Executable, ExecutableContext
 from executables.worker import _aicu_cc_ids, _log_cc_lifecycle
 from runtime.models import (
     ErrorObject,
@@ -127,10 +126,6 @@ def _extract_review_json(text: str) -> Optional[dict]:
 class Manager(Executable):
     """Manager 执行单元 — 两段式生命周期（expand → review）。
 
-    双模式：
-    - mode="stub"：使用集成测试桩，适用于单元测试
-    - mode="real"：使用真实 AICU 实例，适用于生产
-
     生命周期:
         run() → _expand() → WAITING（等待子节点完成）
         → on_children_completed() → READY(review)
@@ -140,27 +135,15 @@ class Manager(Executable):
     def __init__(
         self,
         context: Optional[ExecutableContext] = None,
-        mode: Optional[str] = None,
-        stub: Optional[Any] = None,
         aicu_instance: Optional[Any] = None,
     ):
         """初始化 Manager。
 
         Args:
-            context:    ExecutableContext 实例。
-            mode:       运行模式（"stub" | "real"）。None 时从环境变量 EXEC_MODE 读取，默认 "stub"。
-            stub:       stub 模式下使用的测试桩实例（须实现 ask() 方法）。
-            aicu_instance: real 模式下使用的 AICU 实例（None 时按节点 role 自动创建）。
+            context: ExecutableContext 实例。
+            aicu_instance: 可选的 AICU 实例；未提供时按节点 role 创建真实实例。
         """
         super().__init__(context)
-        if mode is None:
-            import os as _os
-            mode = _os.environ.get("EXEC_MODE", "stub")
-        self._mode = normalize_exec_mode(mode)
-        # mode="stub" 但未提供 stub 时，自动使用 DefaultStubAICU，让 demo 能跑通
-        self._stub = stub if stub is not None else (
-            DefaultStubAICU() if self._mode == "stub" else None
-        )
         self._aicu = aicu_instance
         self._interrupt_flag = False
 
@@ -886,6 +869,7 @@ class Manager(Executable):
         ctx: ExecutableContext,
         prompt: str,
         retries: int = 2,
+        incremental: bool = False,
     ) -> Any:
         """统一 AICU 调用 + 重试逻辑。
 
@@ -899,26 +883,14 @@ class Manager(Executable):
 
         Raises:
             重试耗尽时抛出最后一次异常。
-        incremental: bool = False,
         """
-        mode = normalize_exec_mode(ctx.config.get("mode", self._mode))
+        # 生产路径始终使用真实 AICU；测试可通过 aicu_instance 显式注入 fake。
+        aicu = self._aicu
+        if aicu is None:
+            from executables.worker import _create_real_aicu
+            aicu = _create_real_aicu(ctx)
 
-        if mode == "stub":
-            aicu = ctx.config.get("stub_instance", self._stub)
-            # Fallback: if self._stub was set to None because the Manager was
-            # constructed with EXEC_MODE=real but the node config requests "stub",
-            # create a DefaultStubAICU on the fly to avoid NoneType errors.
-            if aicu is None:
-                from executables.default_stub import DefaultStubAICU
-                aicu = DefaultStubAICU()
-        else:
-            # real 模式：优先用注入的 aicu_instance，否则按节点 role 创建
-            aicu = self._aicu
-            if aicu is None:
-                from executables.worker import _create_real_aicu
-                aicu = _create_real_aicu(ctx)
-
-        cc_ids = _aicu_cc_ids(aicu) if mode != "stub" else []
+        cc_ids = _aicu_cc_ids(aicu)
         phase = ctx.node.manager_phase or "expand"
         for cc_id in cc_ids:
             _log_cc_lifecycle(
@@ -1241,8 +1213,6 @@ class Manager(Executable):
     # Internal: Prompt 构造
     # ------------------------------------------------------------------
 
-    def _build_expand_prompt(self, ctx: ExecutableContext) -> str:
-        """构造 Expand 阶段 prompt — 含执行上下文快照 + 原始task。
     def _build_revise_incremental_prompt(self, ctx: ExecutableContext) -> str:
         """Build the only message sent for a Manager Revise generation turn.
 
@@ -1263,6 +1233,8 @@ class Manager(Executable):
             f"当前增量请求:\n{incremental}"
         )
 
+    def _build_expand_prompt(self, ctx: ExecutableContext) -> str:
+        """构造 Expand 阶段 prompt — 含执行上下文快照 + 原始task。
 
         上下文块通过 _build_execution_context_snapshot() 生成, 失败时静默降级为只返回 task。
         Manager 可自由创建子 Manager，组织树深度由 Phase D 反问门自然控制。

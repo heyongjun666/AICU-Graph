@@ -18,19 +18,11 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 from runtime.models import ErrorObject
+from runtime.shared_io import FRAMEWORK_DIR_NAMES
 
 from .contracts import ArtifactContract, resolve_required_types
 
 logger = logging.getLogger(__name__)
-
-# 框架/非代码目录：产物扫描时整体排除（与 worker._ROUTING_SEARCH_EXCLUDE_DIRS 对齐，
-# 另补 .codegraph/.artifacts —— 交付层内部目录）。
-FRAMEWORK_DIR_NAMES = frozenset({
-    "events", "event_inbox", "events_inbox",
-    "cc_0", "cc_1", "cc_2", "deliverables",
-    "__pycache__", "node_modules", ".tox", "venv", ".venv",
-    ".codegraph", ".artifacts", ".git",
-})
 
 # VERDICT 判定块提取正则（复用 worker._scan_single_file 语义：只定位块位置，
 # 状态由 json.loads 解析 = 结构化非正则推断）。

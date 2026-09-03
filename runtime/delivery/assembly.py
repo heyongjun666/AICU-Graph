@@ -24,39 +24,11 @@ import os
 from datetime import datetime
 from typing import Any, Optional
 
+from runtime.shared_io import build_dir_index
+
 from .gate import FRAMEWORK_DIR_NAMES, _is_empty, _iter_files
 from .issues import AssemblyResult, DeliveryIssue, DeliveryObservation
 from .registry import ArtifactRegistryBackend, scan_artifact_files
-
-
-def build_dir_index(path: str) -> str:
-    """为目录产物生成本地文件清单（供 Manager review 上下文使用）。
-
-    当子节点 artifact 是目录（如共享分区内的 fallback 拷贝目录）时，
-    read_artifact 无法直接读取，此处退化为目录索引，供 reviewer 判断
-    产物规模，并配合 prompt 中的 artifact_path 让 reviewer 用 OS 工具
-    读取真实文件。
-
-    Args:
-        path: 目录的绝对路径。
-
-    Returns:
-        目录清单字符串。
-    """
-    if not os.path.isdir(path):
-        return f"(not a directory: {path})"
-    lines = ["(目录产物 — 文件清单):"]
-    for root, _dirs, files in os.walk(path):
-        rel = os.path.relpath(root, path)
-        for name in sorted(files):
-            fp = os.path.join(root, name)
-            relf = name if rel == "." else os.path.join(rel, name)
-            try:
-                size = os.path.getsize(fp)
-            except OSError:
-                size = 0
-            lines.append(f"- {relf} ({size} B)")
-    return "\n".join(lines) if len(lines) > 1 else "(empty directory)"
 
 
 def scan_shared_root(shared_root: str) -> dict:

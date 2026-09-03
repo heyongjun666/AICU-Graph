@@ -31,6 +31,7 @@ import {
   OutputFile,
   AgentEvent,
   ApiKeyResponse,
+  InternalUsernameResponse,
 } from '../types';
 import { useUIStateStore } from '../stores/UIStateStore';
 export type { RoleInfo } from '../types';
@@ -591,6 +592,17 @@ export function saveApiKey(model: string, api_key: string): Promise<ApiKeyRespon
 export function deleteApiKey(vendor: string): Promise<void> {
   return sessionRequest(`config/api-key?vendor=${encodeURIComponent(vendor)}`, {
     method: 'DELETE',
+  });
+}
+
+export function getInternalUsername(): Promise<InternalUsernameResponse> {
+  return sessionRequest('config/internal-username');
+}
+
+export function saveInternalUsername(username: string): Promise<InternalUsernameResponse> {
+  return sessionRequest('config/internal-username', {
+    method: 'PUT',
+    body: JSON.stringify({ username }),
   });
 }
 

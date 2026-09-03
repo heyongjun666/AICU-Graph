@@ -35,6 +35,7 @@ from typing import Optional
 
 from runtime.credentials import (
     api_key_env_for_vendor,
+    resolve_internal_username,
     resolve_sk_for_model,
     vendor_of_model,
 )
@@ -243,10 +244,9 @@ class CliAdapter:
 
     @property
     def known_models(self) -> list[str]:
-        """已知模型清单（供前端下拉候选）。
-
-        所有公开 CLI 返回 ``all`` 中的官方模型名并集，供前端下拉候选。
-        """
+        """已知模型清单（供前端下拉候选）。"""
+        if self.id == "internal":
+            return KNOWN_MODELS.get("internal", [])
         return KNOWN_MODELS.get("all", [])
 
     # 可选同名冲突甄别：(探测 argv, 必须含子串, 必须排除子串)。None 表示只用 which。
@@ -337,12 +337,35 @@ class ClaudeCodeAdapter(CliAdapter):
         self.display_name = display_name
         self.command = command
 
+    @staticmethod
+    def _internal_model_name(model: str) -> str:
+        """将旧配置中的模型 ID 兼容映射为 Internal 网关 display name。"""
+        key = re.sub(r"[^a-z0-9]", "", model.lower())
+        candidates = KNOWN_MODELS.get("internal", [])
+        # 同一模型可能同时存在内部网关名和公开 display name；保持
+        # 历史公开 ID 的语义，不把它隐式改成“内部”模型。
+        if "内部" not in model:
+            candidates = [name for name in candidates if "内部" not in name]
+        for display_name in candidates:
+            if re.sub(r"[^a-z0-9]", "", display_name.lower()) == key:
+                return display_name
+        return model
+
     def build_base_command(
         self, *, model: Optional[str], skip_permissions: bool, enable_project_skills: bool
     ) -> list:
         cmd = [self.command]
         if model:
-            cmd.extend(["--model", model])
+            command_model = self._internal_model_name(model) if self.id == "internal" else model
+            cmd.extend(["--model", command_model])
+        if self.id == "internal":
+            username = (
+                resolve_internal_username()
+                or os.environ.get("INTERNAL_USERNAME")
+                or os.environ.get("CC_USERNAME")
+            )
+            if username:
+                cmd.extend(["--username", username])
         if skip_permissions:
             # root 用户下 --dangerously-skip-permissions 被禁止，
             # 用 --allowedTools 只开放必要的文件操作工具
@@ -1302,8 +1325,9 @@ class CursorAdapter(CliAdapter):
         return {"result": text, "session_id": None, "subtype": None, "errors": []}
 
 
-# 优先级顺序即默认选择顺序
-_ADAPTERS = [
+# 优先级顺序即默认选择顺序（internal > claude > codebuddy > codex > kimi > qwen > opencode > pi > gemini > cursor > antigravity > grok）
+_ADAPTERS: list[CliAdapter] = [
+    ClaudeCodeAdapter("internal", "Internal", "internal"),
     ClaudeCodeAdapter("claude", "Claude Code", "claude"),
     # CodeBuddy Code（腾讯）：Claude Code 协议克隆，复用 ClaudeCodeAdapter，仅覆盖认证 env
     CodeBuddyAdapter(),

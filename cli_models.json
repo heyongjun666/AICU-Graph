@@ -1,4 +1,12 @@
 {
+  "internal": [
+    "auto-内部", "DeepSeek-V4-Flash-内部", "GLM-5.2-内部", "Kimi-K2.7-Code-内部",
+    "auto", "GLM-5.2", "GLM-5-Turbo", "Grok-4.5", "Grok-4.6",
+    "gpt-5.5", "gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.6-sol",
+    "Claude Haiku 4.5", "Claude Sonnet 4.6", "Claude Sonnet 5", "Opus 4.8", "Opus 5",
+    "Fable 5", "Kimi K2.6", "Kimi K3", "MiniMax-M3",
+    "DeepSeek-V4-Flash", "DeepSeek-V4-Pro"
+  ],
   "all": [
     "claude-opus-5", "claude-opus-4-8", "claude-opus-4-7", "claude-opus-4-6", "claude-opus-4-5",
     "claude-sonnet-5", "claude-sonnet-4-6", "claude-sonnet-4-5", "claude-haiku-4-5",

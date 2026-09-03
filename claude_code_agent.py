@@ -124,6 +124,14 @@ class ClaudeCodeAgent:
                 if not self.output_callback:
                     continue
                 message = line.rstrip("\r\n")
+                # Internal 2.1.x 当前会在 SDK 查询成功时把此兼容性告警写入
+                # stderr；它不是执行失败，不应作为任务内容转发给 AICU。
+                if (
+                    label == "stderr"
+                    and self.cli_name == "internal"
+                    and message.startswith("[claude-code:unrecognized_model]")
+                ):
+                    continue
                 if label == "stdout":
                     message = self.adapter.format_stream_event(message)
                 if message:
@@ -162,12 +170,13 @@ class ClaudeCodeAgent:
             api_base_url=self.api_base_url,
             api_key_env=self.api_key_env,
         )
-        # 将 UI 保存的 API Key 按模型厂商注入到 CLI 的认证环境变量。
-        sk = resolve_sk_for_model(self.model)
-        if sk:
-            env_name = self.adapter.api_key_env_for_model(self.model)
-            if env_name:
-                env[env_name] = sk
+        # 非 Internal CLI 注入按模型厂商保存的 API Key；Internal 使用 --username 认证。
+        if self.cli_name != "internal":
+            sk = resolve_sk_for_model(self.model)
+            if sk:
+                env_name = self.adapter.api_key_env_for_model(self.model)
+                if env_name:
+                    env[env_name] = sk
         return env
 
     def chat(self, prompt: str, max_turns: Optional[int] = None, timeout: int = 36000) -> str:

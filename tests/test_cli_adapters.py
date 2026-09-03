@@ -26,6 +26,11 @@ from runtime.credentials import CredentialStore, set_credential_store
 
 
 class TestRegistry:
+    def test_get_adapter_internal(self):
+        adapter = get_adapter("internal")
+        assert isinstance(adapter, ClaudeCodeAdapter)
+        assert adapter.command == "internal"
+
     def test_get_adapter_known(self):
         assert isinstance(get_adapter("claude"), ClaudeCodeAdapter)
         assert isinstance(get_adapter("codebuddy"), CodeBuddyAdapter)
@@ -43,9 +48,10 @@ class TestRegistry:
         with pytest.raises(ValueError):
             get_adapter("copilot")
 
-    def test_priority_order_excludes_copilot(self):
+    def test_priority_order_prefers_internal_and_excludes_copilot(self):
         ids = [a.id for a in cli_adapters._ADAPTERS]
-        assert ids[0] == "claude"
+        assert ids[0] == "internal"
+        assert ids.index("internal") < ids.index("claude")
         assert "copilot" not in ids
 
 
@@ -73,6 +79,60 @@ class TestDetect:
         monkeypatch.setattr(cli_adapters.shutil, "which", lambda command: None)
         with pytest.raises(RuntimeError):
             detect_default()
+
+
+class TestInternalAdapter:
+    def test_base_command_includes_saved_username(self, tmp_path):
+        store = CredentialStore(str(tmp_path / "api_keys.json"))
+        store.set_username("v_test_user")
+        set_credential_store(store)
+        try:
+            cmd = get_adapter("internal").build_base_command(
+                model="Claude Sonnet 4.6",
+                skip_permissions=False,
+                enable_project_skills=False,
+            )
+            assert cmd[:4] == ["internal", "--model", "Claude Sonnet 4.6", "--username"]
+            assert cmd[4] == "v_test_user"
+        finally:
+            set_credential_store(None)
+
+    def test_base_command_falls_back_to_environment(self, monkeypatch):
+        set_credential_store(None)
+        monkeypatch.setenv("INTERNAL_USERNAME", "env_user")
+        cmd = get_adapter("internal").build_base_command(
+            model=None, skip_permissions=False, enable_project_skills=False
+        )
+        assert cmd == ["internal", "--username", "env_user"]
+
+    def test_known_models_use_internal_catalog(self):
+        assert "Claude Sonnet 4.6" in get_adapter("internal").known_models
+        assert "claude-sonnet-4-6" not in get_adapter("internal").known_models
+        assert "claude-sonnet-4-6" in get_adapter("claude").known_models
+
+    def test_base_command_normalizes_legacy_model_id(self, monkeypatch):
+        monkeypatch.delenv("INTERNAL_USERNAME", raising=False)
+        monkeypatch.delenv("CC_USERNAME", raising=False)
+        cmd = get_adapter("internal").build_base_command(
+            model="deepseek-v4-flash", skip_permissions=False, enable_project_skills=False
+        )
+        assert cmd == ["internal", "--model", "DeepSeek-V4-Flash"]
+
+    def test_agent_does_not_inject_api_key(self, tmp_path):
+        store = CredentialStore(str(tmp_path / "api_keys.json"))
+        store.set("deepseek", "sk-secret")
+        set_credential_store(store)
+        try:
+            agent = object.__new__(ClaudeCodeAgent)
+            agent.adapter = get_adapter("internal")
+            agent.cli_name = "internal"
+            agent.model = "DeepSeek-V4-Flash"
+            agent.api_base_url = None
+            agent.api_key_env = None
+            env = agent._build_process_env()
+            assert env.get("DEEPSEEK_API_KEY") != "sk-secret"
+        finally:
+            set_credential_store(None)
 
 
 class TestClaudeAdapter:

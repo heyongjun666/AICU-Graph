@@ -1294,6 +1294,7 @@ class Runtime(RuntimeGateway, SchedulerDelegate):
                 target_status = NodeStatus.WAITING
                 reactivation_updates["manager_phase"] = None
                 log_message = "Worker '%s' continued"
+                log_args = (node_id,)
 
             self.graph.update_node(node_id, **reactivation_updates)
             self.scheduler.reactivate(
@@ -1369,9 +1370,10 @@ class Runtime(RuntimeGateway, SchedulerDelegate):
                 "incremental_task": task,
             }
             self.scheduler.clear_manager_notification(node_id)
+            # Revise 的上下文是当前增量请求的完整上下文，保持替换语义；
+            # artifact_path 也按原行为保留，供子节点复用时继续使用。
             self.graph.update_node(
                 node_id,
-                status=NodeStatus.WAITING,
                 manager_phase="expand",
                 pending_revise=True,
                 task=task,
@@ -1384,6 +1386,11 @@ class Runtime(RuntimeGateway, SchedulerDelegate):
                 error=None,
                 started_at=None,
                 finished_at=None,
+            )
+            self.scheduler.reactivate(
+                node_id,
+                target_status=NodeStatus.WAITING,
+                emit_notification=True,
             )
         logger.info(
             "Manager '%s' revised: COMPLETED/terminal → WAITING(expand) with "

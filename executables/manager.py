@@ -272,8 +272,38 @@ class Manager(Executable):
         #    绝不删除原有子节点整体重建（清理子节点是用户前端手动操作）。
         #    仅无子节点（首跑 / 无子节点重试）走全量通道（inject_plan 已拒绝有子节点注入）。
         has_children = bool(ctx.runtime.get_children(ctx.node.id))
-        if getattr(ctx.node, "pending_revise", False) or has_children:
+        revision = bool(getattr(ctx.node, "pending_revise", False) or has_children)
+        if revision:
             submit = getattr(ctx.runtime, "submit_revision_plan", None)
+            is_noop = getattr(ctx.runtime, "is_revision_plan_noop", None)
+            if submit is not None and callable(is_noop) and is_noop(ctx.node.id, plan):
+                # 事件/增量 Expand 若仅原样复用现有组织树，不能再次激活子节点。
+                # 子节点已全部结束时直接进入 review；否则继续等待其正常完成。
+                children = ctx.runtime.get_children(ctx.node.id)
+                terminal = {
+                    NodeStatus.COMPLETED,
+                    NodeStatus.FAILED,
+                    NodeStatus.STOPPED,
+                }
+                next_status = (
+                    NodeStatus.READY
+                    if children and all(child.status in terminal for child in children)
+                    else NodeStatus.WAITING
+                )
+                next_phase = "review" if next_status == NodeStatus.READY else "waiting"
+                logger.info(
+                    "Manager '%s' ignored no-op revision plan: organization and "
+                    "executable work are unchanged; next_phase=%s",
+                    ctx.node.id[:8], next_phase,
+                )
+                ctx.runtime.update_node_status(
+                    ctx.node.id,
+                    next_status,
+                    manager_phase=next_phase,
+                    pending_revise=False,
+                    pending_context=None,
+                )
+                return next_status
             if submit is not None:
                 submit(ctx.node.id, plan)
             else:
@@ -1308,12 +1338,19 @@ class Manager(Executable):
                 revise_lines.append(
                     _L(
                         ctx,
-                        "请按「决策 0 · 增量续跑」处理：优先复用既有子节点（填 reuse_step_ref，"
-                        "保留其产物与 Agent 会话），仅在无候选覆盖的新能力处才新建 step。",
-                        "Handle this per \"Decision 0 · Incremental Continue\": prefer reusing "
-                        "existing child nodes (fill reuse_step_ref, keep their artifacts and "
-                        "Agent sessions); only create a new step for capabilities not covered "
-                        "by any candidate.",
+                        "必须按「决策 0 · 增量续跑」处理：先逐项比较增量任务与全部既有子节点的 role、职责和产物。"
+                        "只要某个既有子节点能够承担该增量任务，就必须原地复用它，并在对应 step 中填写该节点的 "
+                        "reuse_step_ref（使用候选中的 step_ref 或 node_id）；此时禁止填写 null，也禁止新建同职责 step。"
+                        "只有既有子节点都无法覆盖的全新能力才允许新建 step；新建 step 的 task 必须描述当前增量任务中的该新能力，"
+                        "不得照抄候选节点原 task。复用意味着保留原产物和 Agent 会话，重新执行当前增量任务。",
+                        "You MUST follow \"Decision 0 · Incremental Continue\": first compare the incremental task "
+                        "with every existing child by role, responsibility, and artifacts. If any existing child "
+                        "can perform the increment, you MUST reuse it in place and fill that step's reuse_step_ref "
+                        "with the candidate step_ref or node_id; null is forbidden and creating a new step with the "
+                        "same responsibility is forbidden. Create a new step only for a genuinely new capability "
+                        "that no existing child can cover; the new step's task must describe that new capability from "
+                        "the current incremental task and must not copy a candidate's original task. Reuse preserves "
+                        "the existing artifacts and Agent session while rerunning the current incremental task.",
                     )
                 )
                 parts.append("\n".join(revise_lines))
@@ -1379,13 +1416,20 @@ class Manager(Executable):
         lines.append(
             _L(
                 ctx,
-                "增量决策规则：角色能覆盖增量需求的候选 → 用 reuse_step_ref 复用它"
-                "（保留其产物与 Agent 会话，重新执行完成增量）；没有候选覆盖的新能力 → 新建 step；"
-                "未复用的已完成兄弟保持不动。",
-                "Incremental decision rule: if a candidate's role covers the incremental need, "
-                "reuse it via reuse_step_ref (keep its artifacts and Agent session, re-run to "
-                "complete the increment); for new capabilities not covered by any candidate, "
-                "create a new step; completed siblings that are not reused stay unchanged.",
+                "增量决策规则（必须执行）：先将每个计划 step 与候选节点逐项做能力覆盖匹配。"
+                "候选角色能够完成该 step 的增量任务时，必须复用候选，并将 reuse_step_ref 设置为候选列表中原样的 "
+                "step_ref 或 node_id；仅沿用相同 step_id 不算复用。对已有能力进行修改、完善、调整或再次执行，仍属于该能力的增量续跑，"
+                "不能因此新建 step。只有没有任何候选能够完成的全新能力，才允许新建 step，此时 reuse_step_ref 才能为 null。"
+                "输出 execution_plan 前必须自检：所有可由候选覆盖的 step "
+                "都已填写有效 reuse_step_ref；未复用的已完成兄弟节点保持不动。",
+                "Incremental decision rule (MANDATORY): match every planned step against the candidates by capability. "
+                "When a candidate role can perform the step's incremental task, you MUST reuse that candidate and set "
+                "reuse_step_ref to the exact step_ref or node_id shown in the candidate list; using the same step_id alone "
+                "does not count as reuse. Modifying, refining, adjusting, or rerunning an existing capability is still "
+                "an incremental continuation of that capability and must not create a new step. Create a new step only "
+                "for a genuinely new capability that no candidate can "
+                "perform; only then may reuse_step_ref be null. Before outputting execution_plan, self-check that every "
+                "step covered by a candidate has a valid reuse_step_ref; completed siblings that are not reused stay unchanged.",
             )
         )
         return "\n".join(lines)

@@ -253,6 +253,16 @@ class TestPrevalidateReuse:
         reuse = rt._prevalidate_reuse(_plan([_step("s1", reuse_step_ref="A1")]), mgr_id)
         assert reuse == {"s1": "A1"}
 
+    def test_duplicate_unreferenced_revision_step_rejected(self, tmp_path):
+        rt, mgr_id = self._harness(tmp_path)
+        before = {node.id for node in rt.graph.all_nodes()}
+        plan = _plan([_step("new_step", role="dev", task="Task A1")])
+
+        with pytest.raises(ValueError, match="without reuse_step_ref"):
+            rt.inject_revision_plan(mgr_id, plan)
+
+        assert {node.id for node in rt.graph.all_nodes()} == before
+
 
 # ============================================================================
 # Test 5: planner.translate_revision
@@ -434,6 +444,60 @@ class TestReactivateReusedWorker:
 # ============================================================================
 # Test 8: Manager._expand duck-typing
 # ============================================================================
+
+
+class TestRevisionPlanNoop:
+    """增量计划未改变组织结构和可执行工作时应被识别为 no-op。"""
+
+    def _runtime_with_children(self, tmp_path):
+        rt = _make_runtime(tmp_path)
+        parent_id = rt.submit_root_manager("root")
+        initial = _plan([
+            _step("first", role="dev", task="Do A", task_summary="A"),
+            _step(
+                "second", role="qa", task="Do B", task_summary="B",
+                depends_on=["first"],
+            ),
+        ])
+        children = rt.inject_plan(parent_id, initial)
+        return rt, parent_id, children
+
+    def _unchanged_plan(self, children):
+        return _plan([
+            _step(
+                "revised-first", role="dev", task="Do A", task_summary="A",
+                reuse_step_ref=children[0].step_ref,
+            ),
+            _step(
+                "revised-second", role="qa", task="Do B", task_summary="B",
+                depends_on=["revised-first"],
+                reuse_step_ref=children[1].step_ref,
+            ),
+        ])
+
+    def test_identical_reused_plan_is_noop(self, tmp_path):
+        rt, parent_id, children = self._runtime_with_children(tmp_path)
+        assert rt.is_revision_plan_noop(
+            parent_id, self._unchanged_plan(children)
+        ) is True
+
+    @pytest.mark.parametrize(
+        "change",
+        ["new_step", "task", "partial_reuse", "dependency"],
+    )
+    def test_structural_or_executable_change_is_not_noop(self, tmp_path, change):
+        rt, parent_id, children = self._runtime_with_children(tmp_path)
+        plan = self._unchanged_plan(children)
+        if change == "new_step":
+            plan.steps.append(_step("new", role="writer", task="Do C"))
+        elif change == "task":
+            plan.steps[0].task = "Do something else"
+        elif change == "partial_reuse":
+            plan.steps[1].reuse_step_ref = None
+        else:
+            plan.steps[1].depends_on = []
+        assert rt.is_revision_plan_noop(parent_id, plan) is False
+
 
 class _ExpandStub:
     def __init__(self, role="dev", task="t"):
@@ -617,6 +681,51 @@ class TestExpandDuckTyping:
         assert rt.submitted_revisions == ["M1"]
         assert rt.submitted_plans == []
 
+    def test_expand_skips_noop_revision_when_children_are_terminal(self):
+        """no-op Revise 不提交计划，已有终态子节点直接进入 review。"""
+        rt = _DuckRuntime(with_revision=True)
+        node = _manager_node(pending_revise=True)
+        rt.add_node(node)
+        child = _worker_node(
+            "A1", "M1", role="dev", status=NodeStatus.COMPLETED,
+        )
+        rt.add_children("M1", [child])
+        calls: list[str] = []
+        rt.is_revision_plan_noop = lambda node_id, plan: calls.append(node_id) or True
+
+        result = Manager(
+            context=ExecutableContext(node=node, runtime=rt),
+            aicu_instance=_ExpandStub(),
+        ).run(ExecutableContext(node=node, runtime=rt))
+
+        assert result == NodeStatus.READY
+        assert calls == ["M1"]
+        assert rt.submitted_revisions == []
+        assert rt.submitted_plans == []
+        assert node.manager_phase == "review"
+        assert node.pending_revise is False
+        assert node.pending_context is None
+
+    def test_expand_keeps_waiting_for_active_children_on_noop_revision(self):
+        """no-op Revise 遇到运行中的子节点时继续等待，不重新激活。"""
+        rt = _DuckRuntime(with_revision=True)
+        node = _manager_node(pending_revise=True)
+        rt.add_node(node)
+        child = _worker_node("A1", "M1", role="dev", status=NodeStatus.RUNNING)
+        rt.add_children("M1", [child])
+        rt.is_revision_plan_noop = lambda node_id, plan: True
+
+        result = Manager(
+            context=ExecutableContext(node=node, runtime=rt),
+            aicu_instance=_ExpandStub(),
+        ).run(ExecutableContext(node=node, runtime=rt))
+
+        assert result == NodeStatus.WAITING
+        assert rt.submitted_revisions == []
+        assert rt.submitted_plans == []
+        assert node.manager_phase == "waiting"
+        assert node.pending_revise is False
+
     def test_repair_context_block_renders_defects(self):
         """2c：pending_context 为 repair 类型（本 Manager 被父级 review 修复）→ 渲染缺陷明细。"""
         rt = _DuckRuntime(with_revision=True)
@@ -677,6 +786,9 @@ class TestReviseCandidatesBlock:
         assert "step_ref: `dev`" in block
         assert "role: dev" in block
         assert "Task A1" in block
+        assert "reuse_step_ref" in block
+        assert "候选角色能够完成" in block
+        assert "可由候选覆盖" in block
 
 
 # ============================================================================

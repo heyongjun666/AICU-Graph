@@ -908,6 +908,108 @@ class Runtime(RuntimeGateway, SchedulerDelegate):
             reuse_map[step.step_id] = target.id
         return reuse_map
 
+    @staticmethod
+    def _normalize_revision_task(task: Optional[str]) -> str:
+        """Normalize task text for deterministic duplicate detection."""
+        return " ".join((task or "").split()).casefold()
+
+    def is_revision_plan_noop(self, parent_node_id: str, plan: ExecutionPlan) -> bool:
+        """判断增量计划是否没有改变组织结构，也没有新的可执行工作。
+
+        这是提交前的确定性检查：计划必须逐一复用当前全部子节点，且节点身份、
+        类型、角色、任务、显式配置和子节点依赖均未变化。语义相似但文字不同的
+        任务不在此处猜测，仍交由 Manager 的计划生成与事件约束处理。
+        """
+        children = self.graph.children(parent_node_id)
+        if not children or len(plan.steps) != len(children):
+            return False
+
+        try:
+            reuse_map = self._prevalidate_reuse(plan, parent_node_id)
+        except ValueError:
+            return False
+        if len(reuse_map) != len(plan.steps) or set(reuse_map.values()) != {
+            child.id for child in children
+        }:
+            return False
+
+        step_by_node = {reuse_map[step.step_id]: step for step in plan.steps}
+        child_by_id = {child.id: child for child in children}
+        for child_id, step in step_by_node.items():
+            child = child_by_id[child_id]
+            if (
+                child.exec_type != step.exec_type
+                or child.role != step.role
+                or self._normalize_revision_task(child.task)
+                != self._normalize_revision_task(step.task)
+            ):
+                return False
+            # 只比较计划明确覆盖的配置；缺省字段继续继承已有配置。
+            if any((child.config or {}).get(key) != value for key, value in step.config.items()):
+                return False
+
+            expected_dependencies = {
+                reuse_map[dep]
+                for dep in step.depends_on
+                if dep in reuse_map
+            }
+            actual_dependencies = {
+                dep.id
+                for dep in self.graph.dependencies(child_id)
+                if dep.id in child_by_id
+            }
+            if expected_dependencies != actual_dependencies:
+                return False
+        return True
+
+    def _validate_revision_new_steps(
+        self, plan: ExecutionPlan, parent_node_id: str
+    ) -> None:
+        """Reject unreferenced new steps that duplicate an existing sibling task.
+
+        Revise plans must explicitly identify reuse.  A missing ``reuse_step_ref``
+        is otherwise interpreted as a new node, so an LLM can accidentally clone
+        an existing sibling.  This check is deliberately exact and mechanical;
+        capability inference remains the Manager's responsibility.
+        """
+        children = self.graph.children(parent_node_id)
+        if not children:
+            return
+        existing_tasks = {
+            (child.role, self._normalize_revision_task(child.task), child.id)
+            for child in children
+        }
+        existing_step_ids = {
+            child.step_ref: child.id
+            for child in children
+            if child.step_ref
+        }
+        for step in plan.steps:
+            if step.reuse_step_ref:
+                continue
+            normalized_task = self._normalize_revision_task(step.task)
+            duplicate = None
+            # step_id/step_ref 是 Manager 给能力节点分配的稳定标识。
+            # Revise 中沿用已有标识却不填写 reuse_step_ref，必然是漏填复用字段，
+            # 不能把它解释成新节点；这也覆盖任务文本被模型原样复制的情况。
+            if step.step_id in existing_step_ids:
+                duplicate = existing_step_ids[step.step_id]
+            elif normalized_task:
+                duplicate = next(
+                    (
+                        child_id
+                        for role, task, child_id in existing_tasks
+                        if role == step.role and task == normalized_task
+                    ),
+                    None,
+                )
+            if duplicate is not None:
+                raise ValueError(
+                    f"Revision step '{step.step_id}' duplicates existing child "
+                    f"'{duplicate}' without reuse_step_ref; reference the existing "
+                    "candidate or provide a genuinely new capability"
+                )
+
     def inject_revision_plan(
         self, parent_node_id: str, plan: ExecutionPlan
     ) -> list[Node]:
@@ -922,6 +1024,7 @@ class Runtime(RuntimeGateway, SchedulerDelegate):
         """
         self._prevalidate_shared_configs([s.config for s in plan.steps])
         self._validate_plan_with_roles(plan)
+        self._validate_revision_new_steps(plan, parent_node_id)
 
         reuse_map = self._prevalidate_reuse(plan, parent_node_id)
         step_by_node: dict[str, Step] = {}
@@ -968,8 +1071,10 @@ class Runtime(RuntimeGateway, SchedulerDelegate):
                 "submit_revision_plan: node '%s' not found, cannot store plan", node_id
             )
             return
-        self.graph.update_node(node_id, execution_plan=plan)
+        # inject_revision_plan validates before mutating the graph, so an invalid
+        # duplicate Revise cannot leave partial state behind.
         self.inject_revision_plan(node_id, plan)
+        self.graph.update_node(node_id, execution_plan=plan)
 
     def _reactivate_reused_worker(
         self, node: Node, new_step: Step, prepared_config: dict

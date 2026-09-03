@@ -253,11 +253,15 @@ class Manager(Executable):
         # 暴露 node id 给 _parse_plan 日志使用（_parse_plan 不持有 ctx）
         self._current_node_id = ctx.node.id
 
-        # 1. 构造 prompt
-        prompt = self._build_expand_prompt(ctx)
+        # 1. 构造 prompt；Revise 只发送当前增量，历史由 AICU conversation 保留。
+        incremental = bool(getattr(ctx.node, "pending_revise", False))
+        prompt = (
+            self._build_revise_incremental_prompt(ctx)
+            if incremental else self._build_expand_prompt(ctx)
+        )
 
-        # 2. 调用 AICU
-        raw_output = self._call_aiCU_with_retry(ctx, prompt)
+        # 2. 调用 AICU。AICU 会在增量消息后追加本轮输出格式协议。
+        raw_output = self._call_aiCU_with_retry(ctx, prompt, incremental=incremental)
 
         # 3. 解析 ExecutionPlan
         plan = self._parse_plan(raw_output)
@@ -865,6 +869,7 @@ class Manager(Executable):
 
         Raises:
             重试耗尽时抛出最后一次异常。
+        incremental: bool = False,
         """
         mode = normalize_exec_mode(ctx.config.get("mode", self._mode))
 
@@ -901,7 +906,15 @@ class Manager(Executable):
                 raise RuntimeError("Manager execution interrupted")
 
             try:
-                result = aicu.ask(prompt)
+                if incremental:
+                    ask_incremental = getattr(aicu, "ask_incremental", None)
+                    result = (
+                        ask_incremental(prompt)
+                        if callable(ask_incremental)
+                        else aicu.ask(prompt)
+                    )
+                else:
+                    result = aicu.ask(prompt)
                 for cc_id in cc_ids:
                     _log_cc_lifecycle(
                         ctx.runtime,
@@ -1200,6 +1213,26 @@ class Manager(Executable):
 
     def _build_expand_prompt(self, ctx: ExecutableContext) -> str:
         """构造 Expand 阶段 prompt — 含执行上下文快照 + 原始task。
+    def _build_revise_incremental_prompt(self, ctx: ExecutableContext) -> str:
+        """Build the only message sent for a Manager Revise generation turn.
+
+        The Manager's existing children, original task, and prior decisions are
+        already in the resumed CC conversation and workspace.  Repeating them
+        here makes stale plans compete with the current request.
+        """
+        incremental = (
+            (getattr(ctx.node, "pending_context", None) or {}).get("incremental_task")
+            or ctx.node.task
+            or ""
+        ).strip()
+        if not incremental:
+            raise ValueError("Manager Revise requires a non-empty incremental task")
+        return (
+            "这是当前最高优先级的增量请求。请基于已有会话、已有子节点和已有产物，"
+            "重新生成当前版本的 ExecutionPlan；不要直接沿用历史计划。\n\n"
+            f"当前增量请求:\n{incremental}"
+        )
+
 
         上下文块通过 _build_execution_context_snapshot() 生成, 失败时静默降级为只返回 task。
         Manager 可自由创建子 Manager，组织树深度由 Phase D 反问门自然控制。

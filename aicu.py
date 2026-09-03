@@ -281,6 +281,13 @@ class AICU:
         self.final_file = final_file
         self.modular_output = modular_output
         self.generate_instruction = generate_instruction
+        # Stable role/decision context is installed once in CLAUDE.md.  The
+        # output contract remains available as a small per-request suffix so
+        # resumed conversations always receive the required response shape.
+        (
+            self._stable_generation_instruction,
+            self._output_format_instruction,
+        ) = self._split_generation_instruction(generate_instruction)
         self.main_doc = main_doc
         self.index_file = index_file
         self.review_checklist = self.role_config.get("review_checklist", [])
@@ -369,10 +376,16 @@ class AICU:
                 api_base_url=self.api_base_url,
                 api_key_env=self.api_key_env,
             )
-            # 写入 CLAUDE.md
-            if self.role_md_content:
+            # 写入一次性的角色与长期决策上下文；输出格式由每轮生成请求显式携带。
+            role_context = self.role_md_content
+            if self._stable_generation_instruction:
+                role_context += (
+                    "\n\n---\n\n# 长期生成规则 (Stable Generation Rules)\n\n"
+                    + self._stable_generation_instruction
+                )
+            if role_context:
                 claude_md = cc.workspace / "CLAUDE.md"
-                claude_md.write_text(self.role_md_content, encoding='utf-8')
+                claude_md.write_text(role_context, encoding='utf-8')
             # 写入 .claude/skills/ 软链接（仅当配置了 skills）
             if enable_skills:
                 self._install_skills_to_cc(cc.workspace)
@@ -749,6 +762,70 @@ class AICU:
         """将文件路径列表格式化为 prompt 中的行"""
         return "\n".join(f"  - {f}" for f in files)
 
+    @staticmethod
+    def _split_generation_instruction(instruction: str) -> Tuple[str, str]:
+        """Split stable generation rules from the per-request output contract.
+
+        Role identity and decision policy belong in ``CLAUDE.md``.  The output
+        section is intentionally retained for every generation request because
+        a resumed CLI conversation must still receive the current response
+        shape explicitly.
+        """
+        if not instruction:
+            return "", ""
+        match = re.search(
+            r"(?m)^##\s+(?:输出格式|JSON\s*格式要求|产出要求|产物组织方式)(?:\s|（|\(|:|：|$)",
+            instruction,
+        )
+        if match is None:
+            # Roles without a named output section have no separable stable
+            # generation policy; keep their complete generation contract in
+            # each request rather than silently dropping required instructions.
+            return "", instruction.strip()
+        return instruction[:match.start()].rstrip(), instruction[match.start():].strip()
+
+    def _format_output_instruction(self) -> str:
+        """Return the formatted per-request output contract."""
+        result = self._output_format_instruction
+        replacements = {
+            "{output_file}": "" if self.shared_target else (
+                str(self.output_file) if self.output_file is not None else ""
+            ),
+            "{main_doc}": str(self.main_doc) if self.main_doc else "",
+            "{index_file}": str(self.index_file) if self.index_file else "",
+            "{final_file}": str(self.final_file) if self.final_file else "",
+            "{deliverable_dir}": str(self.shared_target) if self.shared_target else (
+                str(self.deliverable_dir) if self.deliverable_dir else "."
+            ),
+        }
+        for placeholder, value in replacements.items():
+            result = result.replace(placeholder, value)
+        return result
+
+    def _build_generation_prompt(
+        self,
+        question: str,
+        incremental: bool = False,
+        cc: Optional[ClaudeCodeAgent] = None,
+    ) -> str:
+        """Build a first-turn message or a resumed generation message."""
+        # A normal ask() must also become incremental after this CC has a
+        # conversation.  ``incremental=True`` remains an explicit override for
+        # Manager Revise, while ``cc`` keeps peer members independent.
+        is_continuation = incremental or bool(getattr(cc, "conversation_id", None))
+        if is_continuation:
+            output_contract = self._format_output_instruction()
+            return (
+                question if not output_contract else
+                f"{question}\n\n{output_contract}"
+            )
+        instruction = self._format_instruction()
+        return f"{instruction}\n\n问题: {question}" if instruction else question
+
+    def ask_incremental(self, question: str, max_rounds: int = 3) -> dict:
+        """Continue an existing AICU conversation with only new requirements."""
+        return self._ask_peer(question, max_rounds, incremental=True)
+
     def _format_instruction(self) -> str:
         """安全格式化 generate_instruction 模板。
 
@@ -839,11 +916,16 @@ class AICU:
     # ========== 主入口 ==========
 
     def ask(self, question: str, max_rounds: int = 3) -> dict:
-        return self._ask_peer(question, max_rounds)
+        return self._ask_peer(question, max_rounds, incremental=False)
 
     # ========== peer 模式：按 num_ccs 选择策略 ==========
 
-    def _ask_peer(self, question: str, max_rounds: int = 3) -> dict:
+    def _ask_peer(
+        self,
+        question: str,
+        max_rounds: int = 3,
+        incremental: bool = False,
+    ) -> dict:
         """
         peer 模式入口：根据 CC 数量选择不同协作策略。
 
@@ -867,13 +949,13 @@ class AICU:
         print(f"{'='*60}")
 
         if self.num_ccs == 1:
-            return self._ask_peer_solo(question, max_rounds)
+            return self._ask_peer_solo(question, max_rounds, incremental)
         elif self.num_ccs == 2:
-            return self._ask_peer_pair(question, max_rounds)
+            return self._ask_peer_pair(question, max_rounds, incremental)
         elif self.num_ccs == 3:
-            return self._ask_peer_triple(question, max_rounds)
+            return self._ask_peer_triple(question, max_rounds, incremental)
         else:
-            return self._ask_peer_full(question, max_rounds)
+            return self._ask_peer_full(question, max_rounds, incremental)
 
     def _peer_strategy_name(self) -> str:
         names = {1: "solo (1CC: 生成+自审)", 2: "pair (2CC: 生产+审查)",
@@ -885,13 +967,16 @@ class AICU:
     # 适合：简单代码修改、小功能开发、快速验证想法。
     # 流程：生成 → 自审 → 修订 → 复审 → 交付
 
-    def _ask_peer_solo(self, question: str, max_rounds: int = 3) -> dict:
+    def _ask_peer_solo(
+        self, question: str, max_rounds: int = 3, incremental: bool = False
+    ) -> dict:
         cc = self.ccs[0]
 
         # ---- 生成 ----
         print(f"\n[AICU-solo] 阶段1: 生成")
-        gen_instr = self._format_instruction()
-        response = self._cc_chat_with_retry(cc, f"{gen_instr}\n\n问题: {question}", timeout=7200)
+        response = self._cc_chat_with_retry(
+            cc, self._build_generation_prompt(question, incremental, cc), timeout=7200
+        )
         # 保存 CC 响应到工作区文件，供 _read_cc_file / _finalize_result 读取
         cc_output_path = cc.workspace / "cc_output.md"
         cc_output_path.write_text(response, encoding='utf-8')
@@ -973,14 +1058,19 @@ class AICU:
     # 适合：日常开发工作。
     # 流程：CC-0 生成 → CC-1 审查 → CC-0 修订 → CC-1 复审 → 交付
 
-    def _ask_peer_pair(self, question: str, max_rounds: int = 3) -> dict:
+    def _ask_peer_pair(
+        self, question: str, max_rounds: int = 3, incremental: bool = False
+    ) -> dict:
         producer = self.ccs[0]
         reviewer = self.ccs[1]
 
         # ---- 生成 ----
         print(f"\n[AICU-pair] 阶段1: CC-0 生成")
-        gen_instr = self._format_instruction()
-        response = self._cc_chat_with_retry(producer, f"{gen_instr}\n\n问题: {question}", timeout=7200)
+        response = self._cc_chat_with_retry(
+            producer,
+            self._build_generation_prompt(question, incremental, producer),
+            timeout=7200,
+        )
         cc_output_path = self.ccs[0].workspace / "cc_output.md"
         cc_output_path.write_text(response, encoding='utf-8')
         if self.is_modular_output:
@@ -1057,16 +1147,22 @@ class AICU:
     # 适合：需求分析、PRD、架构设计、任务拆分等需要多种思路的工作。
     # 流程：CC-0/CC-1 并行生成 → CC-2 比较融合 → 修订 → 交付
 
-    def _ask_peer_triple(self, question: str, max_rounds: int = 3) -> dict:
+    def _ask_peer_triple(
+        self, question: str, max_rounds: int = 3, incremental: bool = False
+    ) -> dict:
         # ---- 双 CC 并行生成 ----
         print(f"\n[AICU-triple] 阶段1: CC-0/CC-1 并行生成")
-        gen_instr = self._format_instruction()
         with ThreadPoolExecutor(max_workers=2) as pool:
             futures = [
-                pool.submit(self._cc_chat_with_retry, self.ccs[0],
-                            f"{gen_instr}\n\n问题: {question}", 86400),
-                pool.submit(self._cc_chat_with_retry, self.ccs[1],
-                            f"{gen_instr}\n\n问题: {question}", 86400),
+                pool.submit(
+                    self._cc_chat_with_retry,
+                    self.ccs[i],
+                    self._build_generation_prompt(
+                        question, incremental, self.ccs[i]
+                    ),
+                    86400,
+                )
+                for i in range(2)
             ]
             responses = []
             for i, f in enumerate(futures):

@@ -13,6 +13,7 @@
 
 import os
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -83,6 +84,24 @@ def test_shared_target_skips_dead_deliverables_dir(tmp_path):
     assert not (Path(ws) / "cc_0" / "deliverables").exists()
 
 
+def test_manager_initialization_separates_stable_rules_and_output_contract(tmp_path):
+    """角色/长期规则只初始化写入一次，输出协议保留为请求级内容。"""
+    ws = str(tmp_path / "manager_ws")
+    aicu = AICU(
+        role_type="manager",
+        role="default",
+        parent_workspace=ws,
+        num_ccs=1,
+        skills=[],
+    )
+
+    claude_md = Path(ws) / "cc_0" / "CLAUDE.md"
+    stable = claude_md.read_text(encoding="utf-8")
+    assert "# Identity" in stable
+    assert "## 输出格式" not in stable
+    assert "## 输出格式" in aicu._format_output_instruction()
+
+
 # ============================================================================
 # 路径语义：_cc_deliverable_dir / _cc_output_path
 # ============================================================================
@@ -108,6 +127,50 @@ def test_cc_output_path_partition_non_modular(tmp_path):
     aicu, _, _ = _make_aicu(tmp_path, shared_target=partition,
                             modular=False, output_file="out.txt")
     assert os.path.realpath(aicu._cc_output_path(0)) == partition
+
+
+def test_generation_prompt_keeps_only_output_contract_on_incremental_turn(tmp_path):
+    """增量轮不重复稳定规则/历史任务，但仍携带输出协议。"""
+    aicu, _, _ = _make_aicu(tmp_path, role="code", modular=False)
+    aicu.generate_instruction = (
+        "稳定角色规则\n\n## 输出格式 (JSON Schema)\n只输出 JSON。"
+    )
+    # Recompute the split explicitly, matching construction-time behavior.
+    aicu._stable_generation_instruction, aicu._output_format_instruction = (
+        aicu._split_generation_instruction(aicu.generate_instruction)
+    )
+
+    first = aicu._build_generation_prompt("首次任务")
+    incremental = aicu._build_generation_prompt("当前增量", incremental=True)
+
+    assert "稳定角色规则" in first
+    assert "首次任务" in first
+    assert "稳定角色规则" not in incremental
+    assert "首次任务" not in incremental
+    assert "当前增量" in incremental
+    assert "## 输出格式" in incremental
+    assert "只输出 JSON" in incremental
+
+
+def test_generation_prompt_uses_incremental_shape_for_resumed_cc(tmp_path):
+    """普通 ask() 对已有 CC 会话也不重复稳定规则和历史任务。"""
+    aicu, _, _ = _make_aicu(tmp_path, role="code", modular=False)
+    aicu.generate_instruction = (
+        "稳定角色规则\n\n## 输出格式 (JSON Schema)\n只输出 JSON。"
+    )
+    aicu._stable_generation_instruction, aicu._output_format_instruction = (
+        aicu._split_generation_instruction(aicu.generate_instruction)
+    )
+
+    resumed_cc = SimpleNamespace(conversation_id="conversation-1")
+    prompt = aicu._build_generation_prompt(
+        "本轮任务", cc=resumed_cc
+    )
+
+    assert "稳定角色规则" not in prompt
+    assert "本轮任务" in prompt
+    assert "## 输出格式" in prompt
+    assert "只输出 JSON" in prompt
 
 
 def test_format_instruction_maps_placeholders(tmp_path):

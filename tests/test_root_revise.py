@@ -446,6 +446,21 @@ class _ExpandStub:
         }
 
 
+class _IncrementalExpandStub(_ExpandStub):
+    def __init__(self, role="dev", task="t"):
+        super().__init__(role=role, task=task)
+        self.incremental_prompts: list[str] = []
+        self.normal_prompts: list[str] = []
+
+    def ask(self, prompt: str) -> dict:
+        self.normal_prompts.append(prompt)
+        return super().ask(prompt)
+
+    def ask_incremental(self, prompt: str) -> dict:
+        self.incremental_prompts.append(prompt)
+        return super().ask(prompt)
+
+
 class _DuckRuntime:
     """记录 submit_plan / submit_revision_plan 调用的最小 RuntimeGateway 模拟。"""
 
@@ -515,6 +530,34 @@ def _manager_node(pending_revise: bool = False, status: NodeStatus = NodeStatus.
 
 
 class TestExpandDuckTyping:
+
+    def test_revise_uses_incremental_aicu_request_only(self):
+        rt = _DuckRuntime(with_revision=True)
+        node = _manager_node(pending_revise=True)
+        node.task = "CURRENT_TASK_FIELD"
+        node.pending_context = {
+            "collaboration_type": "revise",
+            "original_task": "HISTORICAL_TASK",
+            "incremental_task": "CURRENT_INCREMENTAL_TASK",
+        }
+        rt.add_node(node)
+        child = _worker_node("A1", "M1", role="dev", step_ref="dev")
+        rt.add_children("M1", [child])
+        aicu = _IncrementalExpandStub()
+        mgr = Manager(context=ExecutableContext(node=node, runtime=rt), aicu_instance=aicu)
+
+        result = mgr.run(ExecutableContext(node=node, runtime=rt))
+
+        assert result == NodeStatus.WAITING
+        assert len(aicu.incremental_prompts) == 1
+        assert aicu.normal_prompts == []
+        prompt = aicu.incremental_prompts[0]
+        assert "CURRENT_INCREMENTAL_TASK" in prompt
+        assert "HISTORICAL_TASK" not in prompt
+        assert "Reuse Candidates" not in prompt
+        assert "执行上下文快照" not in prompt
+        assert "CodeGraph" not in prompt
+        assert rt.submitted_revisions == ["M1"]
 
     def test_pending_revise_with_revision_runtime(self):
         rt = _DuckRuntime(with_revision=True)

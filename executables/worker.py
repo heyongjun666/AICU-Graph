@@ -376,9 +376,10 @@ def _create_real_aicu(ctx: ExecutableContext) -> Any:
         _handle_cc_stream_output(node.id, node.task, ctx.runtime, stream, message)
 
     selected_skills = node.config.get("skills")
+    # skills_dir 未显式配置时保持 None，交由 AICU 回退到角色 yaml 的
+    # skills_dir 默认（~/.claude/skills）。此前这里兜底到仓库根 skills/
+    # 目录，与角色配置不一致且该目录往往不存在，导致带 skill 的节点失败。
     skills_dir = node.config.get("skills_dir")
-    if selected_skills and not skills_dir:
-        skills_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "skills")
 
     # ---- V3-2.1 shared_target：Worker 有共享工作区 → CC 直写分区 ----
     # 共享分区 = CC 产物唯一权威（不再产生 nodes/{id}/output 副本）。

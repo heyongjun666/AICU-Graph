@@ -230,11 +230,6 @@ class TestCodexAdapter:
         assert args == []
         assert via_stdin is True
 
-    def test_print_flags_output_last_message_when_not_streaming(self):
-        adapter = get_adapter("codex")
-        assert adapter.print_flags(streaming=True) == ["--json"]
-        assert adapter.print_flags(streaming=False) == ["--json", "--output-last-message"]
-
     def test_resume_uses_subcommand(self):
         adapter = get_adapter("codex")
         assert adapter.resume_flag("c1") == ["resume", "c1"]

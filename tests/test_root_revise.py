@@ -13,7 +13,7 @@
     复用子 Manager → 自身 expand + pending_revise
 8.  Manager._expand duck-typing：无 submit_revision_plan 的 runtime 回退 submit_plan
 9.  _build_revise_candidates_block 含子节点 step_ref/role/task
-10. session_server /revise：200 + {"status":"revising"}；非法 node → 409；/restart → 404
+10. session_server /revise：200 + {"status":"revising"}；非法 node → 409；/restart 已删除（404/405）
 11. worker resume 失败兜底：revise_resume 首 ask 抛错 → pop cache + 新会话重试一次成功
 """
 
@@ -140,7 +140,13 @@ class TestReviseManagerNode:
 
         node = rt.graph.get_node(mgr_id)
         assert node.status == NodeStatus.WAITING
-        assert status_events == []
+        # R21/D5：revise_manager_node 经 reactivate(emit_notification=True) 同步发布
+        # node_status_changed(Waiting)（原断言锁定静默旧行为，按契约修订）
+        assert any(
+            e.payload.get("node_id") == mgr_id
+            and e.payload.get("status") == "Waiting"
+            for e in status_events
+        ), f"revise_manager_node 应发布 node_status_changed(Waiting); events={[e.payload for e in status_events]}"
         assert node.manager_phase == "expand"
         assert node.pending_revise is True
         assert node.task == "Add pagination"

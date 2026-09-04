@@ -2105,10 +2105,13 @@ class Runtime(RuntimeGateway, SchedulerDelegate):
             FileNotFoundError: 目标不存在或不是目录。
         """
         root = self.get_shared_workspace()
-        if not os.path.isdir(root):
-            return {"path": ".", "entries": [], "truncated": False}
+        # 越界校验先行：shared 根尚不存在（空白图会话从未创建节点）时也必须拒绝
+        # 越界 path，不能让「根目录不存在」的提前返回绕过 _resolve_workspace_path。
         target = self._resolve_workspace_path(root, path)
         if not os.path.isdir(target):
+            if os.path.realpath(target) == os.path.realpath(root):
+                # 根视图：会话尚无任何产出 → 返回空树（不暴露 shared_root）
+                return {"path": ".", "entries": [], "truncated": False}
             raise FileNotFoundError(path)
         partition_level = os.path.realpath(target) == os.path.realpath(root)
         producers = self._partition_metadata(root) if partition_level else {}

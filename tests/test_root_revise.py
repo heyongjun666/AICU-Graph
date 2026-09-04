@@ -840,7 +840,13 @@ class TestReviseEndpoint:
         resp = session_client.post("/v1/sessions", json={"task": "Build feature"})
         assert resp.status_code == 201, resp.text
         sid = resp.json()["id"]
-        root_id = resp.json()["root_node_id"]
+        # 空白图：手动创建 Manager 根节点
+        root = session_client.post(
+            f"/v1/sessions/{sid}/nodes",
+            json={"task": "t", "exec_type": "manager"},
+        )
+        assert root.status_code == 201, root.text
+        root_id = root.json()["id"]
 
         handle = session_manager.get_session(sid)
         rt = handle.runtime
@@ -883,11 +889,13 @@ class TestReviseEndpoint:
         )
         assert again.status_code == 409
 
-        # /restart 端点已删除 → 404
+        # /restart 端点已删除：任何未匹配路径都不再可用。
+        # 有前端 dist 时 SPA 静态挂载（html=True）对非 GET/HEAD 统一回 405，
+        # 无 dist 时回 404——两种都证明该端点已不存在。
         gone = session_client.post(
             f"/v1/sessions/{sid}/nodes/{root_id}/restart", json={}
         )
-        assert gone.status_code == 404
+        assert gone.status_code in (404, 405)
 
 
 # ============================================================================

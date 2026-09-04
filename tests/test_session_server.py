@@ -61,18 +61,27 @@ def _wait_for(predicate, timeout=3.0):
     return predicate()
 
 
-def test_session_starts_with_one_isolated_root_node(session_client):
+def test_session_starts_blank_and_is_isolated(session_client):
     first = _create_session(session_client, "First task", "First")
     second = _create_session(session_client, "Second task", "Second")
 
     first_graph = session_client.get(f"/v1/sessions/{first['id']}/graph").json()
     second_graph = session_client.get(f"/v1/sessions/{second['id']}/graph").json()
 
+    # 空白图：新会话不自动创建/执行根节点
+    assert first_graph["nodes"] == []
+    assert second_graph["nodes"] == []
+
+    # 会话隔离：给 first 手动添加节点，不影响 second
+    added = session_client.post(
+        f"/v1/sessions/{first['id']}/nodes",
+        json={"task": "first", "exec_type": "manager"},
+    )
+    assert added.status_code == 201, added.text
+    first_graph = session_client.get(f"/v1/sessions/{first['id']}/graph").json()
+    second_graph = session_client.get(f"/v1/sessions/{second['id']}/graph").json()
     assert len(first_graph["nodes"]) == 1
-    assert len(second_graph["nodes"]) == 1
-    assert first_graph["nodes"][0]["id"] == first["root_node_id"]
-    assert second_graph["nodes"][0]["id"] == second["root_node_id"]
-    assert first["root_node_id"] != second["root_node_id"]
+    assert second_graph["nodes"] == []
 
 
 def test_session_crud_and_not_found(session_client):
@@ -93,9 +102,15 @@ def test_manual_graph_editing_is_scoped_to_session(session_client):
     first = _create_session(session_client, "Editable graph")
     second = _create_session(session_client, "Untouched graph")
     first_id = first["id"]
-    root_id = first["root_node_id"]
 
+    # 暂停图避免新建节点被调度器自动执行（保持 WAITING 可编辑）
     assert session_client.post(f"/v1/sessions/{first_id}/graph/pause").status_code == 200
+    root_response = session_client.post(
+        f"/v1/sessions/{first_id}/nodes",
+        json={"task": "root", "exec_type": "manager"},
+    )
+    assert root_response.status_code == 201, root_response.text
+    root_id = root_response.json()["id"]
 
     child_response = session_client.post(
         f"/v1/sessions/{first_id}/nodes",
@@ -134,7 +149,7 @@ def test_manual_graph_editing_is_scoped_to_session(session_client):
     second_graph = session_client.get(f"/v1/sessions/{second['id']}/graph").json()
     assert len(first_graph["nodes"]) == 3
     assert len(first_graph["edges"]) == 2
-    assert len(second_graph["nodes"]) == 1
+    assert len(second_graph["nodes"]) == 0
     assert len(second_graph["edges"]) == 0
 
     assert session_client.delete(
@@ -145,11 +160,20 @@ def test_manual_graph_editing_is_scoped_to_session(session_client):
     ).status_code == 204
 
 
-def test_running_or_completed_node_cannot_be_edited(session_client):
+def test_running_or_completed_node_cannot_be_edited(session_client, session_manager):
     session = _create_session(session_client, "Immutable active node")
+    sid = session["id"]
+    node = session_client.post(
+        f"/v1/sessions/{sid}/nodes",
+        json={"task": "t", "exec_type": "worker"},
+    ).json()
+    # 显式置为非 WAITING（running/completed 均不可编辑），避免依赖调度器时序
+    session_manager.get_session(sid).runtime.graph.update_node(
+        node["id"], status=NodeStatus.RUNNING
+    )
     response = session_client.patch(
-        f"/v1/sessions/{session['id']}/nodes/{session['root_node_id']}",
-        json={"task": "Changed while active"},
+        f"/v1/sessions/{sid}/nodes/{node['id']}",
+        json={"task": "t"},
     )
     assert response.status_code == 409
 
@@ -249,6 +273,8 @@ def test_drain_pause_waits_for_running_node_and_becomes_restart_safe(tmp_path):
     )
     try:
         session = manager.create_session("Drain this session")
+        handle = manager.get_session(session["id"])
+        handle.runtime.create_manual_node(task="t", exec_type="worker")
         assert _BlockingExecutable.started.wait(timeout=3)
         assert _wait_for(
             lambda: manager.get_session(session["id"]).runtime.scheduler.active_execution_count
@@ -288,6 +314,10 @@ def test_immediate_pause_waits_for_execution_thread_to_exit(tmp_path):
     )
     try:
         session = manager.create_session("Interrupt this running session")
+        handle = manager.get_session(session["id"])
+        node = handle.runtime.create_manual_node(
+            task="t", exec_type="worker"
+        )
         assert _BlockingExecutable.started.wait(timeout=3)
         assert _wait_for(
             lambda: manager.get_session(session["id"]).runtime.scheduler.active_execution_count
@@ -298,7 +328,7 @@ def test_immediate_pause_waits_for_execution_thread_to_exit(tmp_path):
         assert pausing["lifecycle_state"] == "pausing"
         assert pausing["restart_safe"] is False
         assert pausing["running_count"] == 1
-        assert pausing["interrupted_node_ids"] == [session["root_node_id"]]
+        assert pausing["interrupted_node_ids"] == [node.id]
 
         _BlockingExecutable.release.set()
         assert _wait_for(
@@ -307,7 +337,7 @@ def test_immediate_pause_waits_for_execution_thread_to_exit(tmp_path):
         )
         paused = manager.list_sessions()[0]
         assert paused["restart_safe"] is True
-        assert paused["interrupted_node_ids"] == [session["root_node_id"]]
+        assert paused["interrupted_node_ids"] == [node.id]
     finally:
         _BlockingExecutable.release.set()
         manager.shutdown()
@@ -340,7 +370,9 @@ def test_graph_resume_does_not_resume_manually_paused_node(session_manager):
 def test_running_session_with_stopped_scheduler_resumes_pending_work(session_manager):
     session = session_manager.create_session("Resume pending revise")
     handle = session_manager.get_session(session["id"])
-    root = handle.runtime.graph.get_node(session["root_node_id"])
+    root = handle.runtime.create_manual_node(
+        task="t", exec_type="manager"
+    )
     assert root is not None
     runtime = handle.runtime
     scheduler = runtime.scheduler
@@ -370,7 +402,9 @@ def test_running_session_with_stopped_scheduler_resumes_pending_work(session_man
 def test_running_session_with_paused_scheduler_resumes_dispatch(session_manager):
     session = session_manager.create_session("Resume paused dispatch")
     handle = session_manager.get_session(session["id"])
-    root = handle.runtime.graph.get_node(session["root_node_id"])
+    root = handle.runtime.create_manual_node(
+        task="t", exec_type="manager"
+    )
     assert root is not None
     runtime = handle.runtime
     scheduler = runtime.scheduler
@@ -399,7 +433,9 @@ def test_running_session_with_paused_scheduler_resumes_dispatch(session_manager)
 def test_stopped_session_with_waiting_work_can_resume(session_manager):
     session = session_manager.create_session("Resume stopped pending work")
     handle = session_manager.get_session(session["id"])
-    root = handle.runtime.graph.get_node(session["root_node_id"])
+    root = handle.runtime.create_manual_node(
+        task="t", exec_type="manager"
+    )
     assert root is not None
     runtime = handle.runtime
     scheduler = runtime.scheduler
@@ -439,6 +475,9 @@ def test_paused_session_restores_without_automatic_execution(tmp_path):
         restore=False,
     )
     session = manager.create_session("Persist this pause")
+    manager.get_session(session["id"]).runtime.create_manual_node(
+        task="t", exec_type="worker"
+    )
     assert _BlockingExecutable.started.wait(timeout=3)
     assert _wait_for(
         lambda: manager.get_session(session["id"]).runtime.scheduler.active_execution_count
@@ -476,9 +515,9 @@ def test_running_session_restores_to_recovery_required(runtime, tmp_path):
         restore=False,
     )
     session = manager.create_session("Recover this session")
-    manager.get_session(session["id"]).runtime.graph.update_node(
-        session["root_node_id"], status=NodeStatus.RUNNING
-    )
+    runtime = manager.get_session(session["id"]).runtime
+    node = runtime.create_manual_node(task="t", exec_type="worker")
+    runtime.graph.update_node(node.id, status=NodeStatus.RUNNING)
     manager.shutdown()
 
     restored = SessionManager(
@@ -499,6 +538,9 @@ def test_running_session_restores_to_recovery_required(runtime, tmp_path):
 
 def test_sessions_restore_from_independent_state_files(session_manager):
     created = session_manager.create_session(task="Persist this graph", title="Persistent")
+    node = session_manager.get_session(created["id"]).runtime.create_manual_node(
+        task="t", exec_type="worker"
+    )
     root_dir = session_manager.root_dir
     registry = session_manager.registry
     workspace_root = session_manager.workspace_root
@@ -514,7 +556,7 @@ def test_sessions_restore_from_independent_state_files(session_manager):
         sessions = restored.list_sessions()
         assert [item["id"] for item in sessions] == [created["id"]]
         graph = restored.get_session(created["id"]).runtime.get_graph_snapshot()
-        assert graph["nodes"][0]["id"] == created["root_node_id"]
+        assert [n["id"] for n in graph["nodes"]] == [node.id]
     finally:
         restored.shutdown()
 
@@ -570,6 +612,13 @@ def test_session_settings_filter_secrets_and_switch_new_workspace(
     session = _create_session(session_client)
     session_id = session["id"]
     original_root = session_manager.get_session(session_id).metadata.workspace_root
+    # 切换工作区前先创建一个节点：其 _workspace_root 在创建时即注入旧工作区根
+    pre_switch = session_client.post(
+        f"/v1/sessions/{session_id}/nodes",
+        json={"task": "t", "exec_type": "worker"},
+    )
+    assert pre_switch.status_code == 201, pre_switch.text
+    node_id = pre_switch.json()["id"]
     custom_root = tmp_path / "custom-output"
     monkeypatch.setenv("SESSION_TEST_KEY", "secret-value")
 
@@ -603,10 +652,8 @@ def test_session_settings_filter_secrets_and_switch_new_workspace(
         "api_key_env": "SESSION_TEST_KEY",
         "language": "zh",
     }
-    root_node = session_manager.get_session(session_id).runtime.get_node(
-        session["root_node_id"]
-    )
-    assert root_node.config["_workspace_root"] == original_root
+    node = session_manager.get_session(session_id).runtime.get_node(node_id)
+    assert node.config["_workspace_root"] == original_root
 
 
 def test_nested_workspace_browsing_and_path_isolation(
@@ -615,7 +662,8 @@ def test_nested_workspace_browsing_and_path_isolation(
     session = _create_session(session_client)
     session_id = session["id"]
     runtime = session_manager.get_session(session_id).runtime
-    root_id = session["root_node_id"]
+    root = runtime.create_manual_node(task="Root", exec_type="manager")
+    root_id = root.id
     child = runtime.create_manual_node(
         task="Produce nested files", parent_id=root_id
     )
@@ -655,13 +703,17 @@ def test_nested_workspace_browsing_and_path_isolation(
 def test_dependency_candidates_and_cycle_rejection(session_client):
     session = _create_session(session_client)
     session_id = session["id"]
+    root = session_client.post(
+        f"/v1/sessions/{session_id}/nodes",
+        json={"task": "Root", "exec_type": "manager"},
+    ).json()
     first = session_client.post(
         f"/v1/sessions/{session_id}/nodes",
-        json={"task": "First", "parent_id": session["root_node_id"]},
+        json={"task": "First", "parent_id": root["id"]},
     ).json()
     second = session_client.post(
         f"/v1/sessions/{session_id}/nodes",
-        json={"task": "Second", "parent_id": session["root_node_id"]},
+        json={"task": "Second", "parent_id": root["id"]},
     ).json()
 
     edge = session_client.post(
@@ -685,7 +737,11 @@ def test_dependency_candidates_and_cycle_rejection(session_client):
 def test_node_result_and_activity_endpoints(session_client, session_manager):
     session = _create_session(session_client, "Inspect node output")
     session_id = session["id"]
-    node_id = session["root_node_id"]
+    node = session_client.post(
+        f"/v1/sessions/{session_id}/nodes",
+        json={"task": "t", "exec_type": "worker"},
+    ).json()
+    node_id = node["id"]
     runtime = session_manager.get_session(session_id).runtime
 
     empty = session_client.get(
@@ -875,7 +931,6 @@ def test_agent_events_empty_then_published(session_client, session_manager):
     """事件日志端点：未发布 → 空；发布后返回事件（含解析出的 producer/目标标签）。"""
     session = _create_session(session_client, "agent events")
     sid = session["id"]
-    root_id = session["root_node_id"]
 
     # 初始为空
     resp = session_client.get(f"/v1/sessions/{sid}/agent-events")
@@ -884,6 +939,9 @@ def test_agent_events_empty_then_published(session_client, session_manager):
 
     # 发布两个事件（经 Runtime.publish_events → AgentEventManager 摄取 + 路由）
     runtime = session_manager.get_session(sid).runtime
+    root_id = runtime.create_manual_node(
+        task="t", exec_type="worker"
+    ).id
 
     class _NoRouteAICU:
         def ask(self, prompt):

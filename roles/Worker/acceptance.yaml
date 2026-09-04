@@ -24,7 +24,6 @@ deliverable_dir: deliverables
 main_doc: acceptance_report.md
 index_file: _INDEX.md
 skills:
-- requirement-quality-gate-dynamic
 - diagnosing-bugs
 - codegraph
 review_checklist:
@@ -67,7 +66,7 @@ generate_instruction: |-
      - 对每个功能点运行程序并验证输出是否符合预期
      - 用 exit code 和输出日志指示通过/失败
   5. **必须用 Bash 工具执行 `python run_acceptance_tests.py`**，不能只读代码推测
-  6. **运行 `/requirement-quality-gate-dynamic` skill 反向核对需求覆盖**：每条需求是否有对应验收用例，未被验收覆盖的需求点必须列入报告（batch 模式：自对话完成交互环节）
+  6. **反向核对需求覆盖**：每条需求是否有对应验收用例，未被验收覆盖的需求点必须列入报告
   7. 读取执行结果，分析每个功能点的通过与失败情况
   8. 对每个发现的问题，标注严重级别(high/medium/low)并给出复现步骤
   9. 对验收失败的缺陷，**运行 `/diagnosing-bugs` skill 进入诊断循环**定位根因（batch 模式：自对话推进假设→验证→收敛，不要 softball），将根因路径写入报告

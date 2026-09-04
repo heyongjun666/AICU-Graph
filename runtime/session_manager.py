@@ -163,6 +163,20 @@ class SessionManager:
             for key in ("cli_name", "model", "api_base_url", "api_key_env", "language")
             if self.global_config.get(key)
         }
+        # 会话生效的工作空间根（与 _build_handle 的解析保持一致：显式指定优先，
+        # 否则回退到全局工作区根/会话目录内默认 workspace）。shared_workspace
+        # 校验必须以它为基准，不能用全局 self.workspace_root 误判。
+        if isinstance(requested_workspace, str) and requested_workspace.strip():
+            effective_workspace = os.path.abspath(
+                os.path.expanduser(requested_workspace)
+            )
+        else:
+            effective_workspace = os.path.abspath(
+                os.path.expanduser(
+                    self.global_config.get("workspace_root")
+                    or os.path.join(self._session_dir(session_id), "workspace")
+                )
+            )
         metadata = SessionMetadata(
             id=session_id,
             title=(
@@ -173,14 +187,10 @@ class SessionManager:
             created_at=now,
             updated_at=now,
             config={**inherited, **_safe_session_config(config)},
-            workspace_root=(
-                os.path.abspath(os.path.expanduser(requested_workspace))
-                if isinstance(requested_workspace, str) and requested_workspace.strip()
-                else None
-            ),
+            workspace_root=effective_workspace,
             shared_workspace=(
                 validate_shared_workspace(
-                    requested_shared, self.workspace_root, self.root_dir
+                    requested_shared, effective_workspace, self.root_dir
                 )
                 if isinstance(requested_shared, str) and requested_shared.strip()
                 else None

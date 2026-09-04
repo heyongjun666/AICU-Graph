@@ -78,7 +78,7 @@ export const zh: Dict = {
   'session.loading': '正在加载会话…',
   'session.empty': '暂无会话',
   'session.startGraph': '启动一个执行图',
-  'session.startGraphDesc': '创建一个带根 Manager 的会话。随着计划展开，新节点会出现在这里。',
+  'session.startGraphDesc': '新建会话会生成空白图，从「创建节点」开始。',
   'session.closeSessions': '关闭会话列表',
   'session.title': '会话标题',
 
@@ -205,7 +205,7 @@ export const zh: Dict = {
 
   // ---- 弹窗 ----
   'dialog.newSession': '新建会话',
-  'dialog.newSessionDesc': '根 Manager 作为第一个节点启动。',
+  'dialog.newSessionDesc': '创建空白会话，随后可手动添加节点。',
   'dialog.sessionName': '会话名称',
   'dialog.sessionNamePlaceholder': '例如：结算可靠性',
   'dialog.rootTask': '根任务',

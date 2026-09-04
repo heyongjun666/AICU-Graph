@@ -20,7 +20,6 @@ deliverable_dir: deliverables
 main_doc: requirements.md
 index_file: _INDEX.md
 skills:
-- requirement-quality-gate-dynamic
 - codegraph
 review_checklist:
 - - completeness
@@ -60,7 +59,7 @@ generate_instruction: |-
   4. 提取非功能需求（性能、安全、兼容性、可用性）
   5. 标注优先级（P0=必须有/P1=应该有/P2=可以有）
   6. 标注需求间依赖和冲突
-  7. **运行 `/requirement-quality-gate-dynamic` skill 对需求文档做质检**，按其 7 板块框架系统性质检（batch 模式：skill 的交互环节由你自对话完成，严苛不 softball）
+  7. **对需求文档做系统性质检**：按「价值锚点 / 交付边界 / 逻辑质量 / 健壮程度 / 体验一致 / 交互体感 / 规约可执行性」7 板块框架逐项检查（batch 模式：交互环节由你自对话完成，严苛不 softball）
 
   ## 质量要求（必须遵守，否则会被审查打回）
   - 验收标准必须可测试：不能写'系统要快'，要写'响应时间<200ms'

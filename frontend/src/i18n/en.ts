@@ -78,7 +78,7 @@ export const en: Dict = {
   'session.loading': 'Loading sessions…',
   'session.empty': 'No sessions',
   'session.startGraph': 'Start an execution graph',
-  'session.startGraphDesc': 'Create a session with one root manager. New nodes will appear here as the plan expands.',
+  'session.startGraphDesc': 'New sessions start as a blank graph. Begin by adding a node.',
   'session.closeSessions': 'Close sessions',
   'session.title': 'Session title',
 
@@ -205,7 +205,7 @@ export const en: Dict = {
 
   // ---- Dialogs ----
   'dialog.newSession': 'New session',
-  'dialog.newSessionDesc': 'The root manager starts as the first node.',
+  'dialog.newSessionDesc': 'Create a blank session; add nodes manually later.',
   'dialog.sessionName': 'Session name',
   'dialog.sessionNamePlaceholder': 'e.g. Checkout reliability',
   'dialog.rootTask': 'Root task',

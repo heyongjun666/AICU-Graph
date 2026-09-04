@@ -23,7 +23,6 @@ from runtime.roles_manager import RolesManager
 from runtime.server import _sse_stream
 from runtime.session_manager import SessionHandle, SessionManager
 from runtime.skills_manager import SkillsManager
-from runtime.workspace_resolver import resolve_shared_workspace
 from runtime.credentials import vendor_of_model
 from runtime.i18n import LanguageMiddleware, localized_detail, t
 from cli_adapters import detect_default, get_adapter, list_clis, list_provider_presets
@@ -31,7 +30,9 @@ from claude_code_agent import CCExecutionError, ClaudeCodeAgent
 
 
 class CreateSessionRequest(BaseModel):
-    task: str = Field(min_length=1, max_length=100000)
+    # task 现为可选：新会话默认生成空白图，不再自动创建/执行根节点。
+    # 前端不再填写；保留字段仅为 API 兼容（调用方仍可传入并作为标题回退）。
+    task: str = Field(default="", max_length=100000)
     title: Optional[str] = Field(default=None, max_length=120)
     role: str = Field(default="default", min_length=1, max_length=80)
     config: dict[str, Any] = Field(default_factory=dict)
@@ -44,6 +45,8 @@ class UpdateSessionRequest(BaseModel):
 class SessionSettingsRequest(BaseModel):
     config: dict[str, Any] = Field(default_factory=dict)
     workspace_root: Optional[str] = Field(default=None, max_length=4096)
+    # 三态：缺省（未发送）= 不修改；null / "" = 清除配置恢复默认；路径 = 设置项目目录。
+    shared_workspace: Optional[str] = Field(default=None, max_length=4096)
 
 
 class GlobalConfigRequest(BaseModel):
@@ -426,6 +429,7 @@ def create_session_app(
         return {
             "config": config,
             "workspace_root": handle.metadata.workspace_root,
+            "shared_workspace": handle.metadata.shared_workspace,
             "credential_configured": bool(
                 credential_env and os.environ.get(str(credential_env))
             ),
@@ -443,8 +447,13 @@ def create_session_app(
                 ),
             )
         try:
+            # 三态透传：仅当请求体显式携带 shared_workspace 键时才传给 update_settings
+            # （未发送 = 不修改；null/"" = 清除；路径 = 设置）。
+            settings_kwargs: dict[str, Any] = {}
+            if "shared_workspace" in body.model_fields_set:
+                settings_kwargs["shared_workspace"] = body.shared_workspace
             return session_manager.update_settings(
-                session_id, body.config, body.workspace_root
+                session_id, body.config, body.workspace_root, **settings_kwargs
             )
         except (OSError, ValueError) as error:
             raise HTTPException(status_code=400, detail=localized_detail(error)) from error
@@ -796,14 +805,15 @@ def create_session_app(
 
     @app.websocket("/v1/sessions/{session_id}/terminal")
     async def session_terminal(ws: WebSocket, session_id: str):
-        """会话底部终端：在共享工作区根目录启动交互式 bash（PTY）。
+        """会话底部终端：在会话「项目目录」（shared 根）启动交互式 bash（PTY）。
 
-        默认 cwd = resolve_shared_workspace(workspace_root)（= {workspace_root}/shared）。
-        前端用 xterm.js 连接；上行消息 = 键盘输入原始文本，`{"type":"resize",cols,rows}`
-        用于窗口尺寸同步；下行消息 = PTY 输出。WebSocket 断开时杀掉整个进程组。
+        默认 cwd = 会话项目目录（未配置时为 {workspace_root}/shared，见
+        Runtime.get_shared_workspace）。前端用 xterm.js 连接；上行消息 = 键盘输入
+        原始文本，`{"type":"resize",cols,rows}` 用于窗口尺寸同步；下行消息 = PTY
+        输出。WebSocket 断开时杀掉整个进程组。
         """
         handle = resolve(session_id)
-        cwd = resolve_shared_workspace(handle.metadata.workspace_root)
+        cwd = handle.runtime.get_shared_workspace()
         os.makedirs(cwd, exist_ok=True)
 
         await ws.accept()

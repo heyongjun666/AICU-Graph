@@ -9,19 +9,17 @@ interface NewSessionDialogProps {
   open: boolean;
   busy: boolean;
   onClose: () => void;
-  onSubmit: (task: string, title?: string) => Promise<void>;
+  onSubmit: (title: string) => Promise<void>;
 }
 
 export const NewSessionDialog: React.FC<NewSessionDialogProps> = ({ open, busy, onClose, onSubmit }) => {
   const { t } = useI18n();
   const [title, setTitle] = useState('');
-  const [task, setTask] = useState('');
   const [error, setError] = useState('');
 
   useEffect(() => {
     if (open) {
       setTitle('');
-      setTask('');
       setError('');
     }
   }, [open]);
@@ -30,10 +28,10 @@ export const NewSessionDialog: React.FC<NewSessionDialogProps> = ({ open, busy, 
 
   const submit = async (event: FormEvent) => {
     event.preventDefault();
-    if (!task.trim()) return;
+    if (!title.trim()) return;
     try {
       setError('');
-      await onSubmit(task.trim(), title.trim() || undefined);
+      await onSubmit(title.trim());
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : String(reason));
     }
@@ -46,10 +44,9 @@ export const NewSessionDialog: React.FC<NewSessionDialogProps> = ({ open, busy, 
           <div><h2>{t('dialog.newSession')}</h2><p>{t('dialog.newSessionDesc')}</p></div>
           <button type="button" className="icon-button" onClick={onClose} title={t('common.close')}><X size={18} /></button>
         </div>
-        <label>{t('dialog.sessionName')} <span className="optional">{t('common.optional')}</span><input value={title} onChange={(event) => setTitle(event.target.value)} placeholder={t('dialog.sessionNamePlaceholder')} /></label>
-        <label>{t('dialog.rootTask')}<textarea autoFocus value={task} onChange={(event) => setTask(event.target.value)} placeholder={t('dialog.rootTaskPlaceholder')} rows={6} /></label>
+        <label>{t('dialog.sessionName')}<input autoFocus value={title} onChange={(event) => setTitle(event.target.value)} placeholder={t('dialog.sessionNamePlaceholder')} /></label>
         {error && <div className="form-error">{error}</div>}
-        <div className="dialog-actions"><button type="button" className="secondary-button" onClick={onClose}>{t('common.cancel')}</button><button className="primary-button" disabled={!task.trim() || busy}>{busy ? t('dialog.creating') : t('dialog.createSession')}</button></div>
+        <div className="dialog-actions"><button type="button" className="secondary-button" onClick={onClose}>{t('common.cancel')}</button><button className="primary-button" disabled={!title.trim() || busy}>{busy ? t('dialog.creating') : t('dialog.createSession')}</button></div>
       </form>
     </div>
   );

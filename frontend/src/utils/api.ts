@@ -544,10 +544,16 @@ export function updateSessionSettings(
   sessionId: string,
   config: NodeConfig,
   workspaceRoot?: string,
+  sharedWorkspace?: string | null,
 ): Promise<SessionSummary> {
+  // 三态：undefined = 不发送该键（不修改）；字符串 = 设置项目目录；null = 清除（恢复默认）。
+  const body: Record<string, unknown> = { config, workspace_root: workspaceRoot };
+  if (sharedWorkspace !== undefined) {
+    body.shared_workspace = sharedWorkspace;
+  }
   return sessionRequest(`sessions/${sessionId}/settings`, {
     method: 'PATCH',
-    body: JSON.stringify({ config, workspace_root: workspaceRoot }),
+    body: JSON.stringify(body),
   });
 }
 

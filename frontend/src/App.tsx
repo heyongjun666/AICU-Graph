@@ -111,10 +111,10 @@ const App: React.FC = () => {
     [activeSessionId, sessions],
   );
 
-  const createNewSession = async (task: string, title?: string) => {
+  const createNewSession = async (title: string) => {
     setDialogBusy(true);
     try {
-      await createSession(task, title);
+      await createSession(title);
       setNewSessionOpen(false);
       setSidebarOpen(false);
     } finally {

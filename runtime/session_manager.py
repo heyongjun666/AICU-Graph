@@ -63,6 +63,36 @@ def _safe_session_config(config: Optional[dict]) -> dict[str, Any]:
     return {key: value for key, value in config.items() if key in _SESSION_CONFIG_KEYS}
 
 
+# 哨兵：update_settings 的 shared_workspace 三态（_UNSET=不修改 / None 或 ""=清除 / 路径=设置）。
+_UNSET = object()
+
+
+def validate_shared_workspace(path: str, workspace_root: str, runtime_dir: str) -> str:
+    """校验并解析会话「项目目录」（shared_workspace）。
+
+    轻量保护、不过度限制：拒绝空串、文件系统根、家目录、与会话工作空间根重合、
+    或位于 AICU runtime 目录内的路径；目录不存在时由调用方负责创建。
+    返回 canonical absolute path。
+    """
+    value = path.strip()
+    if not value:
+        raise ValueError("shared_workspace cannot be empty")
+    resolved = os.path.realpath(os.path.abspath(os.path.expanduser(value)))
+    if resolved == os.path.sep:
+        raise ValueError("shared_workspace cannot be the filesystem root")
+    if resolved == os.path.realpath(os.path.expanduser("~")):
+        raise ValueError("shared_workspace cannot be the home directory")
+    workspace = os.path.realpath(os.path.abspath(workspace_root))
+    if resolved == workspace:
+        raise ValueError("shared_workspace must differ from workspace_root")
+    runtime = os.path.realpath(os.path.abspath(runtime_dir))
+    if resolved == runtime or resolved.startswith(runtime + os.sep):
+        raise ValueError(
+            "shared_workspace cannot point into the AICU runtime directory"
+        )
+    return resolved
+
+
 @dataclass
 class SessionMetadata:
     id: str
@@ -71,6 +101,7 @@ class SessionMetadata:
     updated_at: str
     config: dict[str, Any] = field(default_factory=dict)
     workspace_root: Optional[str] = None
+    shared_workspace: Optional[str] = None
     lifecycle_state: str = "running"
     desired_state: str = "running"
     pause_mode: Optional[str] = None
@@ -125,6 +156,7 @@ class SessionManager:
         session_id = str(uuid.uuid4())
         now = _now()
         requested_workspace = (config or {}).get("workspace_root")
+        requested_shared = (config or {}).get("shared_workspace")
         # 会话未显式指定的 CLI/model 等配置，继承全局默认值。
         inherited = {
             key: self.global_config.get(key)
@@ -133,7 +165,11 @@ class SessionManager:
         }
         metadata = SessionMetadata(
             id=session_id,
-            title=(title or task.strip().splitlines()[0][:60] or "Untitled session"),
+            title=(
+                title
+                or (task.strip().splitlines() or [""])[0][:60]
+                or "Untitled session"
+            ),
             created_at=now,
             updated_at=now,
             config={**inherited, **_safe_session_config(config)},
@@ -142,26 +178,21 @@ class SessionManager:
                 if isinstance(requested_workspace, str) and requested_workspace.strip()
                 else None
             ),
+            shared_workspace=(
+                validate_shared_workspace(
+                    requested_shared, self.workspace_root, self.root_dir
+                )
+                if isinstance(requested_shared, str) and requested_shared.strip()
+                else None
+            ),
         )
         handle = self._build_handle(metadata)
         with self._lock:
             self._sessions[session_id] = handle
             self._save_index()
-        try:
-            root_node_id = handle.runtime.submit_root_manager(
-                task, role, dict(metadata.config)
-            )
-        except Exception:
-            with self._lock:
-                self._sessions.pop(session_id, None)
-                self._save_index()
-            handle.sse_manager.stop()
-            handle.runtime.shutdown()
-            shutil.rmtree(self._session_dir(session_id), ignore_errors=True)
-            raise
-        result = self._summary(handle)
-        result["root_node_id"] = root_node_id
-        return result
+        # 新会话默认生成空白图：不自动创建/执行根节点，
+        # 由用户点击「创建节点」后再创建节点并手动执行。
+        return self._summary(handle)
 
     def list_sessions(self) -> list[dict[str, Any]]:
         with self._lock:
@@ -189,6 +220,7 @@ class SessionManager:
         session_id: str,
         config: Optional[dict] = None,
         workspace_root: Optional[str] = None,
+        shared_workspace: Any = _UNSET,
     ) -> dict[str, Any]:
         handle = self.get_session(session_id)
         with self._lock:
@@ -201,6 +233,20 @@ class SessionManager:
                 os.makedirs(resolved, exist_ok=True)
                 handle.metadata.workspace_root = resolved
                 handle.runtime.workspace_root = resolved
+            if shared_workspace is not _UNSET:
+                if shared_workspace is None or not str(shared_workspace).strip():
+                    # 清除配置 → 恢复默认 {workspace_root}/shared
+                    handle.metadata.shared_workspace = None
+                    handle.runtime.shared_workspace = None
+                else:
+                    resolved = validate_shared_workspace(
+                        str(shared_workspace),
+                        handle.runtime.workspace_root,
+                        self.root_dir,
+                    )
+                    os.makedirs(resolved, exist_ok=True)
+                    handle.metadata.shared_workspace = resolved
+                    handle.runtime.shared_workspace = resolved
             handle.metadata.updated_at = _now()
             self._save_index()
         return self._summary(handle)
@@ -547,6 +593,7 @@ class SessionManager:
             persistence=Persistence(os.path.join(session_dir, "graph.json")),
             max_concurrency=self.max_concurrency,
             workspace_root=workspace_dir,
+            shared_workspace=metadata.shared_workspace,
             roles_dir=self.roles_dir,
             router_config=self.global_config,
         )

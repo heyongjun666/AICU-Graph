@@ -438,8 +438,14 @@ export const en: Dict = {
   'outputs.producedBy': 'produced by {role}',
 
   // ---- Session workspace ----
-  'workspace.title': 'Session workspace',
-  'workspace.desc': 'Override the workspace root for this session only.',
+  'workspace.title': 'Workspace settings',
+  'workspace.desc': 'Configure the workspace and project directory for this session.',
+  'workspace.project': 'Project directory',
+  'workspace.projectWarn': '⚠ Agent will directly read and modify files in this directory. It is recommended to use Git to manage project versions.',
+  'workspace.projectDefault': 'Defaults to {path} when unset.',
+  'workspace.advanced': 'Advanced settings',
+  'workspace.runDir': 'AICU runtime directory',
+  'workspace.runDirDesc': 'Stores session state, node run data and internal files. Usually no need to change.',
   'workspace.root': 'Workspace root',
   'workspace.absolutePath': 'Absolute path',
   'workspace.current': 'Current: {path}',

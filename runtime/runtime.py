@@ -76,12 +76,18 @@ class Runtime(RuntimeGateway, SchedulerDelegate):
         event_bus: Optional[EventBus] = None,
         max_concurrency: int = 4,
         workspace_root: Optional[str] = None,
+        shared_workspace: Optional[str] = None,
         roles_dir: Optional[str] = None,
         router_aicu_instance: Optional[Any] = None,
         router_config: Optional[dict[str, Any]] = None,
     ):
         self.max_concurrency = max_concurrency
         self.workspace_root = workspace_root or os.getcwd()
+        # 会话「项目目录」：None → 默认派生 {workspace_root}/shared；
+        # 显式配置时指向外部项目目录（Agent 直接读写该目录）。
+        self.shared_workspace = (
+            os.path.abspath(shared_workspace) if shared_workspace else None
+        )
 
         # PlanValidator 角色集（exec_type↔role 一致性校验用）。
         # roles_dir 未注入时保持 None → 该校验跳过（向后兼容，不依赖 roles 目录）。
@@ -284,6 +290,15 @@ class Runtime(RuntimeGateway, SchedulerDelegate):
 
         logger.info("Runtime started")
 
+    def get_shared_workspace(self) -> str:
+        """会话「项目目录」= Agent 协作文件空间。
+
+        默认派生自工作空间根（{workspace_root}/shared）；当会话显式配置
+        shared_workspace 时，返回该外部项目目录（Agent 直接读取/修改）。
+        所有 shared-root 消费点必须经此方法，不得自行推导。
+        """
+        return self.shared_workspace or resolve_shared_workspace(self.workspace_root)
+
     def _prepare_node_config(
         self,
         node_id: str,
@@ -334,7 +349,7 @@ class Runtime(RuntimeGateway, SchedulerDelegate):
             prepared.get("output_path")
         )
         prepared["_output_path"] = output_path
-        shared_root = resolve_shared_workspace(self.workspace_root)
+        shared_root = self.get_shared_workspace()
         prepared["_shared_workspace"] = shared_root
         os.makedirs(_partition_of(shared_root, output_path), exist_ok=True)
 
@@ -2089,7 +2104,7 @@ class Runtime(RuntimeGateway, SchedulerDelegate):
             ValueError: 路径越界。
             FileNotFoundError: 目标不存在或不是目录。
         """
-        root = resolve_shared_workspace(self.workspace_root)
+        root = self.get_shared_workspace()
         if not os.path.isdir(root):
             return {"path": ".", "entries": [], "truncated": False}
         target = self._resolve_workspace_path(root, path)
@@ -2152,7 +2167,7 @@ class Runtime(RuntimeGateway, SchedulerDelegate):
             ValueError: 路径越界。
             FileNotFoundError: 缺失或目标为目录（禁止把目录当文件读）。
         """
-        root = resolve_shared_workspace(self.workspace_root)
+        root = self.get_shared_workspace()
         target = self._resolve_workspace_path(root, path)
         if not os.path.isfile(target):
             raise FileNotFoundError(path)

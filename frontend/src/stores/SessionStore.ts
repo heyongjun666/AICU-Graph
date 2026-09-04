@@ -95,8 +95,9 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     set({ activeSessionId: sessionId });
   },
 
-  createSession: async (task, title) => {
-    const session = await createSessionRequest({ task, title });
+  createSession: async (title: string) => {
+    // 新会话生成空白图：task 传空串（后端不再自动创建根节点），由用户后续创建节点。
+    const session = await createSessionRequest({ task: '', title });
     localStorage.setItem(ACTIVE_SESSION_KEY, session.id);
     set((state) => ({
       sessions: [session, ...state.sessions.filter((item) => item.id !== session.id)],

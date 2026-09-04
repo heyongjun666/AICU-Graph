@@ -130,6 +130,8 @@ export interface SessionSummary {
   root_node_id?: string;
   config?: NodeConfig;
   workspace_root?: string;
+  /** 会话「项目目录」：显式配置时为外部项目目录；null/undefined = 未配置，默认 {workspace_root}/shared。 */
+  shared_workspace?: string | null;
 }
 
 /** 节点和会话的执行配置。API Key 仅保存环境变量名。 */

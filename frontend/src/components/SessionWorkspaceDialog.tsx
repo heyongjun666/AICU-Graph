@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { X } from 'lucide-react';
+import { ChevronDown, X } from 'lucide-react';
 import { SessionSummary } from '../types';
 import { updateSessionSettings } from '../utils/api';
 import { useI18n } from '../i18n';
@@ -19,7 +19,10 @@ const SessionWorkspaceDialog: React.FC<SessionWorkspaceDialogProps> = ({
   onSaved,
 }) => {
   const { t } = useI18n();
+  // 本地 state 独立：仅在打开时由 session 初始化，编辑期间不触碰全局状态。
   const [workspaceRoot, setWorkspaceRoot] = useState('');
+  const [sharedWorkspace, setSharedWorkspace] = useState('');
+  const [advancedOpen, setAdvancedOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const addToast = useUIStateStore((state) => state.addToast);
@@ -35,6 +38,8 @@ const SessionWorkspaceDialog: React.FC<SessionWorkspaceDialogProps> = ({
   useEffect(() => {
     if (open && session) {
       setWorkspaceRoot(session.workspace_root || '');
+      setSharedWorkspace(session.shared_workspace || '');
+      setAdvancedOpen(false);
       setError('');
     }
   }, [open, session]);
@@ -46,7 +51,13 @@ const SessionWorkspaceDialog: React.FC<SessionWorkspaceDialogProps> = ({
     setBusy(true);
     setError('');
     try {
-      await updateSessionSettings(session.id, {}, workspaceRoot.trim() || undefined);
+      // 项目目录三态：空串 → null → 清除配置恢复默认；工作区根空串 → undefined（不发送）。
+      await updateSessionSettings(
+        session.id,
+        {},
+        workspaceRoot.trim() || undefined,
+        sharedWorkspace.trim() || null,
+      );
       onClose();
       await refreshAfterSave();
     } catch (reason) {
@@ -63,8 +74,22 @@ const SessionWorkspaceDialog: React.FC<SessionWorkspaceDialogProps> = ({
           <div><h2>{t('workspace.title')}</h2><p>{t('workspace.desc')}</p></div>
           <button type="button" className="icon-button" onClick={onClose} title={t('common.close')}><X size={18} /></button>
         </div>
-        <label>{t('workspace.root')}<input autoFocus value={workspaceRoot} onChange={(event) => setWorkspaceRoot(event.target.value)} placeholder={t('workspace.absolutePath')} /></label>
-        {session.workspace_root && <small className="form-hint">{t('workspace.current', { path: session.workspace_root })}</small>}
+        <label>{t('workspace.project')}<input autoFocus value={sharedWorkspace} onChange={(event) => setSharedWorkspace(event.target.value)} placeholder={t('workspace.absolutePath')} /></label>
+        <small className="form-hint">{t('workspace.projectWarn')}</small>
+        {session.workspace_root && <small className="form-hint">{t('workspace.projectDefault', { path: `${session.workspace_root}/shared` })}</small>}
+        <div className="advanced-config">
+          <button type="button" className="advanced-config-toggle" onClick={() => setAdvancedOpen((value) => !value)}>
+            <ChevronDown size={14} className={advancedOpen ? 'is-open' : ''} />
+            {t('workspace.advanced')}
+          </button>
+          {advancedOpen && (
+            <div className="advanced-config-body">
+              <label>{t('workspace.runDir')}<input value={workspaceRoot} onChange={(event) => setWorkspaceRoot(event.target.value)} placeholder={t('workspace.absolutePath')} /></label>
+              <small className="form-hint">{t('workspace.runDirDesc')}</small>
+              {session.workspace_root && <small className="form-hint">{t('workspace.current', { path: session.workspace_root })}</small>}
+            </div>
+          )}
+        </div>
         {error && <div className="form-error">{error}</div>}
         <div className="dialog-actions"><button type="button" className="secondary-button" onClick={onClose}>{t('common.cancel')}</button><button className="primary-button" disabled={busy}>{busy ? t('workspace.saving') : t('workspace.save')}</button></div>
       </form>

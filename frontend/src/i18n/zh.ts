@@ -437,9 +437,15 @@ export const zh: Dict = {
   'outputs.listingTruncated': '列表在 1000 条处截断。',
   'outputs.producedBy': '由 {role} 产出',
 
-  // ---- 会话工作区 ----
-  'workspace.title': '会话工作区',
-  'workspace.desc': '仅为该会话覆盖工作区根目录。',
+  // ---- 会话工作空间 ----
+  'workspace.title': '工作空间设置',
+  'workspace.desc': '配置该会话的工作空间与项目目录。',
+  'workspace.project': '项目目录',
+  'workspace.projectWarn': '⚠ Agent 将直接读取和修改该目录中的文件，建议使用 Git 管理项目版本',
+  'workspace.projectDefault': '未设置时默认使用 {path}',
+  'workspace.advanced': '高级设置',
+  'workspace.runDir': 'AICU 运行目录',
+  'workspace.runDirDesc': '用于保存会话状态、节点运行数据和内部文件，通常无需修改',
   'workspace.root': '工作区根目录',
   'workspace.absolutePath': '绝对路径',
   'workspace.current': '当前：{path}',

@@ -310,6 +310,67 @@ class TestRuntimeInitialization:
         assert recovered.manager_phase == "review"
         rt2.shutdown()
 
+    def test_start_recovers_waiting_manager_with_residual_pending_revise(self, temp_state_file):
+        """重启自愈（残留 pending_revise 变体）：Manager 处于 WAITING/waiting 且
+        pending_revise=True（2859b275 的卡死态：children 全终态后无人触发 review，
+        标记残留堵死三条推进路径）。修复前补偿扫描被 pending_revise 拦死，
+        恢复后 Manager 永久卡 WAITING；修复后仅依赖 status+manager_phase，
+        必须推进为 READY/review。
+        """
+        rt1 = Runtime(persistence=Persistence(file_path=temp_state_file))
+        rt1.registry.register("manager", _TestExecutable)
+        root = Node(
+            id="root",
+            parent_id=None,
+            exec_type="manager",
+            role="default",
+            task="root task",
+            config={},
+            status=NodeStatus.WAITING,
+            manager_phase="waiting",
+            pending_revise=True,
+        )
+        child_a = Node(
+            id="child_a",
+            parent_id="root",
+            exec_type="manager",
+            role="release_planner",
+            task="child a",
+            config={},
+            status=NodeStatus.COMPLETED,
+            manager_phase="waiting",
+        )
+        child_b = Node(
+            id="child_b",
+            parent_id="root",
+            exec_type="manager",
+            role="engineering_coord",
+            task="child b",
+            config={},
+            status=NodeStatus.COMPLETED,
+            manager_phase="waiting",
+        )
+        for n in (root, child_a, child_b):
+            rt1.graph.add_node(n)
+        rt1.graph.add_edge(Edge(
+            id="e_a", type=EdgeType.PARENT, from_node="root", to_node="child_a",
+        ))
+        rt1.graph.add_edge(Edge(
+            id="e_b", type=EdgeType.PARENT, from_node="root", to_node="child_b",
+        ))
+        rt1.persistence.save(rt1.graph)
+        rt1.shutdown()
+
+        rt2 = Runtime(persistence=Persistence(file_path=temp_state_file))
+        rt2.registry.register("manager", _TestExecutable)
+        rt2.start()
+        recovered = rt2.graph.get_node("root")
+        assert recovered is not None
+        # 即使 pending_revise=True，恢复补偿也必须推进（修复点）。
+        assert recovered.status != NodeStatus.WAITING
+        assert recovered.manager_phase == "review"
+        rt2.shutdown()
+
 
 # ============================================================================
 # Acceptance Criterion 2: submit_root_manager 创建根 Manager Node

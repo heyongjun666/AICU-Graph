@@ -713,3 +713,72 @@ class TestSchedulerEventBus:
         # Should have received tick events
         assert len(received_events) > 0, "Should have received tick events"
         assert any(e.event_type == "scheduler_tick" for e in received_events)
+
+
+# ============================================================================
+# Manager children-completed 推进（pending_revise 死锁回归）
+# ============================================================================
+
+class TestManagerChildrenCompleted:
+
+    def setup_method(self):
+        self.graph = Graph()
+        self.registry = ExecutableRegistry()
+        self.delegate = MockDelegate()
+        self.event_bus = EventBus()
+        self.runtime = MockRuntimeGateway()
+
+    def _make_scheduler(self):
+        from runtime.scheduler import Scheduler
+        return Scheduler(
+            graph=self.graph, registry=self.registry,
+            delegate=self.delegate, runtime_gateway=self.runtime,
+            max_concurrency=4, event_bus=self.event_bus,
+        )
+
+    def _add_manager_with_children(self, manager_phase: str, pending_revise: bool):
+        """构造 M1（manager）+ A/B（terminal workers）的父子图。"""
+        mgr = Node(
+            id="M1", exec_type="manager", role="coord", task="t",
+            config={}, status=NodeStatus.WAITING,
+            manager_phase=manager_phase, pending_revise=pending_revise,
+        )
+        self.graph.add_node(mgr)
+        for cid in ("A", "B"):
+            child = Node(
+                id=cid, exec_type="test", role="dev", task=f"Task {cid}",
+                config={}, status=NodeStatus.COMPLETED, parent_id="M1",
+            )
+            self.graph.add_node(child)
+            self.graph.add_edge(Edge(
+                id=f"e_m1_{cid}", type=EdgeType.PARENT,
+                from_node="M1", to_node=cid,
+            ))
+        return mgr
+
+    def test_waiting_manager_with_residual_pending_revise_advances_to_review(self):
+        """回归（会话 f0c4d831 死锁）：残留 pending_revise 不再堵死 children-completed。
+
+        事件重激活/自动重试路径可能把 Manager 停在
+        WAITING + manager_phase="waiting" + pending_revise=True（expand 已完成但
+        标记残留）。此前 _check_manager_children_completed 因 pending_revise 提前
+        return，Manager 永久卡 Waiting；修复后判据只看 manager_phase，waiting
+        （expand 已完成）即放行。
+        """
+        self._add_manager_with_children(manager_phase="waiting", pending_revise=True)
+        scheduler = self._make_scheduler()
+
+        scheduler._check_manager_children_completed("B")
+
+        assert "M1" in self.delegate.completed_managers, \
+            "waiting + 残留 pending_revise 的 Manager 应正常推进 review"
+
+    def test_expanding_manager_with_terminal_old_children_does_not_advance(self):
+        """守卫保留：expand 中的 Manager 不能因旧子节点终态提前 review。"""
+        self._add_manager_with_children(manager_phase="expand", pending_revise=True)
+        scheduler = self._make_scheduler()
+
+        scheduler._check_manager_children_completed("B")
+
+        assert "M1" not in self.delegate.completed_managers, \
+            "expand 尚未完成的 Manager 不得推进 review"

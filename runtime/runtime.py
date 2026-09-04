@@ -217,10 +217,11 @@ class Runtime(RuntimeGateway, SchedulerDelegate):
                     # 注意：根 Manager（parent_id=None）同样需要此补偿——它展开出
                     # 子 Manager 后进入 WAITING/waiting，若子节点全部终态后崩溃，
                     # 恢复时若不推进为 review，根会永久卡 WAITING。
+                    # 仅依赖 manager_phase：expand 完成后（waiting）即使残留
+                    # pending_revise 也允许推进 review，否则该标记会堵死恢复路径。
                     if (
                         node.status == NodeStatus.WAITING
                         and node.manager_phase == "waiting"
-                        and not getattr(node, "pending_revise", False)
                     ):
                         kids = self.graph.children(node.id)
                         terminal = {
@@ -1801,7 +1802,14 @@ class Runtime(RuntimeGateway, SchedulerDelegate):
             return
 
         # Revise 的 Manager 必须先执行 expand；旧子节点的终态不能直接推进 review。
-        if getattr(manager, "pending_revise", False):
+        # 拦截条件与 Scheduler._check_manager_children_completed 保持一致：仅当
+        # manager_phase=="expand" 且 pending_revise=True（revise 请求但 expand 未执行）
+        # 才拦截；waiting（expand 已完成）即使残留 pending_revise 也放行，否则
+        # Manager 会永久卡死在 Waiting（会话 f0c4d831 死锁）。
+        if (
+            getattr(manager, "manager_phase", None) == "expand"
+            and getattr(manager, "pending_revise", False)
+        ):
             return
 
         children = self.graph.children(manager_node_id)

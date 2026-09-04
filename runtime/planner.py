@@ -373,6 +373,9 @@ class Planner:
                     cursor,
                     status=NodeStatus.WAITING,
                     manager_phase="waiting",
+                    # 回到 waiting 即视为已消费 pending_revise（与 Manager._expand
+                    # 转 waiting 时清标记语义一致），防止残留标记堵死后续推进。
+                    pending_revise=False,
                 )
             # 无条件清除通知记录（含已 WAITING 的 Manager）：评审刚结束的父 Manager
             # 典型状态是 WAITING + 已通知。若不清除，子节点再次完成时

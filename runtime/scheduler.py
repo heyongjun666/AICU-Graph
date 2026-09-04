@@ -756,7 +756,14 @@ class Scheduler:
 
         # Revise 会把 Manager 置为 Waiting/expand，而旧子节点通常仍是终态。
         # 此时必须先执行增量 Expand，不能因旧子节点已完成而直接跳到 Review。
-        if getattr(parent, "pending_revise", False) or getattr(parent, "manager_phase", None) == "expand":
+        # 拦截条件必须是「expand 尚未执行」= manager_phase=="expand" 且 pending_revise
+        # 同时成立：仅凭 manager_phase 会误伤尚未运行 expand 的新建 Manager
+        # （submit_root_manager 初始 phase 即为 expand），仅凭 pending_revise 会堵死
+        # 已进入 waiting（expand 已完成但标记残留）的 Manager——即会话 f0c4d831 死锁。
+        if (
+            getattr(parent, "manager_phase", None) == "expand"
+            and getattr(parent, "pending_revise", False)
+        ):
             return
 
         # 幂等保护：同时使用两种机制
@@ -1214,6 +1221,10 @@ class Scheduler:
             self.graph.update_node(
                 failed_node_id,
                 manager_phase="waiting",
+                # 此处回到 waiting 即视为已消费 pending_revise（与 Manager._expand
+                # 转 waiting 时清标记的语义一致）；否则事件重激活残留的标记会
+                # 堵住后续 children-completed → review 推进，Manager 永久卡 Waiting。
+                pending_revise=False,
                 log=[],  # 清空上次执行日志
             )
             # 清除自身通知记录，确保子节点全部终态后能重新触发 children-completed 回调

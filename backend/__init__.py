@@ -3,37 +3,46 @@ Backend package — combined from dependency outputs.
 
 Extends __path__ and sys.path to include csv_data_layer, auth_service,
 markdown_service, and stats_service outputs so their packages are resolvable.
+
+服务产物来自仓库内的独立服务（csv_data_layer / auth_service / stats_service /
+markdown_service），使用相对路径按项目根解析，不依赖机器路径或进程启动目录。
+服务产物按以下约定挂载到 backend/deps/ 下（缺失时自动跳过，不影响仓库导入与打包）：
+
+  backend/deps/csv_data_layer/output/backend/        → backend.storage / backend.models
+  backend/deps/auth_service/output/output/backend/   → backend.auth
+  backend/deps/stats_service/output/output/backend/  → backend.services
+  backend/deps/markdown_service/output/              → markdown_service
 """
 import os
 import sys
 
+# 项目根 = 本文件上溯两级（backend/__init__.py → 仓库根）。
+_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_DEPS_ROOT = os.path.join(_PROJECT_ROOT, "backend", "deps")
+
+
+def _append_if_dir(path: str, target: list) -> None:
+    """目录存在且未加入时追加；缺失时静默跳过（构建产物可选）。"""
+    if os.path.isdir(path) and path not in target:
+        target.append(path)
+
+
 # ── csv_data_layer (backend.storage, backend.models) ──
-_csv_path = os.path.abspath(
-    "/home/work/heyongjun/claudecodeAgentPlus_v2_workspace/versions/v5/final_solution/workspaces/40d419d3-e2f3-4ca6-8077-8e05e3fc0eec/output"
+_append_if_dir(
+    os.path.join(_DEPS_ROOT, "csv_data_layer", "output", "backend"), __path__
 )
-_csv_backend = os.path.join(_csv_path, "backend")
-if os.path.isdir(_csv_backend) and _csv_backend not in __path__:
-    __path__.append(_csv_backend)
 
 # ── auth_service (backend.auth) ──
-_auth_path = os.path.abspath(
-    "/home/work/heyongjun/claudecodeAgentPlus_v2_workspace/versions/v5/final_solution/workspaces/b5fb078f-84d3-4a44-8ff4-502fb3f86f17/output/output"
+_append_if_dir(
+    os.path.join(_DEPS_ROOT, "auth_service", "output", "output", "backend"), __path__
 )
-_auth_backend = os.path.join(_auth_path, "backend")
-if os.path.isdir(_auth_backend) and _auth_backend not in __path__:
-    __path__.append(_auth_backend)
 
 # ── stats_service (backend.services) ──
-_stats_path = os.path.abspath(
-    "/home/work/heyongjun/claudecodeAgentPlus_v2_workspace/versions/v5/final_solution/workspaces/5d29e811-3eab-45b5-987a-c251bc4b8084/output/output"
+_append_if_dir(
+    os.path.join(_DEPS_ROOT, "stats_service", "output", "output", "backend"), __path__
 )
-_stats_backend = os.path.join(_stats_path, "backend")
-if os.path.isdir(_stats_backend) and _stats_backend not in __path__:
-    __path__.append(_stats_backend)
 
 # ── markdown_service (markdown_service package, not under backend/) ──
-_md_path = os.path.abspath(
-    "/home/work/heyongjun/claudecodeAgentPlus_v2_workspace/versions/v5/final_solution/workspaces/0de0738d-cbee-4f7b-9761-888450b154b8/output"
+_append_if_dir(
+    os.path.join(_DEPS_ROOT, "markdown_service", "output"), sys.path
 )
-if os.path.isdir(_md_path) and _md_path not in sys.path:
-    sys.path.insert(0, _md_path)

@@ -47,7 +47,8 @@ audit_rounds: 2
 #   - 默认 ~/.claude/skills（Claude Code 用户级 skill 安装位置）
 #   - 角色 yaml 可覆盖以使用自定义 skill 库（如项目内或共享盘的 skill）
 #   - 仅当 skills 非空时此字段才生效
-skills_dir: ~/.claude/skills
+#   - 相对路径按项目根解析（如 "skills" = 仓库根 skills/，开源分发友好）
+skills_dir: skills
 
 # skills: 该角色 CC 可用的 skill 名称列表（从 skills_dir 中选取）
 #   - 空列表 [] 表示不启用任何 skill（CC 行为与未装 skill 完全一致）

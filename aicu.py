@@ -121,7 +121,8 @@ class AICU:
                   空列表表示不启用任何 skill。非空时，AICU 为每个 CC workspace 创建
                   .claude/skills/ 软链接到指定 skill，并通过 --setting-sources project
                   限定 CC 只加载这些 project-level skill，不加载用户级 skill。
-        - skills_dir: skill 源目录（绝对路径，支持 ~ 表示家目录）。
+        - skills_dir: skill 源目录。支持绝对路径、~ 家目录、或相对项目根的路径
+                      （如 "skills" 表示仓库根下的 skills/ 目录，开源分发友好）。
                       默认 ~/.claude/skills，角色 yaml 可覆盖以使用自定义 skill 库。
                       仅当 skills 非空时此字段才生效。
 
@@ -300,7 +301,8 @@ class AICU:
         self.deliverable_dir = self.role_config.get("deliverable_dir", None)
 
         # ---- skills 配置 ----
-        # skills_dir: skill 源目录（默认 ~/.claude/skills，角色 yaml 可覆盖）
+        # skills_dir: skill 源目录（默认 ~/.claude/skills，角色 yaml 可覆盖；
+        # 相对路径按项目根解析，如 "skills"）
         # skills: 要启用的 skill 名称列表，从 skills_dir 中查找子目录，
         # 为每个 CC workspace 创建 .claude/skills/ 软链接，并通过
         # --setting-sources project 限定 CC 只加载这些 project-level skill。
@@ -308,7 +310,12 @@ class AICU:
             skills if skills is not None else self.role_config.get("skills") or []
         )
         skills_dir_cfg = skills_dir or self.role_config.get("skills_dir") or "~/.claude/skills"
-        self._user_skills_dir = Path(skills_dir_cfg).expanduser()
+        # 相对路径 → 相对项目根（aicu.py 所在目录）解析，便于开源分发：
+        # 仓库自带 skills/ 时 yaml 可直接写 "skills"，clone 后无需改配置。
+        _user_skills_dir = Path(skills_dir_cfg).expanduser()
+        if not _user_skills_dir.is_absolute():
+            _user_skills_dir = (Path(__file__).parent / _user_skills_dir).resolve()
+        self._user_skills_dir = _user_skills_dir
 
         # 执行配置由节点/会话在边界传入；密钥只保存环境变量名，不读取或记录真实值。
         self.output_callback = output_callback
@@ -404,7 +411,7 @@ class AICU:
             print(f"[AICU] skills: {self.skills} (project-level，已为每个 CC 软链接)")
 
     def _list_available_skills(self) -> List[str]:
-        """列出 ~/.claude/skills/ 下所有可用 skill 名称"""
+        """列出 skills_dir 下所有可用 skill 名称"""
         if not self._user_skills_dir.exists():
             return []
         return sorted(p.name for p in self._user_skills_dir.iterdir() if p.is_dir())
@@ -537,7 +544,7 @@ class AICU:
     def _install_skills_to_cc(self, cc_workspace: Path) -> None:
         """
         在 CC workspace 下创建 .claude/skills/ 目录，
-        为 self.skills 中每个 skill 创建一个软链接指向 ~/.claude/skills/{name}/。
+        为 self.skills 中每个 skill 创建一个软链接指向 skills_dir/{name}/。
         已存在的链接/目录会被清空重建，确保 idempotent。
         """
         target_dir = cc_workspace / ".claude" / "skills"

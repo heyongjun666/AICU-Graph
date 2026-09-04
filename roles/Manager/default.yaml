@@ -36,7 +36,8 @@ deliverable_dir: deliverables
 # ---- 可选 Skill 配置：具体 Manager 角色按需覆盖 ----
 # 通用 Manager 默认不绑定任何领域 Skill。
 skills: []
-skills_dir: ~/.claude/skills
+# 相对项目根解析（aicu.py 所在目录）：仓库自带 skills/，clone 后无需改配置。
+skills_dir: skills
 
 # ---- 生成指令(核心: 组织树构造协议) ----
 # 设计原则: 这是「决策规则(Decision Policy)」, 不是 AICU 设计文档.

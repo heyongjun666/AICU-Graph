@@ -5,6 +5,8 @@ runtime_sessions/
 events*
 *.log
 router_traces.jsonl
+review_v*.md
+test_report.md
 
 # Credentials and local configuration
 .env

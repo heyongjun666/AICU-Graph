@@ -41,7 +41,6 @@
   - [10.6 roles/（数据驱动配置）](#106-roles数据驱动配置)
   - [10.7 tests/ 与根级测试脚本](#107-tests-与根级测试脚本)
   - [10.8 frontend/（Vite+React 工作台）](#108-frontendvite-react-工作台)
-  - [10.9 backend/（独立 Flask 后端模块）](#109-backend独立-flask-后端模块)
 - [十一、新手修改指南：想改 X → 读 Y](#十一新手修改指南想改-x--读-y)
 - [十二、环境变量与功能开关总表](#十二环境变量与功能开关总表)
 - [十三、端到端一次运行的真实时序](#十三端到端一次运行的真实时序)
@@ -72,10 +71,9 @@
 |---|---|---|
 | **Runtime 后端** | `runtime/` `executables/` `roles/` `aicu.py` `claude_code_agent.py` `main.py` | 会话管理、组织图、任务规划、调度、事件路由、产物交付和 CLI 执行。 |
 | **Web 前端** | `frontend/` | React/Vite 工作台，负责图可视化、会话管理、节点详情、事件流和运行配置。 |
-| **辅助后端模块** | `backend/` | 仓库中保留的 Flask 应用、API Blueprint 和测试文件；当前快照缺少其部分数据层、认证、Markdown 和统计依赖，不属于 AICU Runtime 的核心启动链路。 |
 | **测试与文档** | `tests/` `docs/` | 验证核心运行时、适配器和前端行为，记录安装与架构说明。 |
 
-AICU-Graph 的核心运行服务由 `main.py` 启动，使用 `runtime/` 提供的 FastAPI、SSE 和任务执行能力；`frontend/` 是对应的 Web 工作台。`backend/` 中保留了部分 Flask 后端文件，但当前快照缺少 `app.py` 引用的多个依赖模块，不能按现状直接启动，也不是 README 快速启动流程的一部分。
+AICU-Graph 的核心运行服务由 `main.py` 启动，使用 `runtime/` 提供的 FastAPI、SSE 和任务执行能力；`frontend/` 是对应的 Web 工作台。
 
 ---
 
@@ -93,7 +91,7 @@ AICU-Graph 的核心运行服务由 `main.py` 启动，使用 `runtime/` 提供�
 | `.codegraph/` | CodeGraph 代码图谱索引 | 构建 |
 | `events.json` `review_v*.md` `test_report.md` 等根级文件 | 运行/测试痕迹 | 运行/测试 |
 
-项目源码和配置包括：`runtime/`、`executables/`、`roles/`、`aicu.py`、`claude_code_agent.py`、`main.py`、`frontend/src/`、`backend/`、`docs/`、`tests/`、`conftest.py` 和 `run_tests.py`；`frontend/node_modules/`、`frontend/dist/`、`.codegraph/` 以及运行时目录不属于源码。
+项目源码和配置包括：`runtime/`、`executables/`、`roles/`、`aicu.py`、`claude_code_agent.py`、`main.py`、`frontend/src/`、`docs/`、`tests/`、`conftest.py` 和 `run_tests.py`；`frontend/node_modules/`、`frontend/dist/`、`.codegraph/` 以及运行时目录不属于源码。
 
 ---
 
@@ -549,16 +547,6 @@ AICU-Graph 的核心运行服务由 `main.py` 启动，使用 `runtime/` 提供�
 | `frontend/src/utils/` `dagreLayout.ts` `eventBuffer.ts` `layoutCache.ts` `api.ts` | 布局/事件缓冲/API 工具 |
 | `frontend/src/hooks/` | `useGraphOptimizations` |
 | `frontend/src/infra/` | 前端基础设施 API 与运行时接口 |
-
-### 10.9 backend/（独立 Flask 后端模块）
-
-| 文件 | 职责 |
-|---|---|
-| `backend/app.py` `backend/config.py` | Flask 应用工厂与配置 |
-| `backend/api/` | API 蓝图，包括认证、文章、标签、统计、上传、RSS 和健康检查 |
-| `backend/tests/test_api.py` | Flask 后端模块测试 |
-
-`backend/` 与 `main.py` 启动的 AICU Runtime 相互独立。当前快照中 `backend/app.py` 引用的 `storage/`、`models/`、`auth/`、`services/` 和 `markdown_service.py` 等依赖未全部出现，因此该 Flask 模块不能按现状直接启动；它不是 README 快速启动流程的一部分。
 
 ---
 

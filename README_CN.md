@@ -23,10 +23,9 @@ AICU-Graph 是**组织与运行时层**，负责：
 ```text
 runtime/ + executables/ + roles/   AICU Runtime 后端
 frontend/                           React/Vite Web 工作台
-backend/                            独立的 Flask 后端模块
 ```
 
-AICU Runtime 是项目的核心后端，由 `main.py` 启动；`frontend/` 是其 Web 工作台。仓库中的 `backend/` 保留为独立后端模块，不属于 Runtime 的启动链路，使用时按自身依赖和入口运行。
+AICU Runtime 是项目的核心后端，由 `main.py` 启动；`frontend/` 是其 Web 工作台。
 
 AICU 是图中的单个执行单元。一个 AICU 节点在创建时绑定角色配置、任务配置和执行参数，然后由对应的 AI Coding CLI 完成工作。
 

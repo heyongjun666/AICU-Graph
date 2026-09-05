@@ -14,6 +14,7 @@ runtime/scheduler.py — Scheduler 单层图调度引擎
 10. Watchdog 机制：异常捕获 + 自动重启（最多 3 次，最小间隔 60s）
 """
 
+import atexit
 import concurrent.futures
 import glob
 import json
@@ -28,6 +29,28 @@ from typing import Any, Optional, TYPE_CHECKING
 from executables.base import ExecutableContext, SchedulerDelegate
 from executables.registry import ExecutableRegistry
 from runtime.agent_events import _node_workspace
+
+# 所有未停止的 Scheduler 实例；进程退出时兜底 stop()。
+#
+# 背景：Scheduler 创建 ThreadPoolExecutor（非 daemon worker）与 daemon tick
+# 线程。若调用方未显式 shutdown（异常路径、测试未收尾等），进程退出时
+# concurrent.futures 的 _python_exit 会 join worker；而 daemon tick 线程在
+# atexit 期间仍持续向 pool 提交任务，与 _python_exit 放入的结束哨兵竞争，
+# worker 永远有新任务可跑，join 永不完成 → 进程挂起。兜底 stop() 先
+# shutdown pool 并置 stop_event 停掉 tick，使 _python_exit 的 join 快速返回。
+# （atexit 为 LIFO：此处注册于 concurrent.futures 之后，故先于 _python_exit 执行。）
+_active_schedulers: set = set()
+
+
+def _shutdown_all_schedulers() -> None:
+    for sched in list(_active_schedulers):
+        try:
+            sched.stop()
+        except Exception:  # noqa: BLE001  退出兜底，不掩盖原始错误
+            pass
+
+
+atexit.register(_shutdown_all_schedulers)
 from runtime.graph import Graph
 from runtime.models import ManagerPhase, Node, NodeStatus, RoutingDecision
 from runtime.state_machine import StateMachine
@@ -158,6 +181,7 @@ class Scheduler:
             self._stop_event.clear()
             self._tick_thread = threading.Thread(target=self._tick_loop, daemon=True, name="scheduler-tick")
             self._tick_thread.start()
+        _active_schedulers.add(self)
         logger.info("Scheduler started (max_concurrency=%d, pool_size=%d)", self.max_concurrency, self._thread_pool._max_workers)
 
     def stop(self) -> None:
@@ -176,6 +200,7 @@ class Scheduler:
         self._thread_pool.shutdown(wait=False)
         if self._tick_thread and self._tick_thread.is_alive():
             self._tick_thread.join(timeout=2)
+        _active_schedulers.discard(self)
         logger.info("Scheduler stopped")
 
     def pause(self) -> None:

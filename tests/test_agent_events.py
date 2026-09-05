@@ -584,13 +584,19 @@ class _EventPublishingStub:
 class TestWorkerRunFlush:
     def test_completion_flushes_published_events(self, tmp_path):
         rt = _make_runtime(tmp_path, {"api_ready": ["frontend"]})
-        rt.registry.register("worker", Worker)
         root = rt.submit_root_manager("app")
         nodes = rt.inject_plan(root, ExecutionPlan(steps=[
             _step("backend", {"events": {"publish": ["api_ready"]}}),
             _step("frontend", {"events": {"subscribe": ["api_ready"]}}),
         ]))
         backend, frontend = nodes
+        # 图注入完成后停掉后台 tick，且 registry 保持 _TestExecutable（不注册真实
+        # Worker）：本测试只手动驱动 worker.run。若注册真实 Worker + 默认真实 AICU，
+        # scheduler 会在 backend 完成后自动推进 frontend，启动 Claude Code 子进程并在
+        # 测试结束后仍后台运行 → teardown 线程泄漏（_python_exit join 挂起）。
+        # 注：stop() 须在图注入之后，否则会被 submit_root_manager/inject_plan 的
+        # _ensure_scheduler_running() 重新 start 抵消。
+        rt.scheduler.stop()
         stub = _EventPublishingStub()
         worker = Worker(ExecutableContext(node=backend, runtime=rt, config=backend.config), aicu_instance=stub)
         status = worker.run(ExecutableContext(node=backend, runtime=rt, config=backend.config))

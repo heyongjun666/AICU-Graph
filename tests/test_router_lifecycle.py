@@ -239,6 +239,74 @@ def test_conversation_reset_on_structural_change_not_status():
     assert cc.reset_count == 2
 
 
+# ---------------------------------------------------------------------------
+# Router 语义拒绝（V3.1 P2）：ignore（返回空数组）vs deliver + reason 契约
+#   Router 是「事件值不值得给任何人看」的语义闸门；例行/重复/无 actionable
+#   需求的事件应返回空数组，不投递、不唤醒。
+# ---------------------------------------------------------------------------
+
+def test_build_prompt_has_ignore_deliver_framework():
+    """Router prompt 包含 ignore/deliver 判断框架 + reason 输出契约。"""
+    g = Graph()
+    g.add_node(_node("n1", step_ref="auth"))
+    router = _real_router(_FakeAICU(), g)
+    prompt = router._build_prompt(_event(), "n1", router._graph_snapshot("n1"))
+
+    assert "先判断：ignore" in prompt
+    assert "例行进度 / 状态同步" in prompt
+    assert "没有 actionable 需求" in prompt
+    assert "应投递（deliver）" in prompt
+    assert '"reason": "<一句话理由>"' in prompt
+
+
+def test_route_records_decision_reason_on_ignore():
+    """Router 返回空 targets + reason → 记录 decision_reason（ignore 可审计）。"""
+    class _IgnoreFake:
+        ccs = []
+
+        def ask(self, prompt):  # noqa: ARG002
+            return {"targets": [], "reason": "例行进度同步，无人需要处理"}
+
+    g = Graph()
+    g.add_node(_node("n1", step_ref="auth"))
+    g.add_node(_node("n2", step_ref="qa"))
+    router = _real_router(_IgnoreFake(), g)
+
+    targets = router.route(_event(producer="n1", objective="进度 60%：正在测试"))
+    assert targets == []
+    assert router.decision_trace().get("decision_reason") == "例行进度同步，无人需要处理"
+
+
+def test_route_empty_targets_without_reason_gets_fallback():
+    """Router 返回空 targets 但无 reason → 兜底记 ignore (empty targets)。"""
+    g = Graph()
+    g.add_node(_node("n1", step_ref="auth"))
+    g.add_node(_node("n2", step_ref="qa"))
+    router = _real_router(_FakeAICU(), g)  # _FakeAICU 只返回 targets，无 reason
+
+    targets = router.route(_event(producer="n1", objective="例行通知"))
+    assert targets == []
+    assert router.decision_trace().get("decision_reason") == "ignore (empty targets)"
+
+
+def test_route_deliver_records_reason():
+    """Router 投递时 reason 同样落 trace（决策可审计）。"""
+    class _DeliverFake:
+        ccs = []
+
+        def ask(self, prompt):  # noqa: ARG002
+            return {"targets": ["n2"], "reason": "联调信号，需要前端响应"}
+
+    g = Graph()
+    g.add_node(_node("n1", step_ref="backend"))
+    g.add_node(_node("n2", step_ref="frontend"))
+    router = _real_router(_DeliverFake(), g)
+
+    targets = router.route(_event(producer="n1", objective="API 已就绪，需要前端联调"))
+    assert targets == ["n2"]
+    assert router.decision_trace().get("decision_reason") == "联调信号，需要前端响应"
+
+
 def test_stub_mode_structure_change_is_noop():
     g = Graph()
     g.add_node(_node("n1"))

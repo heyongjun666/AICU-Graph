@@ -994,3 +994,230 @@ class TestEventFormatValidation:
         assert "EVENT_FORMAT_INVALID" in data["objective"]
         assert "evt_bad" in data["objective"]
         assert runtime.agent_events.get_event("evt_bad") is None
+
+
+# ============================================================================
+# 16. 摄取端噪声过滤（V3.1 P2：与 Router 语义拒绝互补的「闸门 0」）
+#   - 同 producer 短窗口内近似重复 / 超频事件 → 吞掉（不路由/不投递/不唤醒）
+#   - 确定性、零 LLM 成本，在 Router 之前拦截明显噪声
+# ============================================================================
+
+class TestNoiseFiltering:
+    def test_duplicate_objective_dropped(self, tmp_path):
+        """同 producer 精确重复的 objective → 第二条吞掉，不入全局日志。"""
+        mgr = AgentEventManager(workspace_root=str(tmp_path))
+        first = mgr.publish_events("p", [{"objective": "后端接口已完成，需要前端联调"}])
+        assert len(first) == 1
+        second = mgr.publish_events("p", [{"objective": "后端接口已完成，需要前端联调"}])
+        assert second == []
+        assert mgr.event_count() == 1
+
+    def test_near_duplicate_dropped(self, tmp_path):
+        """近似重复（小段改写）→ 吞掉（SequenceMatcher ratio ≥0.9）。"""
+        mgr = AgentEventManager(workspace_root=str(tmp_path))
+        mgr.publish_events("p", [{"objective": "后端登录接口已完成，需要前端进行接口联调"}])
+        second = mgr.publish_events("p", [{"objective": "后端登录接口已完成，需要前端进行联调"}])
+        assert second == []
+        assert mgr.event_count() == 1
+
+    def test_distinct_objectives_both_kept(self, tmp_path):
+        """不同内容的连续事件 → 都保留（不做误杀）。"""
+        mgr = AgentEventManager(workspace_root=str(tmp_path))
+        mgr.publish_events("p", [{"objective": "后端接口已完成，需要前端联调"}])
+        ids = mgr.publish_events("p", [{"objective": "测试报告已生成，请 QA 复核"}])
+        assert len(ids) == 1
+        assert mgr.event_count() == 2
+
+    def test_progressive_update_not_flagged_duplicate(self, tmp_path):
+        """递进更新（后一条含前一条全文 + 追加新内容）→ 不误判为重复。"""
+        mgr = AgentEventManager(workspace_root=str(tmp_path))
+        mgr.publish_events("p", [{"objective": "前端已完成接口联调，需要你确认"}])
+        ids = mgr.publish_events("p", [{
+            "objective": "前端已完成接口联调，需要你确认。另外登录接口的鉴权逻辑也需要你复核",
+        }])
+        assert len(ids) == 1
+        assert mgr.event_count() == 2
+
+    def test_duplicate_scope_is_per_producer(self, tmp_path):
+        """去重按 producer 隔离：不同 producer 发相同 objective 互不影响。"""
+        mgr = AgentEventManager(workspace_root=str(tmp_path))
+        mgr.publish_events("p1", [{"objective": "同一句话"}])
+        ids = mgr.publish_events("p2", [{"objective": "同一句话"}])
+        assert len(ids) == 1
+        assert mgr.event_count() == 2
+
+    def test_rate_limit_drops_excess_events(self, tmp_path):
+        """窗口内事件数超上限 → 超出的吞掉（事件风暴保护）。"""
+        mgr = AgentEventManager(workspace_root=str(tmp_path))
+        ids = mgr.publish_events("p", [
+            {"objective": f"事件 {i}"} for i in range(6)
+        ])
+        assert len(ids) == 5           # 第 6 条超上限被吞
+        assert mgr.event_count() == 5
+        assert mgr._deduped_count == 1
+
+    def test_scan_node_removes_duplicate_publish_file(self, tmp_path):
+        """scan_node：重复发布文件被吞掉且源文件仍被清理（不残留、不重复摄取）。"""
+        runtime = _make_runtime(tmp_path, {"t": ["sub"]})
+        root = runtime.submit_root_manager("app")
+        nodes = runtime.inject_plan(root, ExecutionPlan(steps=[
+            _step("producer", {}),
+            _step("sub", {}),
+        ]))
+        producer = nodes[0]
+        bws = runtime.get_node_workspace(producer.id)
+        outbox = os.path.join(bws, "events")
+        os.makedirs(outbox, exist_ok=True)
+        f1 = os.path.join(outbox, "evt_a.json")
+        with open(f1, "w", encoding="utf-8") as f:
+            json.dump({"objective": "API 已就绪，需要前端联调"}, f)
+        assert runtime.flush_node_events(producer.id) == 1
+
+        f2 = os.path.join(outbox, "evt_b.json")
+        with open(f2, "w", encoding="utf-8") as f:
+            json.dump({"objective": "API 已就绪，需要前端进行联调"}, f)
+        assert runtime.flush_node_events(producer.id) == 0   # 近似重复 → 吞掉
+        assert not os.path.exists(f2)                         # 源文件仍清理
+        assert runtime.agent_events.event_count() == 1
+
+    def test_short_circuit_single_node_graph_skips_router(self, tmp_path):
+        """确定性短路：图中只有 producer → 不调用 Router，事件直接 delivered 终态。"""
+        class _Raising:
+            def ask(self, prompt):  # noqa: ARG002
+                raise AssertionError("Router must not be called with a single-node graph")
+
+        runtime = _make_runtime(tmp_path, {})
+        runtime.router._aicu = _Raising()
+        root = runtime.submit_root_manager("app")
+        ids = runtime.publish_events(root, [{"objective": "单节点消息"}])
+        assert len(ids) == 1
+        ev = runtime.agent_events.get_event(ids[0])
+        assert ev.routed_to == []
+        assert ev.status == EventMessage.EVENT_STATUS_DELIVERED
+
+    def test_two_node_graph_still_routes(self, tmp_path):
+        """图中存在 producer 以外的节点 → 短路不触发，正常走 Router。"""
+        runtime = _make_runtime(tmp_path, {"t": ["sub"]})
+        root = runtime.submit_root_manager("app")
+        nodes = runtime.inject_plan(root, ExecutionPlan(steps=[
+            _step("producer", {}),
+            _step("sub", {}),
+        ]))
+        producer, sub = nodes
+        runtime.publish_events(producer.id, [{"objective": "t 信号"}])
+        inbox = os.path.join(runtime.get_node_workspace(sub.id), "event_inbox")
+        assert len(os.listdir(inbox)) == 1
+
+
+# ============================================================================
+# TestRouteHistoryDedup：路由历史去重（P2）
+#   每次路由前与已产出的**同 producer** 历史事件比对，判定重复则不调用 LLM
+#   Router、不投递，直接落 delivered 终态（完成状态，保留审计 trace）。
+#   与摄取端 _filter_noise_locked 互补：摄取端挡 120s 短窗事件风暴，路由端
+#   挡跨窗口的长期重复（如节点重跑后一字不差的重发）。
+# ============================================================================
+
+class _SpyRouter:
+    """记录被调用的事件 id；返回空 targets（无人接收 → delivered 终态）。"""
+
+    def __init__(self):
+        self.calls = []
+
+    def route(self, msg):
+        self.calls.append(msg.event_id)
+        return []
+
+    def decision_trace(self):
+        return {"decision_reason": "spy"}
+
+
+class _MiniGraph:
+    """仅需支撑 _route_locked 的 nodes 长度判定（len>1 绕过单节点短路）。"""
+
+    def __init__(self, node_ids):
+        self.nodes = {nid: object() for nid in node_ids}
+
+    def get_node(self, nid):
+        return self.nodes.get(nid)
+
+
+def _mgr_with_route(tmp_path):
+    """带 2 节点图 + spy router 的 AgentEventManager（进入真实路由层）。"""
+    spy = _SpyRouter()
+    mgr = AgentEventManager(workspace_root=str(tmp_path), router=spy)
+    mgr._graph = _MiniGraph(["n1", "n2"])
+    return mgr, spy
+
+
+class TestRouteHistoryDedup:
+    def _push_past_window(self, mgr, producer):
+        """把摄取端窗口记录推到 120s 之外：让后续同 producer 事件绕过摄取端过滤、
+        直达路由层（模拟「跨窗口重发」——正是路由端历史去重的目标场景）。"""
+        import time as _t
+
+        mgr._producer_recent[producer] = [(_t.monotonic() - 130.0, "expired")]
+
+    def test_exact_duplicate_suppressed_at_route_layer(self, tmp_path):
+        """跨窗口精确重复 → 路由端历史比对挡下：不调 Router、delivered 终态。"""
+        mgr, spy = _mgr_with_route(tmp_path)
+        first = mgr.publish_events("p", [{"objective": "后端接口已完成，需要前端联调"}])[0]
+        self._push_past_window(mgr, "p")
+        second = mgr.publish_events("p", [{"objective": "后端接口已完成，需要前端联调"}])[0]
+
+        ev2 = mgr.get_event(second)
+        assert ev2.status == EventMessage.EVENT_STATUS_DELIVERED
+        assert ev2.routed_to == []
+        assert mgr._route_deduped_count == 1
+        # 只调了一次 Router（首条）；重复的第二条被历史比对拦截，不投递不唤醒
+        assert spy.calls == [first]
+
+    def test_near_duplicate_suppressed(self, tmp_path):
+        """跨窗口近似重复（≥0.9）→ 同样被路由端历史比对拦截。"""
+        mgr, spy = _mgr_with_route(tmp_path)
+        first = mgr.publish_events("p", [{"objective": "后端登录接口已完成，需要前端进行接口联调"}])[0]
+        self._push_past_window(mgr, "p")
+        mgr.publish_events("p", [{"objective": "后端登录接口已完成，需要前端进行联调"}])[0]
+        assert mgr._route_deduped_count == 1
+        assert spy.calls == [first]
+
+    def test_distinct_objectives_both_routed(self, tmp_path):
+        """不同内容的跨窗口事件 → 都路由（不做误杀）。"""
+        mgr, spy = _mgr_with_route(tmp_path)
+        a = mgr.publish_events("p", [{"objective": "后端接口已完成，需要前端联调"}])[0]
+        self._push_past_window(mgr, "p")
+        b = mgr.publish_events("p", [{"objective": "测试报告已生成，请 QA 复核"}])[0]
+        assert spy.calls == [a, b]
+        assert mgr._route_deduped_count == 0
+
+    def test_cross_producer_same_objective_not_suppressed(self, tmp_path):
+        """去重按 producer 隔离：不同节点发相同 objective → 各自路由（不误杀跨节点协作）。"""
+        mgr, spy = _mgr_with_route(tmp_path)
+        a = mgr.publish_events("p1", [{"objective": "同一句话"}])[0]
+        b = mgr.publish_events("p2", [{"objective": "同一句话"}])[0]
+        assert spy.calls == [a, b]
+        assert mgr._route_deduped_count == 0
+
+    def test_progressive_update_not_suppressed(self, tmp_path):
+        """递进更新（ratio<0.9）→ 照常路由（不误判真实推进为重复）。"""
+        mgr, spy = _mgr_with_route(tmp_path)
+        a = mgr.publish_events("p", [{"objective": "前端已完成接口联调，需要你确认"}])[0]
+        self._push_past_window(mgr, "p")
+        b = mgr.publish_events("p", [{
+            "objective": "前端已完成接口联调，需要你确认。另外登录接口的鉴权逻辑也需要你复核",
+        }])[0]
+        assert spy.calls == [a, b]
+        assert mgr._route_deduped_count == 0
+
+    def test_route_dedup_trace_records_duplicate_of(self, tmp_path):
+        """命中历史去重 → router_traces 落 audit：decision=duplicate_suppressed + duplicate_of。"""
+        mgr, _ = _mgr_with_route(tmp_path)
+        first = mgr.publish_events("p", [{"objective": "同一句话"}])[0]
+        self._push_past_window(mgr, "p")
+        mgr.publish_events("p", [{"objective": "同一句话"}])[0]
+
+        with open(mgr.router_traces_file, encoding="utf-8") as f:
+            traces = [json.loads(line) for line in f if line.strip()]
+        dup = [t for t in traces if t.get("router", {}).get("decision") == "duplicate_suppressed"]
+        assert len(dup) == 1
+        assert dup[0]["router"]["duplicate_of"] == first
+        assert dup[0]["route_status"] == "delivered"

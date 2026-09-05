@@ -87,6 +87,39 @@ def _objective_budget_reason(objective: str) -> str | None:
     return None
 
 
+# 摄取端噪声过滤（V3.1 P2：配合 Router 语义拒绝，拦截「随意事件」）：
+#   - 同 producer 短窗口内近似重复的 objective → 吞掉（不路由/不投递/不唤醒）；
+#   - 同 producer 窗口内事件数超上限 → 吞掉（事件风暴保护）。
+# 判定全部确定性、零 LLM 成本，在 Router 之前拦截明显噪声。
+_DEDUP_WINDOW_SECONDS = 120.0
+_MAX_EVENTS_PER_PRODUCER_WINDOW = 5
+# 目标规范化的空白/标点（近似重复判定用）
+_NORM_WS_RE = re.compile(r"[\s　，。；、,.!?！？:：;\"'“”‘’（）()\[\]【】\-—_/\\]+")
+
+
+def _normalize_objective(text: str) -> str:
+    """规范化 objective 指纹：去空白/标点、小写（近似重复判定用）。"""
+    return _NORM_WS_RE.sub("", text or "").lower()
+
+
+def _objectives_similar(a: str, b: str) -> bool:
+    """两条**已规范化** objective 是否近似重复（确定性、保守）。
+
+    完全相等 → True；``difflib.SequenceMatcher`` ratio ≥0.9 → True（内容几乎相同，
+    容忍小段改写/插入）。
+    刻意**不含**"单向包含"规则：合法的递进更新（后一条包含前一条全文并追加
+    新内容）不应被误判为重复（ratio 会因新内容占比显著下降）；事件风暴由独立
+    限流（_MAX_EVENTS_PER_PRODUCER_WINDOW）兜底。
+    """
+    if not a or not b:
+        return False
+    if a == b:
+        return True
+    from difflib import SequenceMatcher
+
+    return SequenceMatcher(None, a, b, autojunk=False).ratio() >= 0.9
+
+
 def _iso_now() -> str:
     """当前时间 ISO 格式（秒级精度）。"""
     return datetime.now().isoformat(timespec="seconds")
@@ -166,6 +199,11 @@ class AgentEventManager:
         self._graph: Any = None
         self._router: Any = router
         self._route_attempts: dict[str, int] = {}
+        # 摄取端噪声过滤状态：producer -> [(monotonic_ts, 规范化 objective 指纹)]
+        self._producer_recent: dict[str, list[tuple[float, str]]] = {}
+        self._deduped_count = 0
+        # 路由端历史去重计数（与已产出历史事件判重后不投递的事件数）
+        self._route_deduped_count = 0
 
     def recover_pending(self) -> None:
         """Recover pending delivery after the owning Scheduler opens dispatch."""
@@ -296,6 +334,9 @@ class AgentEventManager:
                 producer, entry["raw"], entry["reason"], source_path=None,
             )
         with self._lock:
+            ok_raws, dropped = self._filter_noise_locked(producer, ok_raws)
+            for raw, reason in dropped:
+                self._log_dropped_event(producer, raw, reason)
             ingested = self._ingest_locked(producer, ok_raws)
             if ingested:
                 self._route_locked(ingested)
@@ -365,6 +406,9 @@ class AgentEventManager:
         if not ok_raws:
             return 0
         with self._lock:
+            ok_raws, dropped = self._filter_noise_locked(node_id, ok_raws)
+            for raw, reason in dropped:
+                self._log_dropped_event(node_id, raw, reason)
             ingested = self._ingest_locked(node_id, ok_raws)
             if ingested:
                 self._route_locked(ingested)
@@ -387,6 +431,68 @@ class AgentEventManager:
             except Exception as exc:  # noqa: BLE001
                 logger.error("scan_node(%s) failed: %s", node_id, exc)
         return total
+
+    # ------------------------------------------------------------------
+    # 摄取端噪声过滤（V3.1 P2：配合 Router 语义拒绝）
+    #   - 同 producer 短窗口内近似重复的 objective → 吞掉（不路由/不投递/不唤醒）
+    #   - 同 producer 窗口内事件数超上限 → 吞掉（事件风暴保护）
+    # 判定全部确定性、零 LLM 成本，在 Router 之前拦截明显噪声。
+    # ------------------------------------------------------------------
+
+    def _filter_noise_locked(
+        self, producer: str, raws: list[dict],
+    ) -> tuple[list[dict], list[tuple[dict, str]]]:
+        """摄取端噪声过滤（锁内调用，维护 per-producer 最近事件指纹）。
+
+        Returns:
+            ``(kept_raws, dropped)``；dropped 每项 ``(raw, reason)``，reason ∈
+            {duplicate_objective, rate_limited}。
+        """
+        if not raws:
+            return raws, []
+        now = time.monotonic()
+        recent = [
+            (ts, fp) for ts, fp in self._producer_recent.get(producer, [])
+            if now - ts <= _DEDUP_WINDOW_SECONDS
+        ]
+        kept: list[dict] = []
+        dropped: list[tuple[dict, str]] = []
+        for raw in raws:
+            objective = raw.get("objective") or raw.get("content") or ""
+            fp = _normalize_objective(objective)
+            if not fp:
+                kept.append(raw)  # 空 objective 已由格式层拒收，这里不重复处理
+                continue
+            if len(recent) >= _MAX_EVENTS_PER_PRODUCER_WINDOW:
+                dropped.append((raw, "rate_limited"))
+                continue
+            if any(_objectives_similar(fp, old_fp) for _, old_fp in recent):
+                dropped.append((raw, "duplicate_objective"))
+                continue
+            recent.append((now, fp))
+            kept.append(raw)
+        self._producer_recent[producer] = recent
+        return kept, dropped
+
+    def _log_dropped_event(self, producer: str, raw: dict, reason: str) -> None:
+        """记录被噪声过滤吞掉的事件（log + 落 router_trace 供审计/训练）。"""
+        self._deduped_count += 1
+        ev_id = raw.get("event_id") or "<generated>"
+        logger.info(
+            "Suppressed event '%s' from '%s' (%s)", ev_id, producer, reason,
+        )
+        self._append_router_trace({
+            "trace_version": 1,
+            "event_id": ev_id,
+            "event": {
+                "producer": producer,
+                "objective": raw.get("objective") or raw.get("content", ""),
+            },
+            "route_attempt": 0,
+            "route_status": "suppressed",
+            "router": {"decision": "noise_filter", "reason": reason},
+            "delivery": {"targets": {}},
+        })
 
     # ------------------------------------------------------------------
     # 事件格式校验（产出即验证：content 必须是非空字符串）
@@ -535,8 +641,47 @@ class AgentEventManager:
         if self._router is None:
             raise RuntimeError("AgentEventManager requires a configured AICURouter")
         for msg in messages:
+            # 确定性短路：图中除生产者外没有其他节点 → 无人可接收，直接落
+            # delivered 终态，**不调用 LLM Router**（避免为明显无人接收的事件
+            # 付出一次路由调用）。生产者不在图中时保守放行，交给 Router 判断。
+            if len(self._graph.nodes) <= 1 and msg.producer in self._graph.nodes:
+                msg.routed_to = []
+                msg.status = EventMessage.EVENT_STATUS_DELIVERED
+                self._append_router_trace({
+                    "trace_version": 1,
+                    "event_id": msg.event_id,
+                    "event": msg.to_dict(),
+                    "route_attempt": 0,
+                    "route_status": "delivered",
+                    "router": {"decision": "no_other_nodes", "latency_ms": 0.0},
+                    "delivery": {"targets": {}},
+                })
+                continue
             attempt = self._route_attempts.get(msg.event_id, 0) + 1
             self._route_attempts[msg.event_id] = attempt
+            # 路由历史去重（P2）：与已产出的**同 producer** 历史事件比对，判定重复
+            # 则不调用 LLM Router、不投递，直接落 delivered 终态（完成状态，保留
+            # 审计 trace）。与摄取端 _filter_noise_locked 互补：前者挡 120s 短窗
+            # 事件风暴，此处挡跨窗口的长期重复（如节点重跑后一字不差的重发）。
+            dup_of = self._find_duplicate_locked(msg)
+            if dup_of:
+                msg.routed_to = []
+                msg.status = EventMessage.EVENT_STATUS_DELIVERED
+                self._route_deduped_count += 1
+                self._append_router_trace({
+                    "trace_version": 1,
+                    "event_id": msg.event_id,
+                    "event": msg.to_dict(),
+                    "route_attempt": attempt,
+                    "route_status": "delivered",
+                    "router": {
+                        "decision": "duplicate_suppressed",
+                        "duplicate_of": dup_of,
+                        "latency_ms": 0.0,
+                    },
+                    "delivery": {"targets": {}},
+                })
+                continue
             started = time.monotonic()
             try:
                 targets = self._router.route(msg)
@@ -622,6 +767,24 @@ class AgentEventManager:
                 "delivery": {"targets": delivery_targets},
             })
             # 投递失败（inbox 未全落盘）保持 routed → 下次 load() 幂等重投
+
+    def _find_duplicate_locked(self, msg: EventMessage) -> str | None:
+        """与已产出的**同 producer** 历史事件比对，返回重复对象的 event_id。
+
+        确定性判定：规范化 objective 指纹 + ``_objectives_similar``（≥0.9），与
+        摄取端同阈值，零 LLM 成本。只比对同 producer：不同节点的相似目标属于
+        各自独立的协作请求，不应压制（避免误杀跨节点真实协作）。历史以
+        ``self._events`` 为准（含 load() 从 events.json 恢复的全量历史事件）。
+        """
+        if not msg.objective:
+            return None
+        probe = _normalize_objective(msg.objective)
+        for other in self._events.values():
+            if other.event_id == msg.event_id or other.producer != msg.producer:
+                continue
+            if _objectives_similar(probe, _normalize_objective(other.objective or "")):
+                return other.event_id
+        return None
 
     def _deliver(self, node: Any, msg: EventMessage) -> None:
         """按节点状态投递（方案三·单次消费语义）。

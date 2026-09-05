@@ -58,6 +58,8 @@ class AICURouter:
         self._last_trace: dict[str, Any] = {}
         self._last_raw_output: Any = None
         self._last_parse_error: Optional[str] = None
+        # 最近一次决策的 reason（ignore 时记录"为什么无人需要处理"，落 trace 审计）
+        self._last_reason: Optional[str] = None
 
     # ------------------------------------------------------------------
     # Graph 引用注入（延迟，避免循环导入）
@@ -84,6 +86,7 @@ class AICURouter:
         self._last_trace = {}
         self._last_raw_output = None
         self._last_parse_error = None
+        self._last_reason = None
         if self._graph is None:
             logger.warning("Router not attached to a graph; event '%s' not routed",
                            event.event_id)
@@ -116,6 +119,10 @@ class AICURouter:
             self._last_parse_error = f"router_parse_failed: {type(exc).__name__}: {exc}"
             raise
         self._last_trace["parsed_targets"] = list(targets)
+        if self._last_reason:
+            self._last_trace["decision_reason"] = self._last_reason
+        elif not targets:
+            self._last_trace["decision_reason"] = "ignore (empty targets)"
         return targets
 
     def decision_trace(self) -> dict[str, Any]:
@@ -337,10 +344,22 @@ class AICURouter:
         lines = [
             "## Route Event",
             "",
-            "你需要决定这个事件应交由哪些节点处理。",
+            "你需要决定这条事件是否值得交给任何节点处理，以及交给谁。",
             "基于「事件信息 + 生产者信息 + 当前组织图」做统一判断。",
             "事件字段（objective/intent/affected_roles/scope/action）都是生产者的参考信号，",
             "不含路由指令；目标由你从组织图中独立选择。",
+            "",
+            "### 先判断：ignore（无人需要处理）vs deliver（值得投递）",
+            "",
+            "**应返回空数组（ignore）的情况**：",
+            "- 例行进度 / 状态同步（如「进度到 60%」「正在做」「任务收尾」）；",
+            "- 纯「完成 / 验证通过」声明，且不要求任何节点采取行动；",
+            "- 与生产者近期已发布的事件重复（同一信息已通知过）；",
+            "- 没有 actionable 需求（没有任何节点需要因此改变工作内容或做决策）。",
+            "",
+            "**应投递（deliver）的情况**：",
+            "- objective 明确要求某类节点采取行动 / 决策 / 协作 / 升级；",
+            "- 信息对目标节点是新的，且会改变其后续工作内容。",
             "",
             "### 事件",
             f"- event_id: `{event.event_id}`",
@@ -387,9 +406,10 @@ class AICURouter:
             "",
             "### 输出要求",
             "只返回 JSON：",
-            '{"targets": ["<step_ref 或 node_id>", "..."]}',
+            '{"targets": ["<step_ref 或 node_id>", "..."], "reason": "<一句话理由>"}',
             "",
-            "- targets 为组织图中任一节点（Manager 或 Worker），空数组 = 无人接收。",
+            "- targets 为组织图中任一节点（Manager 或 Worker），空数组 = 无人接收（含 ignore）。",
+            "- reason 用一句话说明为什么投递这些目标 / 或为什么无人需要处理。",
             "- 目标可以是 step_ref 或 node_id。",
             "- scope 是生产者的建议搜索范围（current=仅生产者自身 / subtree=生产者子树 /",
             "  related=相关节点 / global=全局），优先在范围内选；仅当确有必须响应者在",
@@ -441,6 +461,9 @@ class AICURouter:
             return []
         if not isinstance(parsed, dict):
             return []
+        reason = parsed.get("reason")
+        if isinstance(reason, str) and reason.strip():
+            self._last_reason = reason.strip()
         targets = parsed.get("targets")
         if not isinstance(targets, list):
             return []

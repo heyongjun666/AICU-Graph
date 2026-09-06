@@ -669,6 +669,23 @@ class Scheduler:
         if old_status == target_status:
             return
 
+        # 用户已暂停/停止的节点不可被 stale Future 结果覆盖为终态（TOCTOU 竞态闭合）：
+        # pause_node/stop_node 置 PAUSED/STOPPED 与调度线程 _process_completed_futures 迁移
+        # 之间无共享锁，若后者已通过 RUNNING 守卫而控制入口抢先置 PAUSED，此处必须放弃迁移
+        # （不 update、不发冗余 node_status_changed），保留 PAUSED/STOPPED 状态。
+        # StateMachine 亦禁止 PAUSED→终态；此守卫在「校验失败降级 setattr」吞异常前兜底。
+        if old_status in (NodeStatus.PAUSED, NodeStatus.STOPPED) and target_status in (
+            NodeStatus.COMPLETED,
+            NodeStatus.FAILED,
+            NodeStatus.STOPPED,
+        ):
+            logger.warning(
+                "Skip transition '%s' %s -> %s: node is user-parked, "
+                "stale future result ignored",
+                node_id, old_status.value, target_status.value,
+            )
+            return
+
         # 尝试通过 StateMachine 校验
         try:
             StateMachine.validate_transition(
@@ -842,6 +859,18 @@ class Scheduler:
         """
         source_node = self.graph.get_node(source_node_id)
         if source_node is None:
+            return
+
+        # TOCTOU 闭合（路由路径残留，与 _transition_node 的 PAUSED/STOPPED 守卫一致）：
+        # _process_completed_futures 对 stale COMPLETED/FAILED Future 结果无条件调用本方法；
+        # 若源节点已被用户 pause/stop 杀掉（被杀前可能已写入 pending_routing），不得消费
+        # 其 stale 路由决策激活下游——否则从「非终态/已停驻的源节点」误激活目标。
+        if source_node.status in (NodeStatus.PAUSED, NodeStatus.STOPPED):
+            logger.info(
+                "Skip routing from '%s': source is %s (user-parked), "
+                "stale routing ignored",
+                source_node_id[:8], source_node.status.value,
+            )
             return
 
         routing = getattr(source_node, 'pending_routing', None)
@@ -1177,6 +1206,11 @@ class Scheduler:
             return
 
         if failed_node.exec_type not in ("worker", "manager"):
+            return
+
+        # 用户已暂停/停止的节点不自动重试（pause/stop 是人工干预）：stale FAILED 结果
+        # 不得把 PAUSED/STOPPED 节点重激活为 READY/WAITING，覆盖人工意图（TOCTOU 竞态闭合）。
+        if failed_node.status in (NodeStatus.PAUSED, NodeStatus.STOPPED):
             return
 
         attempt = self._retry_attempts.get(failed_node_id, 0)

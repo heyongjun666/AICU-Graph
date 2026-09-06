@@ -81,7 +81,10 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .mobile-menu { display: none; }
 .header-outputs-toggle { color: #52645f; }
 .header-outputs-toggle.is-active { color: #176b55; background: #e7f1ed; }
-.header-error { max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--danger); font-size: 11px; }
+.header-error { max-width: 220px; display: inline-flex; align-items: center; gap: 6px; color: var(--danger); font-size: 11px; }
+.header-error .header-error-message { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.header-error .header-error-close { flex: none; margin: 0; padding: 0; border: 0; background: none; color: inherit; cursor: pointer; line-height: 1; opacity: 0.75; }
+.header-error .header-error-close:hover { opacity: 1; }
 .primary-button, .secondary-button { min-height: 36px; padding: 0 14px; display: inline-flex; align-items: center; justify-content: center; gap: 7px; border-radius: 6px; cursor: pointer; font-size: 13px; font-weight: 650; }
 .primary-button { color: #fff; border: 1px solid var(--accent); background: var(--accent); }
 .primary-button:hover { background: var(--accent-hover); }
@@ -124,7 +127,10 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .inspector-actions button { min-width: 34px; height: 32px; padding: 0 9px; display: inline-flex; align-items: center; justify-content: center; gap: 6px; border: 1px solid #dfe2e6; border-radius: 6px; background: #fff; cursor: pointer; font-size: 11px; }
 .inspector-actions button:hover { background: #f5f6f8; }
 .inspector-actions .danger-action { margin-left: auto; color: var(--danger); }
-.inspector-error { margin: 8px 14px 0; padding: 8px 10px; color: #922c24; border: 1px solid #f0c5c0; border-radius: 6px; background: #fff4f2; font-size: 11px; }
+.inspector-error { margin: 8px 14px 0; padding: 8px 10px; color: #922c24; border: 1px solid #f0c5c0; border-radius: 6px; background: #fff4f2; font-size: 11px; display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; }
+.inspector-error .inspector-error-message { flex: 1; min-width: 0; word-break: break-word; }
+.inspector-error .inspector-error-close { flex: none; margin: 0; padding: 0; border: 0; background: none; color: inherit; cursor: pointer; line-height: 1; opacity: 0.75; }
+.inspector-error .inspector-error-close:hover { opacity: 1; }
 .inspector-tabs { height: 44px; display: grid; grid-template-columns: repeat(4, 1fr); border-bottom: 1px solid var(--border); }
 .inspector-tabs button { position: relative; display: flex; align-items: center; justify-content: center; gap: 5px; border: 0; background: #fff; color: #717882; cursor: pointer; font-size: 11px; }
 .inspector-tabs button.is-active { color: #195f4d; font-weight: 700; }

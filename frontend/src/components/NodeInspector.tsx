@@ -44,6 +44,8 @@ const EVENT_STATUS_LABEL: Record<string, string> = {
   delivered: 'DELIVERED',
   consumed: 'CONSUMED',
 };
+/** 错误提示自动关闭时限（与 toast 默认时长一致），避免提示无限期挂起在页面上。 */
+const ERROR_AUTO_DISMISS_MS = 3000;
 const tabs: Array<{ id: Tab; label: string; icon: React.ReactNode }> = [
   { id: 'overview', label: 'inspector.overview', icon: <FileText size={15} /> },
   { id: 'logs', label: 'inspector.logs', icon: <ScrollText size={15} /> },
@@ -123,7 +125,22 @@ const NodeInspector: React.FC = () => {
     setWorkspaceFile(null);
     setWorkspacePath('');
     setWorkspaceError('');
+    setError('');
   }, [selectedNodeId]);
+
+  // 错误提示自动消失：到达时限后清空，避免提示长期挂起；error 变化时重置计时。
+  useEffect(() => {
+    if (!error) return;
+    const timer = window.setTimeout(() => setError(''), ERROR_AUTO_DISMISS_MS);
+    return () => window.clearTimeout(timer);
+  }, [error]);
+
+  // Artifact 页浏览错误（workspaceError）同样自动消失，避免同类提示长期挂起；变化时重置计时。
+  useEffect(() => {
+    if (!workspaceError) return;
+    const timer = window.setTimeout(() => setWorkspaceError(''), ERROR_AUTO_DISMISS_MS);
+    return () => window.clearTimeout(timer);
+  }, [workspaceError]);
 
   useEffect(() => {
     const requestId = ++nodeRequestGeneration.current;
@@ -403,7 +420,20 @@ const NodeInspector: React.FC = () => {
         <button className="danger-action" onClick={remove} disabled={node.status === NodeStatus.Running || busy}><Trash2 size={15} /></button>
       </div>
 
-      {error && <div className="inspector-error">{error}</div>}
+      {error && (
+        <div className="inspector-error">
+          <span className="inspector-error-message">{error}</span>
+          <button
+            type="button"
+            className="inspector-error-close"
+            onClick={() => setError('')}
+            title={t('common.close')}
+            aria-label={t('common.close')}
+          >
+            <X size={14} />
+          </button>
+        </div>
+      )}
 
       <div className="inspector-tabs">
         {tabs.map((item) => (
@@ -443,7 +473,20 @@ const NodeInspector: React.FC = () => {
               <button onClick={() => { setWorkspacePath(''); setWorkspaceFile(null); }} disabled={!workspacePath && !workspaceFile}>{t('inspector.output')}</button>
               {pathSegments.map((segment, index) => <React.Fragment key={`${segment}-${index}`}><ChevronRight size={13} /><button onClick={() => goToWorkspacePath(index)}>{segment}</button></React.Fragment>)}
             </div>
-            {workspaceError && <div className="inspector-error">{workspaceError}</div>}
+            {workspaceError && (
+              <div className="inspector-error">
+                <span className="inspector-error-message">{workspaceError}</span>
+                <button
+                  type="button"
+                  className="inspector-error-close"
+                  onClick={() => setWorkspaceError('')}
+                  title={t('common.close')}
+                  aria-label={t('common.close')}
+                >
+                  <X size={14} />
+                </button>
+              </div>
+            )}
             {workspaceBusy && <div className="detail-empty"><RefreshCw size={15} className="spin" /> {t('inspector.loadingOutput')}</div>}
             {!workspaceBusy && workspaceFile && (
               <div className="workspace-preview">

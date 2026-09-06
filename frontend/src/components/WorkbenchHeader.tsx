@@ -10,6 +10,7 @@ import {
   SquareTerminal,
   Wifi,
   WifiOff,
+  X,
   Zap,
 } from 'lucide-react';
 import { SessionSummary, SSEClientStatus } from '../types';
@@ -25,6 +26,9 @@ type AwaitingLifecycle = {
   previousState: SessionSummary['lifecycle_state'];
   acceptedVersion?: number;
 };
+
+/** 顶栏错误提示自动关闭时限（与 NodeInspector 主 error / Toast 默认时长一致），避免常驻页面。 */
+const ERROR_AUTO_DISMISS_MS = 3000;
 
 interface WorkbenchHeaderProps {
   session: SessionSummary;
@@ -97,6 +101,13 @@ const WorkbenchHeader: React.FC<WorkbenchHeaderProps> = ({
       setAwaitingLifecycle(null);
     }
   }, [addToast, awaitingLifecycle, lifecycleState, session.state_version, t]);
+
+  // 顶栏错误提示自动消失：到达时限后清空，避免会话控制失败的错误常驻页面；error 变化时重置计时。
+  useEffect(() => {
+    if (!error) return;
+    const timer = window.setTimeout(() => setError(''), ERROR_AUTO_DISMISS_MS);
+    return () => window.clearTimeout(timer);
+  }, [error]);
 
   const run = async (
     action: SessionAction,
@@ -215,7 +226,20 @@ const WorkbenchHeader: React.FC<WorkbenchHeaderProps> = ({
         </div>
       </div>
       <div className="header-actions">
-        {error && <span className="header-error" title={error}>{error}</span>}
+        {error && (
+          <span className="header-error" title={error}>
+            <span className="header-error-message">{error}</span>
+            <button
+              type="button"
+              className="header-error-close"
+              onClick={() => setError('')}
+              title={t('common.close')}
+              aria-label={t('common.close')}
+            >
+              <X size={14} />
+            </button>
+          </span>
+        )}
         <button className={`icon-button ${terminalOpen ? 'header-terminal-toggle is-active' : 'header-terminal-toggle'}`} onClick={onToggleTerminal} title={terminalOpen ? t('header.hideTerminal') : t('header.openTerminal')}>
           <SquareTerminal size={17} />
         </button>

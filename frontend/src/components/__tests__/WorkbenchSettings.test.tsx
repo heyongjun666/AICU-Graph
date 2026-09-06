@@ -76,9 +76,9 @@ describe('WorkbenchSettings roles form', () => {
     );
 
     await waitFor(() => expect(api.getRoleSchema).toHaveBeenCalledWith('worker'));
-    fireEvent.click(screen.getByText('Roles'));
+    fireEvent.click(screen.getByText('角色'));
 
-    expect(await screen.findByText('22 supported fields for this role type. Override only the values this role needs.')).toBeDefined();
+    expect(await screen.findByText('该角色类型支持 22 个字段。仅覆盖该角色所需的值。')).toBeDefined();
     expect(screen.getByText('main_doc')).toBeDefined();
     expect(screen.getByText('index_file')).toBeDefined();
     expect(screen.getAllByText('description')).toHaveLength(2);

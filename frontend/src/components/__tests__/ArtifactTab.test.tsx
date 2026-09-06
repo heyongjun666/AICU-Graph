@@ -66,6 +66,6 @@ describe('ArtifactTab', () => {
 
     render(<ArtifactTab nodeId="node-2" />);
 
-    expect(await screen.findByText('This node has no declared output result.')).toBeDefined();
+    expect(await screen.findByText('此节点没有声明的产出结果。')).toBeDefined();
   });
 });

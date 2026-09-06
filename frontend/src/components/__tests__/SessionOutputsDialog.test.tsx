@@ -137,7 +137,7 @@ describe('SessionOutputsDialog', () => {
     render(<SessionOutputsDialog open sessionId="s1" onClose={() => undefined} />);
 
     fireEvent.click(await screen.findByText('blob.bin'));
-    expect(await screen.findByText('Binary or non-previewable file.')).toBeDefined();
+    expect(await screen.findByText('二进制或不可预览文件。')).toBeDefined();
   });
 
   it('refresh re-fetches the current layer', async () => {
@@ -146,7 +146,7 @@ describe('SessionOutputsDialog', () => {
     render(<SessionOutputsDialog open sessionId="s1" onClose={() => undefined} />);
 
     await screen.findByText('backend');
-    fireEvent.click(screen.getByText('Refresh'));
+    fireEvent.click(screen.getByText('刷新'));
     await waitFor(() => {
       expect(api.listSessionShared).toHaveBeenCalledTimes(2);
     });
@@ -155,6 +155,6 @@ describe('SessionOutputsDialog', () => {
 
   it('prompts to select a session when none is active', () => {
     render(<SessionOutputsDialog open sessionId={null} onClose={() => undefined} />);
-    expect(screen.getByText('Select a session to view its outputs.')).toBeDefined();
+    expect(screen.getByText('选择会话以查看其产出。')).toBeDefined();
   });
 });

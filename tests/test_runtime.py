@@ -13,6 +13,7 @@ Covers 8 acceptance criteria:
 """
 
 import os
+import json
 import time
 import threading
 import tempfile
@@ -685,6 +686,31 @@ class TestEventBusPublish:
         runtime.on_node_status_changed("n1", NodeStatus.RUNNING)
         assert len(received) >= 1
 
+    def test_graph_mutation_payload_json_serializable(self, runtime):
+        """D6：Graph 变更事件（node_updated 等）payload 必须 JSON 可序列化。
+
+        update_node_status 会以 datetime 写入 started_at/finished_at，经
+        _on_graph_mutation 进入 node_updated payload；桥接层须将其归一为
+        可序列化形式（ISO 字符串），保证 `json.dumps(payload)` 可直接成功。
+        """
+        received = []
+
+        def handler(event: SSEEvent):
+            received.append(event)
+
+        runtime.event_bus.subscribe("node_updated", handler)
+        node_id = runtime.submit_root_manager("test")
+        runtime.global_pause()
+        # RUNNING 分支会 setdefault(started_at=datetime.now()) → payload 含 datetime
+        runtime.update_node_status(node_id, NodeStatus.RUNNING)
+        assert received, "update_node_status 应产生 node_updated 事件"
+        for event in received:
+            # 契约：payload 必须 JSON 可序列化（不依赖 format_sse 的 default=str 兜底）
+            json.dumps(event.payload)
+        # 且 started_at 已归一为字符串（可被前端直接消费）
+        payload = received[-1].payload
+        assert "started_at" in payload and isinstance(payload["started_at"], str)
+
 
 # ============================================================================
 # Acceptance Criterion 8: Persistence graph_version consistency
@@ -789,6 +815,42 @@ class TestNodeControl:
         node = runtime.get_node(node_id)
         assert node.status == NodeStatus.STOPPED
 
+    def test_stop_node_publishes_status_changed_event(self, runtime):
+        """D6：stop_node 状态变化应发布 node_status_changed(Stopped)。
+
+        契约：node_status_changed 须在节点状态实际变化时触发（stop 调用点），
+        经 Runtime._publish_node_status_changed 发布、payload 含 node_id+status.value。
+        """
+        node_id = "mgr_stop"
+        runtime.graph.add_node(_make_manager_node(node_id, status=NodeStatus.READY))
+        status_events = []
+        runtime.event_bus.subscribe("node_status_changed", status_events.append)
+        runtime.stop_node(node_id)
+        node = runtime.get_node(node_id)
+        assert node.status == NodeStatus.STOPPED
+        assert any(
+            event.payload.get("node_id") == node_id
+            and event.payload.get("status") == "Stopped"
+            for event in status_events
+        ), (
+            f"stop_node 应发布 node_status_changed(Stopped); "
+            f"events={[e.payload for e in status_events]}"
+        )
+
+    def test_stop_node_no_event_when_status_unchanged(self, runtime):
+        """D6：节点已是 STOPPED 时 stop_node 不应重复发布 node_status_changed。"""
+        node_id = "mgr_stop_idem"
+        runtime.graph.add_node(
+            _make_manager_node(node_id, status=NodeStatus.STOPPED)
+        )
+        status_events = []
+        runtime.event_bus.subscribe("node_status_changed", status_events.append)
+        runtime.stop_node(node_id)
+        assert not any(
+            event.payload.get("node_id") == node_id
+            for event in status_events
+        ), "状态未变化时不得发布 node_status_changed"
+
     def test_stop_nonexistent_node(self, runtime):
         """stop_node with nonexistent ID should raise ValueError."""
         with pytest.raises(ValueError, match="not found"):
@@ -803,12 +865,80 @@ class TestNodeControl:
         with pytest.raises(ValueError, match="Cannot pause"):
             runtime.pause_node(node_id)
 
+    def test_pause_node_publishes_status_changed_event(self, runtime):
+        """D6：pause_node 状态变化应发布 node_status_changed(Paused)。"""
+        node_id = "mgr_pause"
+        runtime.graph.add_node(
+            _make_manager_node(node_id, status=NodeStatus.RUNNING)
+        )
+        status_events = []
+        runtime.event_bus.subscribe("node_status_changed", status_events.append)
+        runtime.pause_node(node_id)
+        node = runtime.get_node(node_id)
+        assert node.status == NodeStatus.PAUSED
+        assert any(
+            event.payload.get("node_id") == node_id
+            and event.payload.get("status") == "Paused"
+            for event in status_events
+        ), (
+            f"pause_node 应发布 node_status_changed(Paused); "
+            f"events={[e.payload for e in status_events]}"
+        )
+
     def test_resume_node_not_paused(self, runtime):
         """resume_node on non-PAUSED node should raise ValueError."""
         runtime.start()
         node_id = runtime.submit_root_manager("test")
         with pytest.raises(ValueError, match="Cannot resume"):
             runtime.resume_node(node_id)
+
+    def test_resume_node_publishes_status_changed_event(self, runtime):
+        """D6：resume_node 状态变化应发布 node_status_changed(Ready)。"""
+        node_id = "mgr_resume"
+        runtime.graph.add_node(
+            _make_manager_node(node_id, status=NodeStatus.PAUSED)
+        )
+        status_events = []
+        runtime.event_bus.subscribe("node_status_changed", status_events.append)
+        runtime.resume_node(node_id)
+        node = runtime.get_node(node_id)
+        assert node.status == NodeStatus.READY
+        assert any(
+            event.payload.get("node_id") == node_id
+            and event.payload.get("status") == "Ready"
+            for event in status_events
+        ), (
+            f"resume_node 应发布 node_status_changed(Ready); "
+            f"events={[e.payload for e in status_events]}"
+        )
+
+    def test_global_stop_publishes_status_changed_events(self, runtime):
+        """D6：global_stop 应为其影响的每个节点发布 node_status_changed(Stopped)。"""
+        expected = []
+        for i, st in enumerate(
+            [NodeStatus.RUNNING, NodeStatus.READY, NodeStatus.PAUSED]
+        ):
+            nid = f"gstop_{i}"
+            runtime.graph.add_node(_make_manager_node(nid, status=st))
+            expected.append(nid)
+        # 已 STOPPED 的节点不在影响集内，不得重复触发
+        runtime.graph.add_node(
+            _make_manager_node("gstop_done", status=NodeStatus.STOPPED)
+        )
+        status_events = []
+        runtime.event_bus.subscribe("node_status_changed", status_events.append)
+        runtime.global_stop()
+        for nid in expected:
+            assert runtime.get_node(nid).status == NodeStatus.STOPPED
+            assert any(
+                event.payload.get("node_id") == nid
+                and event.payload.get("status") == "Stopped"
+                for event in status_events
+            ), f"global_stop 应为 {nid} 发布 node_status_changed(Stopped)"
+        assert not any(
+            event.payload.get("node_id") == "gstop_done"
+            for event in status_events
+        ), "已 STOPPED 节点不应重复发布 node_status_changed"
 
 
 # ============================================================================

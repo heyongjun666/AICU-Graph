@@ -1281,11 +1281,12 @@ class TestSSEManager:
         bus = EventBus()
         mgr = SSEManager(bus)
         mgr.start()
-        bus.publish(SSEEvent("test.event", 0, time.time(), {"k": "v"}))
+        # D6 白名单契约：仅登记类型会被 _on_event 接收进转发缓冲区
+        bus.publish(SSEEvent("node_updated", 0, time.time(), {"k": "v"}))
         time.sleep(0.05)
         events = mgr.get_events_since(0)
         assert len(events) >= 1
-        assert events[0].event_type == "test.event"
+        assert events[0].event_type == "node_updated"
         mgr.stop()
 
     @test("SSEManager: format_sse produces correct format")
@@ -1301,7 +1302,8 @@ class TestSSEManager:
         bus = EventBus()
         mgr = SSEManager(bus)
         mgr.start()
-        bus.publish(SSEEvent("test.event", 0, time.time(), {}))
+        # D6 白名单契约：仅登记类型会被接收计数
+        bus.publish(SSEEvent("node_updated", 0, time.time(), {}))
         time.sleep(0.05)
         stats = mgr.get_stats()
         assert stats["total_events"] >= 1
@@ -1313,8 +1315,10 @@ class TestSSEManager:
         bus = EventBus()
         mgr = SSEManager(bus)
         mgr.start()
-        bus.publish(SSEEvent("e1", 0, time.time(), {}))
+        # D6 白名单契约：使用登记类型，确保事件确实进入缓冲区后再断言未来水位为空
+        bus.publish(SSEEvent("node_updated", 0, time.time(), {}))
         time.sleep(0.05)
+        assert len(mgr.get_events_since(0)) >= 1  # 事件已入缓冲（非因拒推而空）
         events = mgr.get_events_since(99999)
         assert events == []
         mgr.stop()

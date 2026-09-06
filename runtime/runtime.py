@@ -49,6 +49,23 @@ logger = logging.getLogger(__name__)
 MANUAL_CONTINUE_BUDGET = 3
 
 
+def _json_safe_payload(value: Any) -> Any:
+    """将事件负载递归归一为 JSON 可序列化形式（D6 契约：payload 必须可序列化）。
+
+    Graph 变更回调的 payload 可能携带 Node 内部类型（如 started_at/finished_at
+    为 datetime），SSE 桥接层在构造 SSEEvent 前须将其归一为可序列化形式
+    （datetime → ISO 字符串），保证 `json.dumps(payload)` 可直接成功，
+    不依赖 M6 format_sse 的 default=str 兜底。
+    """
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if isinstance(value, dict):
+        return {k: _json_safe_payload(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe_payload(v) for v in value]
+    return value
+
+
 class Runtime(RuntimeGateway, SchedulerDelegate):
     """Runtime 协调整合引擎。
 
@@ -1224,7 +1241,12 @@ class Runtime(RuntimeGateway, SchedulerDelegate):
             node = self.graph.get_node(node_id)
             if node is None:
                 raise ValueError(f"Node '{node_id}' not found")
+            old_status = node.status
             self.graph.update_node(node_id, status=NodeStatus.STOPPED)
+            changed = old_status != NodeStatus.STOPPED
+        if changed:
+            # D6：节点状态实际变化时发布 node_status_changed(Stopped)
+            self._publish_node_status_changed(node_id, NodeStatus.STOPPED)
         logger.info("Node stopped: %s", node_id)
 
     def pause_node(self, node_id: str) -> None:
@@ -1252,6 +1274,8 @@ class Runtime(RuntimeGateway, SchedulerDelegate):
             # 先停止执行（杀 CC 子进程），再改状态
             self.scheduler.stop_node(node_id)
             self.graph.update_node(node_id, status=NodeStatus.PAUSED)
+        # D6：节点状态实际变化（RUNNING→PAUSED）时发布 node_status_changed(Paused)
+        self._publish_node_status_changed(node_id, NodeStatus.PAUSED)
         logger.info("Node paused: %s", node_id)
 
     def resume_node(self, node_id: str) -> None:
@@ -1274,6 +1298,8 @@ class Runtime(RuntimeGateway, SchedulerDelegate):
                 )
             self.graph.update_node(node_id, status=NodeStatus.READY)
             self.scheduler.start()
+        # D6：节点状态实际变化（PAUSED→READY）时发布 node_status_changed(Ready)
+        self._publish_node_status_changed(node_id, NodeStatus.READY)
         logger.info("Node resumed: %s", node_id)
 
     def continue_node(self, node_id: str) -> str:
@@ -1350,7 +1376,7 @@ class Runtime(RuntimeGateway, SchedulerDelegate):
             self.scheduler.reactivate(
                 node_id,
                 target_status=target_status,
-                emit_notification=False,
+                emit_notification=True,
             )
             logger.info(log_message, *log_args)
 
@@ -1440,7 +1466,7 @@ class Runtime(RuntimeGateway, SchedulerDelegate):
             self.scheduler.reactivate(
                 node_id,
                 target_status=NodeStatus.WAITING,
-                emit_notification=False,
+                emit_notification=True,
             )
         logger.info(
             "Manager '%s' revised: COMPLETED/terminal → WAITING(expand) with "
@@ -1572,6 +1598,7 @@ class Runtime(RuntimeGateway, SchedulerDelegate):
         停止 Scheduler 并将所有 RUNNING/READY/PAUSED 节点置为 STOPPED。
         """
         self.scheduler.stop()
+        affected: list[str] = []
         with self._lock:
             for node in self.graph.all_nodes():
                 if node.status in (
@@ -1580,6 +1607,10 @@ class Runtime(RuntimeGateway, SchedulerDelegate):
                     NodeStatus.PAUSED,
                 ):
                     self.graph.update_node(node.id, status=NodeStatus.STOPPED)
+                    affected.append(node.id)
+        # D6：状态实际变化（非终态→STOPPED）时逐节点发布 node_status_changed(Stopped)
+        for node_id in affected:
+            self._publish_node_status_changed(node_id, NodeStatus.STOPPED)
         logger.info("Runtime: global stop")
 
     def clear_graph(self) -> None:
@@ -2536,7 +2567,7 @@ class Runtime(RuntimeGateway, SchedulerDelegate):
                 event_type=sse_type,
                 sequence_id=0,
                 timestamp=time.time(),
-                payload=payload,
+                payload=_json_safe_payload(payload),
             )
             self.event_bus.publish(event)
 

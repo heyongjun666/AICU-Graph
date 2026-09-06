@@ -148,6 +148,8 @@ function mapEdgeFromBackend(raw: any): GraphEdge {
   } as GraphEdge;
 }
 
+export { mapEdgeFromBackend };
+
 // ============================================================================
 // API 方法
 // ============================================================================
@@ -307,16 +309,15 @@ export async function clearGraph(sessionId: string): Promise<void> {
 }
 
 /**
- * 获取图快照（多会话前缀）
+ * 获取图快照（多会话前缀）。
+ * HTTP 非 2xx 时读取响应体 {detail} 作为错误信息（经 sessionRequest）。
  */
 export async function getGraphSnapshot(sessionId: string): Promise<{ nodes: GraphNode[]; edges: GraphEdge[] }> {
   if (MOCK_MODE) {
     return { nodes: [], edges: [] };
   }
 
-  const response = await fetch(`${baseUrl}sessions/${sessionId}/graph`);
-  if (!response.ok) throw new Error(`HTTP ${response.status}`);
-  const raw = await response.json();
+  const raw = await sessionRequest<any>(`sessions/${sessionId}/graph`);
   return {
     nodes: (raw.nodes || []).map(mapNodeFromBackend),
     edges: (raw.edges || []).map(mapEdgeFromBackend),

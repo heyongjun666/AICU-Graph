@@ -49,6 +49,10 @@ interface GraphActions {
   updateNode: (id: string, updates: Partial<GraphNode>) => void;
   /** 删除单个节点 */
   removeNode: (id: string) => void;
+  /** 新增单条边（SSE edge_added 实时应用） */
+  addEdge: (edge: GraphEdge) => void;
+  /** 删除单条边（SSE edge_removed 实时应用） */
+  removeEdge: (edgeId: string) => void;
   /** 批量应用图快照；节点按字段合并，快照外节点按全量语义移除 */
   batchUpdate: (nodes: GraphNode[], edges: GraphEdge[]) => void;
   /** 收起所有 Manager 子树 */
@@ -214,6 +218,22 @@ export const useGraphStore = create<GraphStore>((set, get) => ({
         rootNodeId: state.rootNodeId === id ? null : state.rootNodeId,
         stats: computeStats(nodes),
       };
+    });
+  },
+
+  removeEdge: (edgeId: string) => {
+    set((state) => {
+      const edges = new Map(state.edges);
+      edges.delete(edgeId);
+      return { edges };
+    });
+  },
+
+  addEdge: (edge: GraphEdge) => {
+    set((state) => {
+      const edges = new Map(state.edges);
+      edges.set(edge.id, edge);
+      return { edges };
     });
   },
 

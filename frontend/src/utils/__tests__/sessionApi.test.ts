@@ -51,6 +51,16 @@ describe('session-scoped API', () => {
     expect(graph.nodes[0].label).toContain('lead');
   });
 
+  it('getGraphSnapshot surfaces the backend {detail} on a non-2xx response', async () => {
+    vi.stubGlobal('fetch', vi.fn(() => Promise.resolve({
+      ok: false,
+      status: 500,
+      json: () => Promise.resolve({ detail: 'graph load failed' }),
+    } as Response)));
+
+    await expect(getGraphSnapshot('s1')).rejects.toThrow('graph load failed');
+  });
+
   it('creates dependency edges in the selected session', async () => {
     const fetchMock = vi.fn(() => response({ id: 'e1', from_node: 'a', to_node: 'b', type: 'dependency' }, 201));
     vi.stubGlobal('fetch', fetchMock);

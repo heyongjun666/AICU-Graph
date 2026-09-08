@@ -128,7 +128,7 @@ class EventMessage:
     字段:
         event_id: 全局唯一事件 ID（CC 生成，缺省 Runtime 补；日志按此去重）。
         producer: 产生事件的生产者 **node_id**（不记录 step_ref）。
-        objective: 想让其他 Node 知道什么（就几句话，如「后端登录接口已完成，需前端联调」，≤3 句、≤80 字）。
+        objective: 想让其他 Node 知道什么（就几句话，如「本环节产出已写入共享产物文件，需后续环节节点继续处理」，≤3 句、≤80 字）。
         intent: 事件性质——notification（仅同步状态）/ collaboration（需协作）/
                 escalation（需上级协调）。
         affected_roles: 受影响的**岗位/角色** + 各自职责（list[{"role","duty"}]，参考信号；

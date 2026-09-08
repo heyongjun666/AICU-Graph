@@ -55,7 +55,7 @@ logger = logging.getLogger(__name__)
 _LIVE_DELIVERY_STATUSES = (NodeStatus.RUNNING,)
 
 # objective 简短性硬约束（方案三：objective 就是「几句话」的通知，如
-# 「后端 login API 已完成，需要前端进行接口联调」，不是报告）。
+# 「本环节产出已写入共享产物文件，需要后续环节节点读取后继续推进」，不是报告）。
 # 产出即验证——超出则拒收并投递反馈让生产者重写（不是截断，是打回重写）。
 MAX_OBJECTIVE_SENTENCES = 3
 MAX_OBJECTIVE_CHARS = 80

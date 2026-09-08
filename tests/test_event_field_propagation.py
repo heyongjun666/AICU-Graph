@@ -198,7 +198,7 @@ class TestObjectiveBudget:
 
     def test_accepts_brief_objective(self):
         ok, bad = self._mgr()._prepare_event_raws(
-            "p", [{"objective": "后端登录功能已完成，需要前端进行联调。"}],
+            "p", [{"objective": "本环节产出已完成，需要后续环节节点继续推进。"}],
         )
         assert len(ok) == 1
         assert bad == []

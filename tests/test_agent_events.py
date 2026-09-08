@@ -222,7 +222,7 @@ class TestScanIngest:
         ev_file = os.path.join(events_dir, "evt_x.json")
         with open(ev_file, "w", encoding="utf-8") as f:
             json.dump({
-                "content": "api_ready 契约已就绪，可供联调",
+                "content": "api_ready 本环节产物已就绪，可供后续环节处理",
             }, f)
 
         n = runtime.flush_node_events(producer.id)
@@ -577,7 +577,7 @@ class _EventPublishingStub:
         if self.events_dir:
             os.makedirs(self.events_dir, exist_ok=True)
             with open(os.path.join(self.events_dir, "stub_evt.json"), "w", encoding="utf-8") as f:
-                json.dump({"content": "api_ready 后端已就绪"}, f)
+                json.dump({"content": "api_ready 本环节已就绪"}, f)
         return {"final_output_path": ""}
 
 
@@ -635,7 +635,7 @@ class TestRouterDelivery:
         ]))
         backend, frontend = nodes
         runtime.publish_events(backend.id, [
-            {"content": "api_ready 契约已就绪，可供联调"},
+            {"content": "api_ready 本环节产物已就绪，可供后续环节处理"},
         ])
         inbox = os.path.join(runtime.get_node_workspace(frontend.id), "event_inbox")
         assert len(os.listdir(inbox)) == 1
@@ -1012,24 +1012,24 @@ class TestNoiseFiltering:
     def test_duplicate_objective_dropped(self, tmp_path):
         """同 producer 精确重复的 objective → 第二条吞掉，不入全局日志。"""
         mgr = AgentEventManager(workspace_root=str(tmp_path))
-        first = mgr.publish_events("p", [{"objective": "后端接口已完成，需要前端联调"}])
+        first = mgr.publish_events("p", [{"objective": "本环节产出已完成，需要后续环节处理"}])
         assert len(first) == 1
-        second = mgr.publish_events("p", [{"objective": "后端接口已完成，需要前端联调"}])
+        second = mgr.publish_events("p", [{"objective": "本环节产出已完成，需要后续环节处理"}])
         assert second == []
         assert mgr.event_count() == 1
 
     def test_near_duplicate_dropped(self, tmp_path):
         """近似重复（小段改写）→ 吞掉（SequenceMatcher ratio ≥0.9）。"""
         mgr = AgentEventManager(workspace_root=str(tmp_path))
-        mgr.publish_events("p", [{"objective": "后端登录接口已完成，需要前端进行接口联调"}])
-        second = mgr.publish_events("p", [{"objective": "后端登录接口已完成，需要前端进行联调"}])
+        mgr.publish_events("p", [{"objective": "本环节分析已完成，需要后续环节进行复核确认"}])
+        second = mgr.publish_events("p", [{"objective": "本环节分析已完成，需要后续环节进行复核"}])
         assert second == []
         assert mgr.event_count() == 1
 
     def test_distinct_objectives_both_kept(self, tmp_path):
         """不同内容的连续事件 → 都保留（不做误杀）。"""
         mgr = AgentEventManager(workspace_root=str(tmp_path))
-        mgr.publish_events("p", [{"objective": "后端接口已完成，需要前端联调"}])
+        mgr.publish_events("p", [{"objective": "本环节产出已完成，需要后续环节处理"}])
         ids = mgr.publish_events("p", [{"objective": "测试报告已生成，请 QA 复核"}])
         assert len(ids) == 1
         assert mgr.event_count() == 2
@@ -1037,9 +1037,9 @@ class TestNoiseFiltering:
     def test_progressive_update_not_flagged_duplicate(self, tmp_path):
         """递进更新（后一条含前一条全文 + 追加新内容）→ 不误判为重复。"""
         mgr = AgentEventManager(workspace_root=str(tmp_path))
-        mgr.publish_events("p", [{"objective": "前端已完成接口联调，需要你确认"}])
+        mgr.publish_events("p", [{"objective": "本环节已处理完成，需要你确认"}])
         ids = mgr.publish_events("p", [{
-            "objective": "前端已完成接口联调，需要你确认。另外登录接口的鉴权逻辑也需要你复核",
+            "objective": "本环节已处理完成，需要你确认。另外后续步骤的正确性也需要你复核",
         }])
         assert len(ids) == 1
         assert mgr.event_count() == 2
@@ -1076,12 +1076,12 @@ class TestNoiseFiltering:
         os.makedirs(outbox, exist_ok=True)
         f1 = os.path.join(outbox, "evt_a.json")
         with open(f1, "w", encoding="utf-8") as f:
-            json.dump({"objective": "API 已就绪，需要前端联调"}, f)
+            json.dump({"objective": "本环节产物已就绪，需要后续环节复核"}, f)
         assert runtime.flush_node_events(producer.id) == 1
 
         f2 = os.path.join(outbox, "evt_b.json")
         with open(f2, "w", encoding="utf-8") as f:
-            json.dump({"objective": "API 已就绪，需要前端进行联调"}, f)
+            json.dump({"objective": "本环节产物已就绪，需要后续环节进行复核"}, f)
         assert runtime.flush_node_events(producer.id) == 0   # 近似重复 → 吞掉
         assert not os.path.exists(f2)                         # 源文件仍清理
         assert runtime.agent_events.event_count() == 1
@@ -1166,9 +1166,9 @@ class TestRouteHistoryDedup:
     def test_exact_duplicate_suppressed_at_route_layer(self, tmp_path):
         """跨窗口精确重复 → 路由端历史比对挡下：不调 Router、delivered 终态。"""
         mgr, spy = _mgr_with_route(tmp_path)
-        first = mgr.publish_events("p", [{"objective": "后端接口已完成，需要前端联调"}])[0]
+        first = mgr.publish_events("p", [{"objective": "本环节产出已完成，需要后续环节处理"}])[0]
         self._push_past_window(mgr, "p")
-        second = mgr.publish_events("p", [{"objective": "后端接口已完成，需要前端联调"}])[0]
+        second = mgr.publish_events("p", [{"objective": "本环节产出已完成，需要后续环节处理"}])[0]
 
         ev2 = mgr.get_event(second)
         assert ev2.status == EventMessage.EVENT_STATUS_DELIVERED
@@ -1180,16 +1180,16 @@ class TestRouteHistoryDedup:
     def test_near_duplicate_suppressed(self, tmp_path):
         """跨窗口近似重复（≥0.9）→ 同样被路由端历史比对拦截。"""
         mgr, spy = _mgr_with_route(tmp_path)
-        first = mgr.publish_events("p", [{"objective": "后端登录接口已完成，需要前端进行接口联调"}])[0]
+        first = mgr.publish_events("p", [{"objective": "本环节分析已完成，需要后续环节进行复核确认"}])[0]
         self._push_past_window(mgr, "p")
-        mgr.publish_events("p", [{"objective": "后端登录接口已完成，需要前端进行联调"}])[0]
+        mgr.publish_events("p", [{"objective": "本环节分析已完成，需要后续环节进行复核"}])[0]
         assert mgr._route_deduped_count == 1
         assert spy.calls == [first]
 
     def test_distinct_objectives_both_routed(self, tmp_path):
         """不同内容的跨窗口事件 → 都路由（不做误杀）。"""
         mgr, spy = _mgr_with_route(tmp_path)
-        a = mgr.publish_events("p", [{"objective": "后端接口已完成，需要前端联调"}])[0]
+        a = mgr.publish_events("p", [{"objective": "本环节产出已完成，需要后续环节处理"}])[0]
         self._push_past_window(mgr, "p")
         b = mgr.publish_events("p", [{"objective": "测试报告已生成，请 QA 复核"}])[0]
         assert spy.calls == [a, b]
@@ -1206,10 +1206,10 @@ class TestRouteHistoryDedup:
     def test_progressive_update_not_suppressed(self, tmp_path):
         """递进更新（ratio<0.9）→ 照常路由（不误判真实推进为重复）。"""
         mgr, spy = _mgr_with_route(tmp_path)
-        a = mgr.publish_events("p", [{"objective": "前端已完成接口联调，需要你确认"}])[0]
+        a = mgr.publish_events("p", [{"objective": "本环节已处理完成，需要你确认"}])[0]
         self._push_past_window(mgr, "p")
         b = mgr.publish_events("p", [{
-            "objective": "前端已完成接口联调，需要你确认。另外登录接口的鉴权逻辑也需要你复核",
+            "objective": "本环节已处理完成，需要你确认。另外后续步骤的正确性也需要你复核",
         }])[0]
         assert spy.calls == [a, b]
         assert mgr._route_deduped_count == 0

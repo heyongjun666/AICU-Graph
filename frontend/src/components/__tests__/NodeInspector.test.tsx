@@ -195,3 +195,57 @@ describe('NodeInspector Artifact 页 workspaceError 提示生命周期（问题1
     await waitFor(() => expect(errorBox()).toBeNull());
   });
 });
+
+// ---------------------------------------------------------------------------
+// Worker 节点 Revise 入口：已完成 Worker 也能增量修订（后端 revise_worker_node）
+// ---------------------------------------------------------------------------
+describe('NodeInspector Worker Revise 按钮', () => {
+  const reviseButton = () => screen.queryByRole('button', { name: /Revise/i });
+
+  function renderWorkerInspector(status: NodeStatus): HTMLButtonElement | null {
+    const worker = makeNode('node-w', 'node-1', 'W');
+    worker.status = status;
+    useGraphStore.setState({ nodes: new Map([['node-w', worker]]) });
+    useGraphStore.getState().selectNode('node-w');
+    render(
+      <I18nProvider>
+        <NodeInspector />
+      </I18nProvider>,
+    );
+    return reviseButton();
+  }
+
+  it('已完成 Worker 显示 Revise 按钮（不再仅限 Manager）', () => {
+    expect(renderWorkerInspector(NodeStatus.Completed)).not.toBeNull();
+  });
+
+  it('FAILED / STOPPED / PAUSED Worker 同样显示 Revise 按钮', () => {
+    for (const status of [NodeStatus.Failed, NodeStatus.Stopped, NodeStatus.Paused]) {
+      cleanup();
+      useGraphStore.getState().resetGraph();
+      expect(renderWorkerInspector(status)).not.toBeNull();
+    }
+  });
+
+  it('非终态 Worker（WAITING）不显示 Revise 按钮', () => {
+    expect(renderWorkerInspector(NodeStatus.Waiting)).toBeNull();
+  });
+
+  it('点击后打开 Worker 专用修订弹窗并提交增量任务', async () => {
+    vi.mocked(api.getSessionNode).mockResolvedValue(
+      (() => { const n = makeNode('node-w', 'node-1', 'W'); n.status = NodeStatus.Completed; return n; })(),
+    );
+    renderWorkerInspector(NodeStatus.Completed);
+
+    fireEvent.click(reviseButton() as HTMLButtonElement);
+    expect(screen.getByText('Revise worker')).not.toBeNull();
+
+    const textarea = document.querySelector('.inspector-editor textarea') as HTMLTextAreaElement;
+    fireEvent.change(textarea, { target: { value: 'add pagination' } });
+    fireEvent.click(document.querySelector('.inspector-editor .primary-button') as HTMLButtonElement);
+
+    await waitFor(() => {
+      expect(api.reviseSessionNode).toHaveBeenCalledWith('session-1', 'node-w', 'add pagination');
+    });
+  });
+});

@@ -248,6 +248,8 @@ const NodeInspector: React.FC = () => {
 
   if (!sessionId || !selectedNodeId || !node) return null;
 
+  const isManager = node.exec_type === 'M';
+
   const runAction = async (action: 'pause' | 'resume' | 'stop') => {
     setBusy(true);
     setError('');
@@ -349,7 +351,7 @@ const NodeInspector: React.FC = () => {
     setError('');
     try {
       await reviseSessionNode(sessionId, node.id, reviseTask.trim());
-      addToast({ type: 'success', message: t('inspector.managerRevising') });
+      addToast({ type: 'success', message: isManager ? t('inspector.managerRevising') : t('inspector.workerRevising') });
       setRevising(false);
       setReviseTask('');
       const updated = await getSessionNode(sessionId, node.id);
@@ -400,7 +402,7 @@ const NodeInspector: React.FC = () => {
 
       <div className="inspector-status-row">
         <span className={`status-pill status-${node.status.toLowerCase()}`}>{node.status}</span>
-        <span>{node.exec_type === 'M' ? t('dialog.manager') : t('dialog.worker')}</span>
+        <span>{isManager ? t('dialog.manager') : t('dialog.worker')}</span>
         {node.started_at && <span>{new Date(node.started_at).toLocaleTimeString()}</span>}
       </div>
 
@@ -413,8 +415,8 @@ const NodeInspector: React.FC = () => {
         {[NodeStatus.Failed, NodeStatus.Stopped].includes(node.status) && (
           <button onClick={handleContinue} disabled={busy}><Play size={15} /> {t('inspector.continue')}</button>
         )}
-        {node.exec_type === 'M' && [NodeStatus.Completed, NodeStatus.Failed, NodeStatus.Stopped].includes(node.status) && (
-          <button onClick={() => setRevising(true)} disabled={busy} title={t('inspector.reviseTitle')}><RefreshCw size={15} /> {t('inspector.revise')}</button>
+        {[NodeStatus.Completed, NodeStatus.Failed, NodeStatus.Stopped, NodeStatus.Paused].includes(node.status) && (
+          <button onClick={() => setRevising(true)} disabled={busy} title={isManager ? t('inspector.reviseTitle') : t('inspector.reviseTitleWorker')}><RefreshCw size={15} /> {t('inspector.revise')}</button>
         )}
         <button onClick={() => setEditing(true)} disabled={!editable || busy} title={editable ? t('inspector.editNode') : t('inspector.pauseBeforeEdit')}><Pencil size={15} /> {t('inspector.editNode')}</button>
         <button className="danger-action" onClick={remove} disabled={node.status === NodeStatus.Running || busy}><Trash2 size={15} /></button>
@@ -576,8 +578,8 @@ const NodeInspector: React.FC = () => {
 
       {revising && (
         <div className="inspector-editor">
-          <div className="dialog-header"><h2>{t('inspector.reviseManager')}</h2><button className="icon-button" onClick={() => setRevising(false)}><X size={17} /></button></div>
-          <p className="detail-hint">{t('inspector.reviseHint')}</p>
+          <div className="dialog-header"><h2>{isManager ? t('inspector.reviseManager') : t('inspector.reviseWorker')}</h2><button className="icon-button" onClick={() => setRevising(false)}><X size={17} /></button></div>
+          <p className="detail-hint">{isManager ? t('inspector.reviseHint') : t('inspector.reviseHintWorker')}</p>
           <label>{t('inspector.incrementalTask')}<textarea value={reviseTask} onChange={(event) => setReviseTask(event.target.value)} rows={7} placeholder={t('inspector.revisePlaceholder')} /></label>
           <div className="dialog-actions"><button className="secondary-button" onClick={() => setRevising(false)}>{t('common.cancel')}</button><button className="primary-button" onClick={handleRevise} disabled={!reviseTask.trim() || busy}><RefreshCw size={15} /> {t('inspector.revise')}</button></div>
         </div>

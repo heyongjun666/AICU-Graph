@@ -650,7 +650,7 @@ def create_session_app(
     @app.post("/v1/sessions/{session_id}/nodes/{node_id}/revise")
     def revise_node(session_id: str, node_id: str, body: ReviseNodeRequest):
         try:
-            resolve(session_id).runtime.revise_manager_node(
+            resolve(session_id).runtime.revise_node(
                 node_id, body.task, body.config
             )
         except ValueError as error:

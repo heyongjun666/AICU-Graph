@@ -246,6 +246,183 @@ class TestReviseManagerNode:
 
 
 # ============================================================================
+# revise_worker_node：已完成 Worker 的增量续跑入口
+# ============================================================================
+
+def _completed_worker_under_root(
+    tmp_path, worker_id="W1", role="dev", status=NodeStatus.COMPLETED,
+    relpath=None, worker_config: Optional[dict] = None,
+):
+    """建「已终态根 Manager + 已终态 Worker 子节点」的最小图。
+
+    worker 的 config 预置 _workspace_root/_workspace_relpath，默认工作区
+    目录存在（resume 有地基，与 TestReactivateReusedWorker._harness 一致）。
+    """
+    rt = _make_runtime(tmp_path)
+    mgr_id = rt.submit_root_manager(task="Build", role="default")
+    rt.graph.update_node(mgr_id, status=NodeStatus.COMPLETED)
+    rel = relpath or "nodes/root/children/W1"
+    if relpath is None:
+        os.makedirs(os.path.join(str(tmp_path), rel), exist_ok=True)
+    cfg = {"_workspace_root": str(tmp_path), "_workspace_relpath": rel}
+    cfg.update(worker_config or {})
+    child = _worker_node(worker_id, mgr_id, role=role, status=status, config=cfg)
+    rt.graph.add_node(child)
+    _add_parent_edge(rt.graph, mgr_id, child.id)
+    return rt, mgr_id, child
+
+
+class TestReviseWorkerNode:
+
+    def test_revise_legal_completed_to_waiting(self, tmp_path):
+        rt, mgr_id, child = _completed_worker_under_root(tmp_path)
+        status_events = []
+        rt.event_bus.subscribe("node_status_changed", status_events.append)
+
+        rt.revise_worker_node(child.id, "Add pagination", config={"num_ccs": 3})
+
+        node = rt.graph.get_node(child.id)
+        assert node.status == NodeStatus.WAITING
+        # 与 manager revise 一致：经 reactivate(emit_notification=True) 发布 Waiting
+        assert any(
+            e.payload.get("node_id") == child.id
+            and e.payload.get("status") == "Waiting"
+            for e in status_events
+        ), f"revise_worker_node 应发布 node_status_changed(Waiting); events={[e.payload for e in status_events]}"
+        assert node.pending_revise is True
+        assert node.task == "Add pagination"
+        assert node.config["num_ccs"] == 3
+        assert node.activation_count == 1  # 复用即一次新的激活
+        assert node.iteration_count == 0
+        assert node.manager_phase is None
+        assert node.pending_routing is None
+        assert node.error is None
+        pc = node.pending_context or {}
+        assert pc["collaboration_type"] == "revise"
+        assert pc["incremental_task"] == "Add pagination"
+        assert pc["activated_by"] == mgr_id
+        assert pc["prior_artifacts"] == []
+
+    def test_revise_accepts_failed_stopped_paused(self, tmp_path):
+        for status in (NodeStatus.FAILED, NodeStatus.STOPPED, NodeStatus.PAUSED):
+            rt, _, child = _completed_worker_under_root(tmp_path, status=status)
+            rt.revise_worker_node(child.id, "again")
+            node = rt.graph.get_node(child.id)
+            assert node.status == NodeStatus.WAITING
+            assert node.pending_revise is True
+
+    def test_revise_illegal_non_worker(self, tmp_path):
+        rt = _make_runtime(tmp_path)
+        mgr_id = rt.submit_root_manager(task="Build", role="default")
+        rt.graph.update_node(mgr_id, status=NodeStatus.COMPLETED)
+        with pytest.raises(ValueError, match="expected 'worker'"):
+            rt.revise_worker_node(mgr_id, "x")
+
+    def test_revise_illegal_statuses(self, tmp_path):
+        for status in (NodeStatus.RUNNING, NodeStatus.READY, NodeStatus.WAITING):
+            rt, _, child = _completed_worker_under_root(tmp_path, status=status)
+            with pytest.raises(ValueError, match="expected COMPLETED"):
+                rt.revise_worker_node(child.id, "x")
+
+    def test_revise_task_too_long(self, tmp_path):
+        rt, _, child = _completed_worker_under_root(tmp_path)
+        with pytest.raises(ValueError, match="maximum length"):
+            rt.revise_worker_node(child.id, "x" * 5001)
+
+    def test_revise_config_non_whitelisted(self, tmp_path):
+        rt, _, child = _completed_worker_under_root(tmp_path)
+        with pytest.raises(ValueError, match="non-whitelisted"):
+            rt.revise_worker_node(child.id, "x", config={"bad_key": 1})
+
+    def test_revise_preserves_resumed_session(self, tmp_path):
+        """role/AICU-config/workspace 未变 → 保留 _aicu_cache（--resume 续接原会话）。"""
+        rt, _, child = _completed_worker_under_root(tmp_path)
+        sentinel = object()
+        with Worker._aicu_cache_lock:
+            Worker._aicu_cache[child.id] = sentinel
+        try:
+            rt.revise_worker_node(child.id, "incremental")
+            with Worker._aicu_cache_lock:
+                assert Worker._aicu_cache.get(child.id) is sentinel
+        finally:
+            with Worker._aicu_cache_lock:
+                Worker._aicu_cache.pop(child.id, None)
+
+    def test_revise_fresh_session_on_aicu_config_change(self, tmp_path):
+        """用户覆盖 model 等 AICU-config → 弹缓存新建会话（不能 resume 旧认知）。"""
+        rt, _, child = _completed_worker_under_root(
+            tmp_path, worker_config={"model": "gpt-5.6-luna"}
+        )
+        sentinel = object()
+        with Worker._aicu_cache_lock:
+            Worker._aicu_cache[child.id] = sentinel
+        try:
+            rt.revise_worker_node(child.id, "incremental", config={"model": "Qwen3"})
+            with Worker._aicu_cache_lock:
+                assert Worker._aicu_cache.get(child.id) is None
+        finally:
+            with Worker._aicu_cache_lock:
+                Worker._aicu_cache.pop(child.id, None)
+
+    def test_revise_fresh_session_on_workspace_missing(self, tmp_path):
+        """原工作区目录已不存在 → 弹缓存新建会话（resume 无地基）。"""
+        rt, _, child = _completed_worker_under_root(
+            tmp_path, relpath="nodes/root/children/ghost_ws"
+        )
+        sentinel = object()
+        with Worker._aicu_cache_lock:
+            Worker._aicu_cache[child.id] = sentinel
+        try:
+            rt.revise_worker_node(child.id, "incremental")
+            with Worker._aicu_cache_lock:
+                assert Worker._aicu_cache.get(child.id) is None
+        finally:
+            with Worker._aicu_cache_lock:
+                Worker._aicu_cache.pop(child.id, None)
+
+    def test_revise_rewinds_parent_chain(self, tmp_path):
+        """父 Manager 回到 WAITING + 清通知：revise 后的 Worker 再次完成可重新触发评审。"""
+        rt, mgr_id, child = _completed_worker_under_root(tmp_path)
+        rt.scheduler._notified_managers.add(mgr_id)
+        assert mgr_id in rt.scheduler._notified_managers
+
+        rt.revise_worker_node(child.id, "incremental")
+
+        parent = rt.graph.get_node(mgr_id)
+        assert parent.status == NodeStatus.WAITING
+        assert parent.manager_phase == "waiting"
+        assert parent.pending_revise is False
+        assert mgr_id not in rt.scheduler._notified_managers
+
+
+class TestReviseNodeDispatcher:
+
+    def test_revise_node_dispatches_worker(self, tmp_path):
+        rt, _, child = _completed_worker_under_root(tmp_path)
+
+        rt.revise_node(child.id, "worker incremental")
+
+        node = rt.graph.get_node(child.id)
+        assert node.status == NodeStatus.WAITING
+        assert node.pending_revise is True
+        assert node.manager_phase is None  # worker 语义
+        assert node.task == "worker incremental"
+
+    def test_revise_node_dispatches_manager(self, tmp_path):
+        rt = _make_runtime(tmp_path)
+        mgr_id = rt.submit_root_manager(task="Build", role="default")
+        rt.graph.update_node(mgr_id, status=NodeStatus.COMPLETED)
+
+        rt.revise_node(mgr_id, "manager incremental")
+
+        node = rt.graph.get_node(mgr_id)
+        assert node.status == NodeStatus.WAITING
+        assert node.pending_revise is True
+        assert node.manager_phase == "expand"  # manager 语义
+        assert node.task == "manager incremental"
+
+
+# ============================================================================
 # Test 4: _prevalidate_reuse
 # ============================================================================
 
@@ -377,18 +554,9 @@ class TestTranslateRevision:
 class TestReactivateReusedWorker:
 
     def _harness(self, tmp_path, relpath=None, role="dev"):
-        rt = _make_runtime(tmp_path)
-        mgr_id = rt.submit_root_manager(task="Build", role="default")
-        rt.graph.update_node(mgr_id, status=NodeStatus.COMPLETED)
-        rel = relpath or "nodes/root/children/W1"
-        ws = os.path.join(str(tmp_path), rel)
-        if relpath is None:
-            os.makedirs(ws, exist_ok=True)  # 默认工作区存在 → resume 有地基
-        child = _worker_node("W1", mgr_id, role=role, status=NodeStatus.COMPLETED,
-                             config={"_workspace_root": str(tmp_path), "_workspace_relpath": rel})
-        rt.graph.add_node(child)
-        _add_parent_edge(rt.graph, mgr_id, child.id)
-        return rt, mgr_id, child
+        # 与模块级 _completed_worker_under_root 完全同构（默认工作区存在 → resume 有地基），
+        # 直接复用避免重复建图。
+        return _completed_worker_under_root(tmp_path, relpath=relpath, role=role)
 
     def test_session_reuse_default_when_unchanged(self, tmp_path):
         rt, mgr_id, child = self._harness(tmp_path)
@@ -902,6 +1070,71 @@ class TestReviseEndpoint:
             f"/v1/sessions/{sid}/nodes/{root_id}/restart", json={}
         )
         assert gone.status_code in (404, 405)
+
+    def test_revise_endpoint_worker_ok(self, session_manager, session_client):
+        """已完成 Worker 子节点经 /revise 正常进入增量续跑（不再 409 expected 'manager'）。"""
+        import time
+
+        resp = session_client.post("/v1/sessions", json={"task": "Build feature"})
+        assert resp.status_code == 201, resp.text
+        sid = resp.json()["id"]
+        root = session_client.post(
+            f"/v1/sessions/{sid}/nodes",
+            json={"task": "t", "exec_type": "manager"},
+        )
+        assert root.status_code == 201, root.text
+        root_id = root.json()["id"]
+
+        handle = session_manager.get_session(sid)
+        rt = handle.runtime
+
+        def _wait_completed(node_id: str) -> None:
+            deadline = 5.0
+            t0 = time.time()
+            while time.time() - t0 < deadline:
+                if rt.graph.get_node(node_id).status == NodeStatus.COMPLETED:
+                    return
+                time.sleep(0.02)
+            raise AssertionError(f"node {node_id} did not complete")
+
+        _wait_completed(root_id)
+
+        # 在根 Manager 下建 Worker 子节点并等待其自动完成
+        worker = session_client.post(
+            f"/v1/sessions/{sid}/nodes",
+            json={"task": "w", "exec_type": "worker", "parent_id": root_id},
+        )
+        assert worker.status_code == 201, worker.text
+        worker_id = worker.json()["id"]
+        _wait_completed(worker_id)
+
+        # 停掉后台 tick，确保后续状态断言确定
+        rt.scheduler.stop()
+        start_calls: list[None] = []
+
+        def unexpected_start() -> None:
+            start_calls.append(None)
+
+        rt.scheduler.start = unexpected_start  # type: ignore[method-assign]
+
+        ok = session_client.post(
+            f"/v1/sessions/{sid}/nodes/{worker_id}/revise",
+            json={"task": "Add pagination"},
+        )
+        assert ok.status_code == 200, ok.text
+        assert ok.json()["status"] == "revising"
+        node = rt.graph.get_node(worker_id)
+        assert node.status == NodeStatus.WAITING
+        assert node.pending_revise is True
+        assert node.manager_phase is None
+        assert node.task == "Add pagination"
+
+        # 第二次 revise：当前 WAITING（非终态）→ 409
+        again = session_client.post(
+            f"/v1/sessions/{sid}/nodes/{worker_id}/revise",
+            json={"task": "More"},
+        )
+        assert again.status_code == 409
 
 
 # ============================================================================

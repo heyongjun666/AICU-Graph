@@ -48,6 +48,16 @@ logger = logging.getLogger(__name__)
 # 审查守卫 `iteration_count + 1 < max_iterations` 恒 False → 立即再次 FAILED。
 MANUAL_CONTINUE_BUDGET = 3
 
+# 节点级 Revise（Manager/Worker 共用）的公共校验常量。
+_REVISE_MAX_TASK_LENGTH = 5000
+_REVISE_ALLOWED_CONFIG = {"num_ccs", "model", "skills", "audit_rounds", "max_iterations"}
+_REVISABLE_STATUSES = (
+    NodeStatus.COMPLETED,
+    NodeStatus.FAILED,
+    NodeStatus.STOPPED,
+    NodeStatus.PAUSED,
+)
+
 
 def _json_safe_payload(value: Any) -> Any:
     """将事件负载递归归一为 JSON 可序列化形式（D6 契约：payload 必须可序列化）。
@@ -1387,6 +1397,50 @@ class Runtime(RuntimeGateway, SchedulerDelegate):
             self.scheduler.start()
         return node_id
 
+    def _validate_revise_request(
+        self,
+        node_id: str,
+        task: str,
+        config: Optional[dict],
+        expected_exec_type: str,
+    ) -> tuple[Node, dict]:
+        """校验节点级 Revise 的公共入参，返回 (node, merged_config)。
+
+        Manager/Worker 共用（revise_manager_node / revise_worker_node）：
+        task 长度上限、config 白名单、节点存在性、exec_type、
+        可增量状态（COMPLETED/FAILED/STOPPED/PAUSED）。
+
+        注意：须在调用方持有 self._lock 的上下文中调用，与既有
+        revise_manager_node 的加锁范围保持一致。
+        """
+        if len(task) > _REVISE_MAX_TASK_LENGTH:
+            raise ValueError(
+                f"Task exceeds maximum length of {_REVISE_MAX_TASK_LENGTH} "
+                f"characters (got {len(task)})"
+            )
+        extra = {k for k in (config or {}) if k not in _REVISE_ALLOWED_CONFIG}
+        if extra:
+            raise ValueError(
+                f"Config contains non-whitelisted fields: {sorted(extra)}. "
+                f"Allowed: {sorted(_REVISE_ALLOWED_CONFIG)}"
+            )
+        node = self.graph.get_node(node_id)
+        if node is None:
+            raise ValueError(f"Node '{node_id}' not found")
+        if node.exec_type != expected_exec_type:
+            raise ValueError(
+                f"Cannot revise node '{node_id}': "
+                f"exec_type is '{node.exec_type}', "
+                f"expected '{expected_exec_type}'"
+            )
+        if node.status not in _REVISABLE_STATUSES:
+            raise ValueError(
+                f"Cannot revise node '{node_id}': "
+                f"current status is {node.status.value}, "
+                f"expected COMPLETED / FAILED / STOPPED / PAUSED"
+            )
+        return node, {**(node.config or {}), **(config or {})}
+
     def revise_manager_node(
         self, node_id: str, task: str, config: Optional[dict] = None
     ) -> str:
@@ -1407,39 +1461,10 @@ class Runtime(RuntimeGateway, SchedulerDelegate):
         Raises:
             ValueError: 节点不存在 / 非 manager / 不处于可增量状态 / 输入超限。
         """
-        if len(task) > 5000:
-            raise ValueError(
-                f"Task exceeds maximum length of 5000 characters (got {len(task)})"
-            )
-        allowed_config = {"num_ccs", "model", "skills", "audit_rounds", "max_iterations"}
-        extra = {k for k in (config or {}) if k not in allowed_config}
-        if extra:
-            raise ValueError(
-                f"Config contains non-whitelisted fields: {sorted(extra)}. "
-                f"Allowed: {sorted(allowed_config)}"
-            )
-
         with self._lock:
-            node = self.graph.get_node(node_id)
-            if node is None:
-                raise ValueError(f"Node '{node_id}' not found")
-            if node.exec_type != "manager":
-                raise ValueError(
-                    f"Cannot revise node '{node_id}': "
-                    f"exec_type is '{node.exec_type}', expected 'manager'"
-                )
-            if node.status not in (
-                NodeStatus.COMPLETED,
-                NodeStatus.FAILED,
-                NodeStatus.STOPPED,
-                NodeStatus.PAUSED,
-            ):
-                raise ValueError(
-                    f"Cannot revise node '{node_id}': "
-                    f"current status is {node.status.value}, "
-                    f"expected COMPLETED / FAILED / STOPPED / PAUSED"
-                )
-            merged_config = {**(node.config or {}), **(config or {})}
+            node, merged_config = self._validate_revise_request(
+                node_id, task, config, "manager"
+            )
             pending_context = {
                 "collaboration_type": "revise",
                 "original_task": node.task,
@@ -1474,6 +1499,86 @@ class Runtime(RuntimeGateway, SchedulerDelegate):
             node_id,
         )
         return node_id
+
+    def revise_worker_node(
+        self, node_id: str, task: str, config: Optional[dict] = None
+    ) -> str:
+        """增量续跑已完成 Worker 节点（Revise，保留产物/原 CC Agent 会话）。
+
+        与 revise_manager_node 对应：已完成 Worker 从终态转为 WAITING +
+        pending_revise=True，复用既有增量机制 _reactivate_reused_worker，
+        Worker.run 通过 --resume 续接原 CC 会话，在 prior_artifacts 基础上
+        按新增量任务继续产出（role/AICU-config/workspace 变更时自动降级为
+        新建会话）。同时回退父 Manager 链，使 revise 后的 Worker 再次完成时
+        能重新触发父 Manager 评审。
+
+        Args:
+            node_id: 目标 Worker 节点 ID。
+            task: 增量任务描述。
+            config: 配置覆盖项。
+
+        Returns:
+            原节点 ID。
+
+        Raises:
+            ValueError: 节点不存在 / 非 worker / 不处于可增量状态 / 输入超限。
+        """
+        with self._lock:
+            node, merged_config = self._validate_revise_request(
+                node_id, task, config, "worker"
+            )
+            # 合成增量 Step：复用原节点 role/exec_type，task 为新的增量任务。
+            # 与 Manager Revise 复用子节点走同一路径（_reactivate_reused_worker），
+            # 保证直接 Worker Revise 与父 Manager 增量复用语义完全一致。
+            incremental_step = Step(
+                step_id=node.id,
+                exec_type="worker",
+                role=node.role,
+                task=task,
+            )
+            prepared_config = self._prepare_node_config(
+                node.id, merged_config, node.parent_id
+            )
+            self._reactivate_reused_worker(node, incremental_step, prepared_config)
+            # 清理残留终态簿记（镜像 continue_node / revise_manager_node）
+            self.graph.update_node(
+                node_id, error=None, started_at=None, finished_at=None
+            )
+            # 回退父 Manager 链：让父节点在 revise 后的 Worker 再次完成时重新评审
+            self.planner.rewind_parent_chain_for_retry(
+                node.parent_id, self.scheduler.clear_manager_notification,
+            )
+            self.scheduler.start()
+        logger.info(
+            "Worker '%s' revised: COMPLETED/terminal → WAITING with "
+            "incremental task (pending_revise=True, session resumed)",
+            node_id,
+        )
+        return node_id
+
+    def revise_node(
+        self, node_id: str, task: str, config: Optional[dict] = None
+    ) -> str:
+        """按节点类型分发节点级 Revise（Manager → revise_manager_node，Worker → revise_worker_node）。
+
+        Args:
+            node_id: 目标节点 ID。
+            task: 增量任务描述。
+            config: 配置覆盖项。
+
+        Returns:
+            原节点 ID。
+
+        Raises:
+            ValueError: 节点不存在，或其余校验失败（见各类型实现）。
+        """
+        # exec_type 在节点创建后不可变，可在不加锁下读取以决定分发；
+        # 实际变更逻辑由各类型实现内部自持 _lock（_lock 非可重入）。
+        # 节点不存在时落到 revise_worker_node，由公共校验抛出 "Node not found"。
+        node = self.graph.get_node(node_id)
+        if node is not None and node.exec_type == "manager":
+            return self.revise_manager_node(node_id, task, config)
+        return self.revise_worker_node(node_id, task, config)
 
     # ========================================================================
     # 全局控制

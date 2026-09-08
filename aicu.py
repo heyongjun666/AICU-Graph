@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Callable, Optional, Dict, List, Tuple
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-from claude_code_agent import ClaudeCodeAgent, CCExecutionError
+from claude_code_agent import ClaudeCodeAgent, CCExecutionError, ModelImageInputError
 
 
 # sentinel for "调用方未传此参数"，与 None（可能是有效值，如 output_file=null）区分
@@ -50,6 +50,27 @@ G. 共享工作区 — 所有节点自动挂载同一 Session Shared Workspace; 
 H. 输出纯 JSON ExecutionPlan.
 
 你绝不亲自执行具体任务, 只负责产出结构正确的执行组织树."""
+
+
+# ========== 通用验收原则（领域无关，注入生产/评审 prompt） ==========
+# 背景：多个 CC 反复质检 + Manager review 仍可能放行有缺陷的产出（自证式审查闭环：
+# 生产与评审共享同一套"看起来对"的信念，异常被各自解释掉）。
+# 通用兜底三原则：① 生产方对着真实结果验收；② 异常信号先当产物缺陷追；③ 评审方
+# 独立运行验证、不做纯静态复查。文案刻意使用通用措辞，不绑定任何具体领域。
+#
+# 注入层级（按调用链分层，避免重复/错位）：
+#   - 生产侧原则（①+②）→ worker.py `_build_worker_context` / `_build_resume_task_body`
+#     （worker 专属，Manager 走自己的 expand/review prompt，不受此原则影响）
+#   - 评审侧原则（②+③）→ 本文件 `_solo_review` / `_pair_review` /
+#     `_triple_review_only` / `_full_audit`（worker CC 的评审/审计位）
+#   - Manager 评审 → executables/manager.py `_build_review_prompt`（双语独立运行验收）
+_ACCEPTANCE_PRINCIPLES_REVIEWER = (
+    "## 评审原则（评审必读）\n"
+    "1. **独立验证，不要只做静态复查**：凡是能运行、能演示、能观察的产出，必须实际运行/演示/观察它的"
+    "真实表现后再判定是否通过；不能因为「代码看起来对」或「数值上说得通」就放行。\n"
+    "2. **异常信号先当产物缺陷上报**：运行或检查中出现的任何异常，一律先当作产物缺陷记录并上报"
+    "（high/medium），不要替生产方解释成「测试写错了」「环境问题」而忽略。"
+)
 
 
 class AICU:
@@ -561,6 +582,14 @@ class AICU:
 
     CC_MAX_RETRIES = 2  # 遇到 error_during_execution 时最多重试次数
 
+    # 模型不支持图片输入时的恢复指令：同会话 --resume 续接后，让 CC 跳过图片继续任务。
+    _IMAGE_INPUT_RECOVERY_PROMPT = (
+        "注意：上一步你读取了一张图片，但当前模型不支持图片输入，API 返回 400 失败，"
+        "对话被中断。请忽略所有图片/截图内容，不要再读取任何图片文件"
+        "（.png/.jpg/.jpeg/.gif/.webp/.bmp）。请基于已掌握的文本信息，改用"
+        "DOM/计算样式断言等不依赖视觉的方式，继续完成你被分配的任务。"
+    )
+
     def _emit_cc_activity(self, cc: ClaudeCodeAgent, status: str, prompt: str = "", event: str = "") -> None:
         if not self.output_callback:
             return
@@ -594,6 +623,33 @@ class AICU:
                 response = cc.chat(prompt, max_turns=max_turns, timeout=timeout)
                 self._emit_cc_activity(cc, "completed", prompt, "finished")
                 return response
+            except ModelImageInputError as e:
+                # 模型不支持图片输入（读图触发 400 api_error）：模型能力限制而非
+                # 会话损坏。claude_code_agent 已尽力保留 conversation_id：
+                #   - 会话可续接 → 同会话 --resume 续接，给『跳过图片』恢复指令重试；
+                #   - 会话不可续接 → 重置后带『禁读图』说明重试原任务。
+                if attempt <= self.CC_MAX_RETRIES:
+                    import time
+                    print(
+                        f"[AICU] CC 读取图片触发模型图片输入限制，第 {attempt} 次重试"
+                        f" (共 {self.CC_MAX_RETRIES} 次): {e}"
+                    )
+                    time.sleep(5 * attempt)  # 递增等待: 5s, 10s, ...
+                    if cc.conversation_id:
+                        prompt = self._IMAGE_INPUT_RECOVERY_PROMPT
+                    else:
+                        cc.reset_conversation()
+                        prompt = (
+                            prompt
+                            + "\n\n---\n\n[注意] 上一步你尝试读取图片导致 API 报错："
+                            "当前模型不支持图片输入。请忽略所有图片/截图内容，"
+                            "不要再读取任何图片文件（.png/.jpg/.jpeg/.gif/.webp/.bmp），"
+                            "改用文本、DOM/计算样式断言等不依赖视觉的方式继续完成任务。"
+                        )
+                else:
+                    print(f"[AICU] CC 图片输入限制重试 {self.CC_MAX_RETRIES} 次后仍然失败，放弃")
+                    self._emit_cc_activity(cc, "failed", prompt, "image_input_error")
+                    raise
             except CCExecutionError as e:
                 if attempt <= self.CC_MAX_RETRIES:
                     print(f"[AICU] CC 遇到 error_during_execution，第 {attempt} 次重试 (共 {self.CC_MAX_RETRIES} 次): {e}")
@@ -1039,6 +1095,7 @@ class AICU:
             f"你是一个{self.adversarial_role or '严格的审查专家'}。请审查你刚刚编写的方案。\n\n"
             f"原始问题: {question}\n\n"
             f"{read_instruction}\n\n"
+            f"{_ACCEPTANCE_PRINCIPLES_REVIEWER}\n\n"
             f"按以下检查清单逐项审查:\n"
             f"{checklist_text}\n\n"
             f"严格按以下 JSON 格式返回，不要加任何其他文字:\n"
@@ -1128,6 +1185,7 @@ class AICU:
             f"你是一个{self.adversarial_role}。\n\n"
             f"原始问题: {question}\n\n"
             f"{read_instruction}\n\n"
+            f"{_ACCEPTANCE_PRINCIPLES_REVIEWER}\n\n"
             f"按以下检查清单逐项审查:\n"
             f"{checklist_text}\n\n"
             f"严格按以下 JSON 格式返回，不要加任何其他文字:\n"
@@ -1317,6 +1375,7 @@ class AICU:
             f"你是一个{self.adversarial_role}，请复查修订后的方案。\n\n"
             f"原始问题: {question}\n\n"
             f"{read_instruction}\n\n"
+            f"{_ACCEPTANCE_PRINCIPLES_REVIEWER}\n\n"
             f"按以下清单审查:\n{checklist_text}\n\n"
             f'返回 JSON: {{"approved": true/false, "defects": ['
             f'{{"check": "检查项", "description": "缺陷描述", "severity": "high/medium/low"}}], '
@@ -1443,6 +1502,7 @@ class AICU:
             f"你是一个{self.audit_role}，专门寻找方案中的漏洞、风险和遗漏。\n\n"
             f"原始问题: {question}\n\n"
             f"{read_instruction}\n\n"
+            f"{_ACCEPTANCE_PRINCIPLES_REVIEWER}\n\n"
             f"按以下角度深入审查:\n"
             f"{checklist_text}\n"
             f"{angles_text}\n\n"

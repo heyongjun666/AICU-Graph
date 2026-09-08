@@ -1,3 +1,4 @@
+import json
 import subprocess
 import os
 import signal
@@ -12,6 +13,24 @@ from runtime.credentials import resolve_sk_for_model
 class CCExecutionError(RuntimeError):
     """Claude Code CLI 返回 error_during_execution 时的专用异常"""
     pass
+
+
+class ModelImageInputError(CCExecutionError):
+    """模型不支持图片输入（读图触发 400 api_error）—— 模型能力限制而非会话损坏。
+
+    与 CCExecutionError 的差异：触发时 conversation_id 应被尽力保留，
+    供上层通过 --resume 续接同一会话并给出『跳过图片』指令后重试。
+    """
+    pass
+
+
+# 模型不支持图片输入的 CLI 失败签名（如读截图做视觉验收触发 400）。
+_MODEL_IMAGE_INPUT_ERROR_SIGNATURES = ("support image input",)
+
+
+def is_model_image_input_error(text: str) -> bool:
+    """判断 CLI 失败信息是否为『模型不支持图片输入』（读图喂给模型时报 400）。"""
+    return any(sig in text for sig in _MODEL_IMAGE_INPUT_ERROR_SIGNATURES)
 
 
 def detect_cli() -> str:
@@ -163,6 +182,43 @@ class ClaudeCodeAgent:
         """Claude Code 结果解析（归一化；保留 staticmethod 兼容外部调用）。"""
         return get_adapter("claude").parse_result(raw)
 
+    @staticmethod
+    def _extract_session_id_from_output(stdout: str) -> Optional[str]:
+        """从 CLI 输出中尽力提取会话 ID。
+
+        失败运行（如读图 400 api_error）的 result 事件通常不含 session_id，
+        但 stream-json 的 system/init、user 等事件行可能携带；逐行扫描兜底，
+        取第一个非空会话 ID。
+        """
+        if not stdout:
+            return None
+        normalized = ClaudeCodeAgent._parse_result_output(stdout)
+        if normalized and normalized.get("session_id"):
+            return normalized["session_id"]
+        for line in stdout.splitlines():
+            try:
+                value = json.loads(line)
+            except (json.JSONDecodeError, TypeError):
+                continue
+            if not isinstance(value, dict):
+                continue
+            for key in ("session_id", "sessionId", "conversation_id"):
+                sid = value.get(key)
+                if isinstance(sid, str) and sid:
+                    return sid
+        return None
+
+    def _preserve_image_error_conversation(self, candidate: Optional[str]) -> None:
+        """图片输入错误时尽力保留会话 ID，供上层 --resume 续接同一会话。
+
+        续接调用（pause/resume，_preserve_conversation 已置位）时保留既有
+        conversation_id（本次失败的就是该会话）；首次调用则用 candidate
+        （从失败 stdout 提取的会话 ID）兜底。candidate 为空时保持现状，
+        由上层决定降级为带『禁读图』指令的全新会话。
+        """
+        if not self._preserve_conversation.is_set():
+            self.conversation_id = candidate or self.conversation_id
+
     def _build_process_env(self) -> dict[str, str]:
         """Build child-process configuration without exposing credential values."""
         env = self.adapter.build_env(
@@ -245,10 +301,6 @@ class ClaudeCodeAgent:
             self._last_process_pid = None
 
         if proc.returncode != 0:
-            # 重置对话上下文，避免续接到损坏的会话
-            # （pause 场景通过 _preserve_conversation 阻止重置）
-            if not self._preserve_conversation.is_set():
-                self.conversation_id = None
             stdout_tail = (stdout or "").strip()
             stderr_tail = (stderr or "").strip()
             detail_parts = [f"returncode={proc.returncode}"]
@@ -260,6 +312,19 @@ class ClaudeCodeAgent:
                 detail_parts.append(f"stderr={stderr_preview}")
             detail = "; ".join(detail_parts)
             print(f"[CC] 执行出错: {detail}")
+            # 模型不支持图片输入（读图触发 400）：模型能力限制而非会话损坏。
+            # 尽力保留会话 ID 供上层 --resume 续接同一对话；提取不到则重置，
+            # 由上层退化为带『禁读图』指令的全新会话重试。
+            if is_model_image_input_error(detail):
+                # 图片输入限制：保留会话 ID 供上层 --resume 续接（见 helper 语义）
+                self._preserve_image_error_conversation(
+                    self._extract_session_id_from_output(stdout or "")
+                )
+                raise ModelImageInputError(f"{self.cli_name} 执行失败 ({detail})")
+            # 重置对话上下文，避免续接到损坏的会话
+            # （pause 场景通过 _preserve_conversation 阻止重置）
+            if not self._preserve_conversation.is_set():
+                self.conversation_id = None
             raise RuntimeError(f"{self.cli_name} 执行失败 ({detail})")
 
         result_stdout = stdout
@@ -275,6 +340,13 @@ class ClaudeCodeAgent:
                 errors = [errors]
             error_msg = "; ".join(errors) if errors else "未知内部错误"
             print(f"[CC] error_during_execution: {error_msg}")
+            # 防御性分支：若图片输入限制以 error_during_execution 形式出现，
+            # 同样保留会话 ID 供上层续接（实测该场景走 returncode!=0 路径）。
+            if is_model_image_input_error(error_msg):
+                # 防御性分支：图片输入限制以 error_during_execution 形式出现时
+                # 同样保留会话 ID 供上层续接（实测该场景走 returncode!=0 路径）。
+                self._preserve_image_error_conversation(output.get("session_id"))
+                raise ModelImageInputError(f"{self.cli_name} 内部执行错误: {error_msg}")
             # 重置对话上下文，避免续接已损坏的会话
             self.conversation_id = None
             raise CCExecutionError(f"{self.cli_name} 内部执行错误: {error_msg}")

@@ -1883,6 +1883,17 @@ class Manager(Executable):
                 "\"unconfirmed\" and state so in that child's assessment reason; do not read the entire shared "
                 "workspace.",
             ),
+            _L(
+                ctx,
+                "**独立运行验收**：当关键产物可以运行/演示/观察（如可执行脚本、可启动程序、可渲染页面）时，"
+                "实际运行或观察它的真实表现后再判定通过；不要只凭静态描述或“看起来对”就放行。"
+                "若运行或检查中出现异常信号，必须先当作产物缺陷复核，再决定是否判过。",
+                "**Independent runtime acceptance**: when a key deliverable is runnable/observable "
+                "(e.g. an executable script, launchable program, or renderable page), run or observe its "
+                "actual behavior before passing it; do not pass based only on static description or "
+                "\"it looks fine\". If any anomaly appears during run or inspection, treat it as a "
+                "potential product defect and re-verify before deciding to pass.",
+            ),
             "",
             "Evaluate each child's output against its task description.",
             "For each child, determine whether the output meets the requirements.",

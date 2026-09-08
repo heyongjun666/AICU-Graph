@@ -400,6 +400,49 @@ class TestRealMode:
         assert isinstance(error, ErrorObject)
         assert aicu.call_count == 1
 
+    def test_image_input_error_fails_honestly(self):
+        """『模型不支持图片输入』报错不再被跳过：重试耗尽后如实标记 FAILED + ErrorObject。
+
+        跳过逻辑已移除：图片输入失败属于执行失败，与普通错误一致落到 FAILED，
+        不再静默标记 COMPLETED 掩盖缺失的产出。
+        """
+        runtime = MockRuntimeGateway()
+
+        class ImageErrorAICU(MockAICU):
+            def ask(self, question: str, max_rounds: int = 3) -> dict:
+                self.call_count += 1
+                self.last_question = question
+                raise RuntimeError(
+                    "internal 执行失败 (returncode=1; stdout_tail=... "
+                    "API Error: 400 Model do not support image input. Request id: ... ; stderr=...)"
+                )
+
+        aicu = ImageErrorAICU()
+        ctx = _make_context(runtime=runtime)
+        worker = Worker(ctx, aicu_instance=aicu)
+        result = worker.run(ctx)
+
+        assert result == NodeStatus.FAILED
+        _, status, updates = runtime.status_updates[-1]
+        assert status == NodeStatus.FAILED
+        assert isinstance(updates.get("error"), ErrorObject)
+        # 真实失败细节（含图片输入签名）保留在日志中，未再被静默吞掉
+        log = updates.get("log") or []
+        assert log and log[0].level == LogLevel.ERROR
+        assert "support image input" in log[0].message
+
+    def test_real_mode_non_image_error_not_swallowed(self):
+        """非图片输入错误不被跳过逻辑吞掉，仍标记 FAILED + ErrorObject"""
+        runtime = MockRuntimeGateway()
+        aicu = MockAICU(fail=True)  # raises "AICU execution error: mock failure"
+        ctx = _make_context(runtime=runtime)
+        worker = Worker(ctx, aicu_instance=aicu)
+        result = worker.run(ctx)
+        assert result == NodeStatus.FAILED
+        _, status, updates = runtime.status_updates[-1]
+        assert status == NodeStatus.FAILED
+        assert isinstance(updates.get("error"), ErrorObject)
+
     def test_real_mode_with_config(self):
         """真实模式可通过 ctx.config 传递 mode"""
         runtime = MockRuntimeGateway()
@@ -742,8 +785,11 @@ class TestRoutingPromptDomainNeutral:
         text = Worker._build_event_publish_instructions(node)
         assert "不要指定目标" in text
         assert '"objective"' in text
-        assert "只有确实需要其他节点进行协作" in text
-        assert "任务完成、验证成功、产物已生成" in text
+        assert "事件只用来表达依赖关系覆盖不到的协作" in text
+        assert "跨链影响" in text
+        assert "需要对方行动" in text
+        assert "依赖图会自动推进" in text
+        assert "都不命中" in text
         # 不再出现 target/type/payload 反馈契约
         assert "带 target 的事件" not in text
         assert "payload.feedback" not in text

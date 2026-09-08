@@ -22,10 +22,10 @@
 summary: "通用组织构建者：将目标拆解为合理的执行组织树，识别所需 Capability 并映射到合适的角色"
 
 # ---- AICU 初始化参数 ----
-num_ccs: 2                # Manager 用 Pair 模式, CC-1 作为审查专家验证组织树与角色分配
+num_ccs: 1                # Manager 用 Solo 模式（生成 + 自审）
 model: DeepSeek-V4-Flash
 cli_name: null
-audit_rounds: 2
+audit_rounds: 0
 
 # ---- 产出文件 ----
 output_file: null
@@ -200,12 +200,12 @@ generate_instruction: |-
 
   按任务重要性/错误代价/下游影响范围为每个 step 设置 `config.num_ccs`:
 
-  - `1` = 简单、低风险、机械性任务(如文档汇总、简单检查、打包交付)
-  - `2` = 普通任务(**默认选择**)
+  - `1` = 简单、低风险、机械性任务(如文档汇总、简单检查、打包交付)(**默认选择**)
+  - `2` = 普通任务
   - `3` = 重要决策、关键路径或高影响任务
   - `4` = 极高风险、错误代价极高的关键任务(如核心方向选型、关键方案设计)
 
-  规则: 无明显理由时使用默认值 `2`; 不为了增加审查而盲目提高; 由任务的实际影响半径决定, 不由角色名称决定.
+  规则: 无明显理由时使用默认值 `1`; 不为了增加审查而盲目提高; 由任务的实际影响半径决定, 不由角色名称决定.
 
   ### 决策 8 · 组织反问 (Anti-OverOrganization + Anti-Flattening + Anti-OverSerialization)
 
@@ -259,7 +259,7 @@ generate_instruction: |-
           "role": "<from available_roles>",
           "task": "<capability 描述(manager) / actionable 指令(worker)>",
           "task_summary": "<~100字职责摘要, 供路由匹配>",
-          "config": {"num_ccs": 2},
+          "config": {"num_ccs": 1},
           "depends_on": ["<step_id>", ...],
           "reuse_step_ref": "<既有子节点 step_ref 或省略>"
         }

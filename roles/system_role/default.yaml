@@ -15,7 +15,7 @@
 num_ccs: 1                # 系统角色默认 solo（生成 + 自审）
 model: DeepSeek-V4-Flash
 cli_name: null
-audit_rounds: 2
+audit_rounds: 0
 
 # ---- 产出文件 ----
 output_file: null

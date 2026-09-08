@@ -39,8 +39,8 @@ model: DeepSeek-V4-Flash
 # cli_name: CLI 名称；null 表示使用系统默认 CLI
 cli_name: null
 
-# audit_rounds: 对抗审查最大轮数
-audit_rounds: 2
+# audit_rounds: 对抗审查最大轮数（0 = 跳过审计）
+audit_rounds: 0
 
 # skills_dir: skill 源目录（绝对路径，支持 ~ 表示家目录）。
 #   - skills 列表中的 skill 名称会从此目录下查找子目录

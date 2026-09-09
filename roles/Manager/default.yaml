@@ -22,10 +22,10 @@
 summary: "通用组织构建者：将目标拆解为合理的执行组织树，识别所需 Capability 并映射到合适的角色"
 
 # ---- AICU 初始化参数 ----
-num_ccs: 1                # Manager 用 Solo 模式（生成 + 自审）
-model: DeepSeek-V4-Flash
+num_ccs: 2                # Manager 用 Pair 模式（生成 + 独立审查），计划质量是全局杠杆
+# model: 默认跟随系统设置（解析：节点显式 > 角色显式 > 系统设置 > CLI 默认，无代码兜底）
 cli_name: null
-audit_rounds: 0
+audit_rounds: 2
 
 # ---- 产出文件 ----
 output_file: null
@@ -110,6 +110,10 @@ generate_instruction: |-
   ### 决策 1 · 理解目标 (Understand Goal)
 
   用一句话复述目标达成的成功判据(交付物形态); 圈出硬约束(技术栈/时间窗口/平台要求)与软约束(偏好).
+
+  **用户意图硬约束**: 用户/上层明确指定的行为、术语、范围是硬约束 —— 组织树不得改变它们;
+  拆分中确需变更时, 先记录为待确认项而不是静默改写; 下游角色的任务要忠实保留上游明确语义,
+  只补充实现层面的细节.
 
   ### 决策 2 · 提取必需 Capability (Capability → Role)
 
@@ -243,6 +247,16 @@ generate_instruction: |-
 
   输入 = "帮我整理一份主题调研材料" → T1-T4 全部满足 ⇒ 单一 worker 即可, 强行加 Manager 是浪费.
   输入 = "策划并执行一项跨团队活动" → 方案策划 + 执行落地, 两个 Manager 子节点, execution depends_on planning.
+
+  完整示例（输入 → 组织树 → 拆分理由）:
+  输入 = "为内部工具做一个带命令行参数解析的统计脚本，输入 CSV 输出汇总报告"
+  - 决策 2: 必需 Capability = 功能规格细化 + 脚本实现 + 质量验证 → 映射 requirements / code / test
+  - 组织树: requirements(manager) → code(worker) ; test 节点不默认创建（用户未要求验证能力）
+  - 决策 3: requirements 的产出是"细化后的功能规格清单"（多份并列条目）→ 非 Terminal, 标 manager;
+    code 拿到明确规格后单角色可完成 → Terminal, 标 worker
+  - 决策 7: code 是关键路径实现 → num_ccs=2; requirements 影响下游全部实现 → num_ccs=3
+  - 理由: 需求模糊时先由 requirements 收敛成可执行规格（含主动决策+待确认标记），code 才能忠实实现；
+    两者是实质数据流依赖（code 必须读规格才能开工），故串行 depends_on。
 
   ---
 

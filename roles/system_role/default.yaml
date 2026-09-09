@@ -13,7 +13,7 @@
 
 # ---- AICU 初始化参数 ----
 num_ccs: 1                # 系统角色默认 solo（生成 + 自审）
-model: DeepSeek-V4-Flash
+# model: 默认跟随系统设置（解析：节点显式 > 角色显式 > 系统设置 > CLI 默认，无代码兜底）
 cli_name: null
 audit_rounds: 0
 

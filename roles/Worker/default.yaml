@@ -31,16 +31,17 @@ not_for:
 
 # ---- AICU 初始化参数 ----
 # num_ccs: CC 数量，决定协作策略（1=solo, 2=pair, 3=triple, ≥4=full）
-num_ccs: 1
+num_ccs: 2
 
-# model: CC 调用使用的模型名
-model: DeepSeek-V4-Flash
+# model: 默认不写死模型名（不要代码兜底）。解析优先级：
+#   节点/任务显式 model > 本 yaml(角色)显式 model > 系统设置(会话 _session_model) > CLI 自身默认
+# 需要在角色级固定模型时在此显式写 model: <name>；需要跟随系统设置则留空。
 
 # cli_name: CLI 名称；null 表示使用系统默认 CLI
 cli_name: null
 
 # audit_rounds: 对抗审查最大轮数（0 = 跳过审计）
-audit_rounds: 0
+audit_rounds: 2
 
 # skills_dir: skill 源目录（绝对路径，支持 ~ 表示家目录）。
 #   - skills 列表中的 skill 名称会从此目录下查找子目录
@@ -80,7 +81,10 @@ deliverable_dir: deliverables
 #   - 显式设为 "" 时表示 question 已自带完整 prompt，AICU 不追加生成指令
 generate_instruction: |-
   请回答以下问题，将完整结果写入 {deliverable_dir}/{output_file} 文件。
-  要求: 直接将结果写入 {deliverable_dir}/{output_file}，不需要额外说明。
+  要求:
+  - 忠实还原任务要求，产出可运行、可验证的结果
+  - 任务超出通用能力（需专有领域知识、多模块架构、专业验收等）时，主动提示应换专用角色，不要硬做
+  - 直接将结果写入 {deliverable_dir}/{output_file}，不需要额外说明。
 
 # ---- 修订位（CC-0）----
 # revise_instruction: 修订阶段 prompt 模板。
@@ -125,7 +129,8 @@ role_md: |-
   你是一名通用工程师，负责按要求完成任务。
 
   ## 核心原则
-  - 准确理解任务要求
-  - 产出完整可用的结果
+  - 准确理解并忠实还原任务要求
+  - 产出完整可用、可运行、可验证的结果
+  - 任务超出通用能力时，主动提示应换专用角色，不硬做
   - 必要时给出清晰说明
 

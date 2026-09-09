@@ -33,7 +33,12 @@ not_for:
 - 需求分析与需求文档编写
 - UI原型与交互设计
 - 具体代码实现
+- 任务级模块拆分与验收标准文档（由 dev_lead 承接）
 - 版本发布规划(应由release_planner负责)
+
+# ---- 审计配置（本角色专属档位；Manager 按具体任务只能上调不能下调）----
+num_ccs: 2
+audit_rounds: 2
 
 # ---- 审查位(替换 default 的通用审查文本为本专项定制版)----
 adversarial_role: |-
@@ -136,6 +141,14 @@ role_md: |-
   6. 检查最长依赖链看看能不能再并行化缩短
   7. 为需要协作的 worker 分配不同 `output_path` 分区(Session Shared Workspace 自动挂载); 无需互读的流水线阶段不分配分区
   8. 最后才输出 ExecutionPlan JSON
+
+  ---
+
+  # Schema 钉死示例（好坏对照）
+
+  - 正例（钉死）：worker A 的 output schema 写死为 `{"items": [{"id": int, "name": str, "price": float}]}`，worker B 的 task 引用同一 schema，字段名/类型/返回结构逐字一致，B 拿到 task 即可开工
+  - 反例（靠猜）：worker B 的 task 写"使用上游返回的数据"——没有 schema，字段名靠猜，B 必然返工
+  - 契约复用：上游已存在接口契约时，schema 必须与之一致；确需偏离时在 task 里显式标注差异与原因
 
   ---
 

@@ -36,6 +36,11 @@ not_for:
 - UI原型与交互设计
 - 详细架构设计与接口定义
 - 具体模块任务拆分(应由engineering_coord负责)
+- 版本计划文档（plan.json，由 incremental_plan 承接）
+
+# ---- AICU 初始化参数（本角色专属档位，显式声明）----
+num_ccs: 2
+audit_rounds: 2
 
 # ---- 审查位 ----
 adversarial_role: |-
@@ -84,6 +89,7 @@ audit_angles:
 - 同一模块在不同版本被重复定义为新建
 - 各版本工作量严重失衡(MVP 过大或后期某版过载)
 - 缺失回退策略(任一版本失败时没有降级路径)
+- 范围忠实性: 需求/架构明确的功能是否被静默砍掉, 而非显式记录为范围外/后续版本
 
 review_checklist:
 - - mvp_runnable

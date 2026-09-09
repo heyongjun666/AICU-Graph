@@ -455,6 +455,52 @@ class TestSchedulerWaitingToReady:
         assert self.graph.get_node("B").status == NodeStatus.WAITING
         scheduler.stop()
 
+    def test_waiting_stays_waiting_when_dep_failed(self):
+        """依赖 FAILED 时下游必须保持 WAITING，不得被提升为 READY 运行。"""
+        from runtime.scheduler import Scheduler
+
+        # A FAILED（终态但非完成），B 依赖 A 且 WAITING
+        self.graph.add_node(_make_node("A", status=NodeStatus.FAILED, config={}))
+        self.graph.add_node(_make_node("B", status=NodeStatus.WAITING, config={}))
+        _add_dep_edge(self.graph, "A", "B", "e_ab")
+
+        scheduler = Scheduler(
+            graph=self.graph, registry=self.registry,
+            delegate=self.delegate, runtime_gateway=self.runtime,
+            max_concurrency=4, event_bus=self.event_bus,
+        )
+
+        scheduler._process_waiting_nodes()
+
+        b_node = self.graph.get_node("B")
+        assert b_node is not None and b_node.status == NodeStatus.WAITING, \
+            f"B should stay WAITING when dep A FAILED, got {b_node.status if b_node else None}"
+
+        # 重复 tick 也不得放行（FAILED 依赖不因时间推移解锁）
+        scheduler._process_waiting_nodes()
+        assert self.graph.get_node("B").status == NodeStatus.WAITING
+        scheduler.stop()
+
+    def test_waiting_stays_waiting_when_dep_stopped(self):
+        """依赖 STOPPED 时下游必须保持 WAITING，不得被提升为 READY 运行。"""
+        from runtime.scheduler import Scheduler
+
+        self.graph.add_node(_make_node("A", status=NodeStatus.STOPPED, config={}))
+        self.graph.add_node(_make_node("B", status=NodeStatus.WAITING, config={}))
+        _add_dep_edge(self.graph, "A", "B", "e_ab")
+
+        scheduler = Scheduler(
+            graph=self.graph, registry=self.registry,
+            delegate=self.delegate, runtime_gateway=self.runtime,
+            max_concurrency=4, event_bus=self.event_bus,
+        )
+
+        scheduler._process_waiting_nodes()
+
+        assert self.graph.get_node("B").status == NodeStatus.WAITING, \
+            "B should stay WAITING when dep A STOPPED"
+        scheduler.stop()
+
 
 class TestSchedulerPauseResume:
 

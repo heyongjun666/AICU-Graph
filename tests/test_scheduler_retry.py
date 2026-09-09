@@ -44,7 +44,16 @@ class MockDelegate:
 
 
 class MockRuntimeGateway:
-    """Mock RuntimeGateway for ExecutableContext."""
+    """Mock RuntimeGateway for ExecutableContext.
+
+    携带 graph 引用后，revise_worker_node 会镜像 runtime 的关键副作用
+    （FAILED→WAITING + pending_revise + pending_context），使 Worker 自动重试
+    的 Revise 路径可端到端验证。不弹 Worker._aicu_cache、不删 artifact（保留产物）。
+    """
+
+    def __init__(self, graph: Optional[Graph] = None):
+        self.graph = graph
+        self.revise_calls: list[tuple[str, str]] = []
 
     def submit_plan(self, node_id: str, plan: Any) -> None:
         pass
@@ -53,6 +62,8 @@ class MockRuntimeGateway:
         pass
 
     def get_node(self, node_id: str) -> Optional[Node]:
+        if self.graph is not None:
+            return self.graph.get_node(node_id)
         return None
 
     def get_children(self, node_id: str) -> list:
@@ -66,6 +77,32 @@ class MockRuntimeGateway:
 
     def deliver_external_input(self, wait_token: str, input_data: Any) -> None:
         pass
+
+    def revise_worker_node(
+        self, node_id: str, task: str, config: Optional[dict] = None
+    ) -> str:
+        """Mock of runtime.revise_worker_node：记录调用，节点 FAILED→WAITING 待续跑。
+
+        保留缓存与产物（不弹 Worker._aicu_cache、不删 artifact），只镜像
+        _reactivate_reused_worker 的状态簿记；iteration_count 由调度器回写。
+        """
+        self.revise_calls.append((node_id, task))
+        if self.graph is not None:
+            node = self.graph.get_node(node_id)
+            if node is not None:
+                self.graph.update_node(
+                    node_id,
+                    status=NodeStatus.WAITING,
+                    pending_revise=True,
+                    pending_context={
+                        "collaboration_type": "revise",
+                        "activated_by": node_id,
+                        "activation_reason": "auto-retry-after-failure",
+                        "incremental_task": task,
+                        "prior_artifacts": node.artifact_path,
+                    },
+                )
+        return node_id
 
 
 class _TestExecutable(Executable):
@@ -294,41 +331,84 @@ class TestAutoRetry:
         self.registry.register("worker", _TestExecutable)
         self.registry.register("manager", _TestExecutable)
         self.delegate = MockDelegate()
-        self.runtime = MockRuntimeGateway()
+        self.runtime = MockRuntimeGateway(self.graph)
 
     def test_auto_retry_worker_retried_in_place(self):
-        """Worker FAILED 后原地重试：同节点 WAITING → 重跑成功，不创建新节点。"""
+        """Worker FAILED 后原地重试：走 Revise 续跑而非全量重跑，同节点 WAITING → 成功。
+
+        断言（与全量重跑路径的差异）：
+        - 调用 runtime.revise_worker_node，任务携带失败原因反馈
+        - pending_context.collaboration_type == 'revise'、pending_revise=True
+        - 保留 Worker._aicu_cache（不弹缓存）、不删磁盘产物
+        - iteration_count 回写为尝试数、_retry_attempts 递增
+        - 同一个节点，不创建新节点
+        """
+        import tempfile
+        import os
         from runtime.scheduler import Scheduler
+        from executables.worker import Worker
 
         self.registry.register("worker", _RetryAwareExecutable)
 
-        worker = _make_node("W1", status=NodeStatus.READY, exec_type="worker",
-                            config={"delay": 0.05},
-                            max_iterations=3)
-        self.graph.add_node(worker)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            artifact = os.path.join(tmpdir, "design.md")
+            with open(artifact, "w", encoding="utf-8") as f:
+                f.write("# draft design\n")
 
-        scheduler = Scheduler(
-            graph=self.graph, registry=self.registry,
-            delegate=self.delegate, runtime_gateway=self.runtime,
-            max_concurrency=2, planner=self.planner, retry_delay=0.05,
-        )
-        scheduler.start()
+            worker = _make_node("W1", status=NodeStatus.READY, exec_type="worker",
+                                config={"delay": 0.05},
+                                max_iterations=3)
+            worker.artifact_path = artifact
+            self.graph.add_node(worker)
 
-        # W1 首跑失败（iteration_count=0），原地重试成功（iteration_count=1）后 COMPLETED
-        def w1_completed():
-            n = self.graph.get_node("W1")
-            return n is not None and n.status == NodeStatus.COMPLETED
-        assert wait_until(w1_completed, timeout=5), \
-            "W1 should complete after in-place retry"
+            # 预置缓存的 CC 会话：revise 路径必须保留它（全量重跑会 pop）
+            Worker._aicu_cache["W1"] = "cached-cc-session"
+            try:
+                scheduler = Scheduler(
+                    graph=self.graph, registry=self.registry,
+                    delegate=self.delegate, runtime_gateway=self.runtime,
+                    max_concurrency=2, planner=self.planner, retry_delay=0.05,
+                )
+                scheduler.start()
 
-        # 原地重试：同一个节点，不创建 [RETRY: 新节点
-        assert len(self.graph.nodes) == 1, "In-place retry must NOT create a new node"
-        assert self.graph.get_node("W1").iteration_count == 1, \
-            "W1 should have iteration_count=1 after one retry"
-        assert scheduler._retry_attempts.get("W1", 0) == 1, \
-            "W1 should have exactly 1 retry attempt"
+                # W1 首跑失败（iteration_count=0），自动重试成功（iteration_count=1）后 COMPLETED
+                def w1_completed():
+                    n = self.graph.get_node("W1")
+                    return n is not None and n.status == NodeStatus.COMPLETED
+                assert wait_until(w1_completed, timeout=5), \
+                    "W1 should complete after in-place retry"
 
-        scheduler.stop()
+                # 走 Revise：调用 runtime.revise_worker_node 且任务携带失败原因
+                assert len(self.runtime.revise_calls) == 1, \
+                    "Worker auto-retry should call runtime.revise_worker_node exactly once"
+                called_id, called_task = self.runtime.revise_calls[0]
+                assert called_id == "W1"
+                assert "失败原因" in called_task and "不要重头开始" in called_task, \
+                    "revise task should carry failure feedback and forbid full restart"
+
+                # pending_context 标记为 revise 增量续跑
+                node = self.graph.get_node("W1")
+                assert node.pending_context is not None, "pending_context should be set"
+                assert node.pending_context.get("collaboration_type") == "revise", \
+                    "pending_context.collaboration_type should be 'revise'"
+                assert node.pending_revise is True, "pending_revise should be True"
+
+                # 原地重试：同一个节点，不创建新节点；iteration_count / 重试次数回写
+                assert len(self.graph.nodes) == 1, "In-place retry must NOT create a new node"
+                assert node.iteration_count == 1, \
+                    "W1 should have iteration_count=1 after one retry"
+                assert scheduler._retry_attempts.get("W1", 0) == 1, \
+                    "W1 should have exactly 1 retry attempt"
+
+                # 缓存保留（revise 不弹 Worker._aicu_cache）与产物保留（不删 artifact）
+                assert Worker._aicu_cache.get("W1") == "cached-cc-session", \
+                    "revise path must NOT evict Worker._aicu_cache"
+                assert os.path.exists(artifact), \
+                    "revise path must NOT delete the artifact file"
+
+                scheduler.stop()
+            finally:
+                Worker._aicu_cache.pop("W1", None)
 
     def test_auto_retry_manager_retried_in_place(self):
         """Manager FAILED 后同样原地重试（无子节点 → re-expand），与 Worker 一致。"""
@@ -491,7 +571,7 @@ class TestRuntimeRetry:
         self.registry = ExecutableRegistry()
         self.registry.register("worker", _TestExecutable)
         self.delegate = MockDelegate()
-        self.runtime = MockRuntimeGateway()
+        self.runtime = MockRuntimeGateway(self.graph)
 
     def test_runtime_auto_retry_flow(self):
         """Runtime 集成验证：Scheduler 通过 Runtime 传入的 Planner 执行原地自动重试。"""

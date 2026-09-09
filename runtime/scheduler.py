@@ -63,6 +63,9 @@ logger = logging.getLogger(__name__)
 # Tick 循环间隔（秒）
 _TICK_INTERVAL = 0.5
 
+# Revise 增量任务最大长度（与 runtime/runtime.py 的 _REVISE_MAX_TASK_LENGTH 保持一致）
+_REVISE_MAX_TASK_LENGTH = 5000
+
 # Watchdog 配置
 _MAX_WATCHDOG_RETRIES = 3
 _WATCHDOG_MIN_INTERVAL = 60.0
@@ -445,11 +448,10 @@ class Scheduler:
             if node.id in self._scheduled_retries:
                 continue
             deps = self.graph.dependencies(node.id)
-            terminal_statuses = {NodeStatus.COMPLETED, NodeStatus.FAILED, NodeStatus.STOPPED}
-            all_terminal = all(
-                dep.status in terminal_statuses for dep in deps
-            )
-            if all_terminal:
+            # 依赖门控：只有「依赖全部 COMPLETED」才放行下游转 READY。
+            # 任一依赖 FAILED/STOPPED → 下游保持 WAITING 不运行（不级联失败、不新增状态），
+            # 需用户手动 continue/revise 失败的上游（或下游）才能解锁。
+            if all(dep.status == NodeStatus.COMPLETED for dep in deps):
                 self._transition_node(node.id, NodeStatus.READY)
 
     # ========================================================================
@@ -1193,7 +1195,8 @@ class Scheduler:
         原地重试策略：
         - Manager 有子节点 → READY + manager_phase="review"（仅重新审查）
         - Manager 无子节点 → WAITING + 延迟 → READY（重新 expand）
-        - Worker         → WAITING + 延迟 → READY（重新执行）
+        - Worker         → Revise 续跑（resume 原会话 + 失败反馈，保留缓存与产物），
+          再 WAITING + 延迟 → READY；网关缺 revise_worker_node 时回退全量重跑
 
         Args:
             failed_node_id: 失败节点 ID。
@@ -1224,6 +1227,13 @@ class Scheduler:
             return
 
         new_iteration = attempt + 1
+
+        # Worker 自动重试：不弹缓存、不删产物，走 Revise 续跑（resume 原 CC 会话 + 失败反馈）。
+        # 避免对确定性缺陷（如图片输入不支持）全量重跑后原样再挂。Manager 分支保持原逻辑。
+        if failed_node.exec_type == "worker":
+            if self._auto_retry_worker_as_revise(failed_node, new_iteration, max_retries):
+                return
+            # 网关缺少 revise_worker_node 时回退下方全量重跑路径（与 Manager 分支共用）
 
         # 清理缓存的 AICU 实例，确保重试时获得全新会话
         # （否则 --resume 会续接失败的对话，携带错误状态）
@@ -1333,6 +1343,57 @@ class Scheduler:
             "Auto-retry scheduled in-place: node=%s, attempt=%d/%d, delay=%.1fs",
             failed_node_id, new_iteration, max_retries, self.retry_delay,
         )
+
+    def _auto_retry_worker_as_revise(
+        self, failed_node: Node, new_iteration: int, max_retries: int
+    ) -> None:
+        """Worker 失败自动重试：走 Revise 续跑而非全量重跑。
+
+        构造失败反馈增量任务（截断 ≤ _REVISE_MAX_TASK_LENGTH），调用
+        runtime.revise_worker_node → _reactivate_reused_worker：
+        - 保留 Worker._aicu_cache（resume 原 CC 会话）与磁盘产物
+        - 节点转 WAITING + pending_revise=True，携带失败原因增量修复
+        - 回退父 Manager 链，该 Worker 再次完成时重新触发父评审
+        - 回写 iteration_count（_reactivate_reused_worker 会重置为 0）与重试次数
+
+        网关缺少 revise_worker_node（mock/旧实现）时回退原全量重跑路径。
+        """
+        error_message = ""
+        if failed_node.error is not None:
+            error_message = failed_node.error.message or ""
+            if failed_node.error.cause:
+                error_message = f"{error_message}；{failed_node.error.cause}".strip("；")
+        error_message = error_message or "上一轮执行失败"
+
+        revise_task = (
+            "你上一轮执行失败了，失败原因：{error}。"
+            "请基于已保留的会话与现有产出，针对失败原因修复后继续完成原任务，"
+            "不要重头开始。"
+        ).format(error=error_message)
+        if len(revise_task) > _REVISE_MAX_TASK_LENGTH:
+            revise_task = revise_task[:_REVISE_MAX_TASK_LENGTH]
+
+        revise_fn = getattr(self.runtime_gateway, "revise_worker_node", None)
+        if revise_fn is None:
+            logger.warning(
+                "Auto-retry for worker=%s: runtime_gateway has no revise_worker_node; "
+                "falling back to full re-run", failed_node.id,
+            )
+            return False
+
+        revise_fn(failed_node.id, revise_task)
+
+        # _reactivate_reused_worker 会把 iteration_count 重置为 0，这里回写为本次尝试数
+        self.graph.update_node(failed_node.id, iteration_count=new_iteration)
+        self._retry_attempts[failed_node.id] = new_iteration
+        # 延迟调度：到期后由 _process_scheduled_retries 将 WAITING → READY
+        self._scheduled_retries[failed_node.id] = time.time() + self.retry_delay
+
+        logger.info(
+            "Auto-retry (revise): worker=%s, attempt=%d/%d, delay=%.1fs",
+            failed_node.id, new_iteration, max_retries, self.retry_delay,
+        )
+        return True
 
     def _process_scheduled_retries(self) -> None:
         """处理已到时间的定时重试节点。

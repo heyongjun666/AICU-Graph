@@ -559,13 +559,16 @@ def create_session_app(
 
     @app.post("/v1/sessions/{session_id}/nodes", status_code=201)
     def create_node(session_id: str, body: CreateNodeRequest):
-        runtime = resolve(session_id).runtime
+        handle = resolve(session_id)
+        runtime = handle.runtime
+        # 注入会话配置兜底（model → _session_model，连接参数未显式时回退会话值）
+        config = _merge_session_connection(handle.metadata.config, body.config)
         try:
             node = runtime.create_manual_node(
                 task=body.task,
                 role=body.role,
                 exec_type=body.exec_type,
-                config=body.config,
+                config=config,
                 parent_id=body.parent_id,
                 dependencies=body.dependencies,
             )
@@ -907,6 +910,27 @@ def create_session_app(
         app.mount("/", StaticFiles(directory=frontend_dist, html=True), name="workbench")
 
     return app
+
+
+# ---- 节点创建：会话配置（继承自系统设置）作为连接兜底注入节点 config ----
+# 原则：节点未显式指定的连接参数，回退到会话配置；会话配置来自系统设置
+# （WorkbenchSettings → PATCH /v1/config → update_global_config → create_session 继承）。
+# model 以独立键 _session_model 注入，与节点显式 model 区分，保证解析优先级：
+#   节点显式 model > 角色 yaml 显式 model > 系统设置(_session_model) > CLI 自身默认
+# 全程无代码级兜底默认值（不要代码兜底）。
+_SESSION_FALLBACK_KEYS = ("cli_name", "api_base_url", "api_key_env")
+
+
+def _merge_session_connection(
+    session_config: Optional[dict], config: Optional[dict]
+) -> dict:
+    prepared = dict(config or {})
+    for key in _SESSION_FALLBACK_KEYS:
+        if not prepared.get(key) and (session_config or {}).get(key):
+            prepared[key] = session_config[key]
+    if (session_config or {}).get("model"):
+        prepared["_session_model"] = session_config["model"]
+    return prepared
 
 
 def _node_label(runtime: Any, node_id: str) -> str:

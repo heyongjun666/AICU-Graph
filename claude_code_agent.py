@@ -46,7 +46,7 @@ class ClaudeCodeAgent:
     def __init__(self,
                  workspace_path: str,
                  instruction_md_path: Optional[str] = None,
-                 model: str = "DeepSeek-V4-Flash",
+                 model: Optional[str] = None,
                  skip_permissions: bool = False,
                  cli_name: Optional[str] = None,
                  enable_project_skills: bool = False,
@@ -58,7 +58,8 @@ class ClaudeCodeAgent:
 
         :param workspace_path: 工作目录（必填），会作为 --cwd 参数
         :param instruction_md_path: 角色说明 MD 文件路径（可选），内容会写入 workspace/CLAUDE.md
-        :param model: 使用的模型
+        :param model: 使用的模型（None 时不传 --model，由目标 CLI 使用自身默认；
+                     无代码兜底默认模型）
         :param skip_permissions: 是否跳过权限确认（自动化时设为 True）
         :param cli_name: 指定 CLI 名称，为 None 时自动检测
         :param enable_project_skills: 是否启用 project-level skill 加载。

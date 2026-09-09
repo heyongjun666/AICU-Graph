@@ -28,11 +28,6 @@ from runtime.workspace_resolver import resolve_partition
 logger = logging.getLogger(__name__)
 
 
-# 模型名是否有效由目标 CLI 自行判断（无效名会在 CLI 调用时暴露为错误）。
-# 各 CLI 的模型命名空间不同，硬编码前缀白名单会误拦用户显式选择的合法模型，故不做前缀校验。
-_DEFAULT_MODEL = "DeepSeek-V4-Flash"
-
-
 def _normalize_worker_artifact(ctx: ExecutableContext, artifact_path: str) -> str:
     """Keep a worker's declared result inside its node workspace.
 
@@ -193,17 +188,15 @@ def _resolve_dep_artifact_path(ctx: ExecutableContext, dep) -> str:
     return f"workspaces/{did}/output/"
 
 
-def _validate_model(model_name: Optional[str]) -> str:
-    """校验模型名，未指定时回退到默认模型。
+def _validate_model(model_name: Optional[str]) -> Optional[str]:
+    """模型名纯透传：不做任何代码级兜底（不要代码兜底）。
 
-    只兜底「未指定」的情况；非空模型名一律信任并原样透传——模型名是否有效
-    由目标 CLI 自行判断（无效名会在 CLI 调用时暴露为错误，而非被静默回退）。
-    不再用前缀白名单拦截，因为各 CLI 的模型命名空间不统一，
-    前缀校验会误拦用户显式选择的合法模型。
+    未显式指定时返回 None，交由解析链继续：角色 yaml 显式 model → 系统设置
+    （_session_model）→ 目标 CLI 自身默认模型。非空模型名一律信任原样透传——
+    模型名是否有效由目标 CLI 自行判断（无效名会在 CLI 调用时暴露为错误，
+    而非被静默回退到某个写死的默认值）。
     """
-    if not model_name:
-        return _DEFAULT_MODEL
-    return model_name
+    return model_name or None
 
 
 def _log_cc_lifecycle(
@@ -395,6 +388,9 @@ def _create_real_aicu(ctx: ExecutableContext) -> Any:
         role=node.role or "default",
         num_ccs=node.config.get("num_ccs"),
         model=_validate_model(node.config.get("model")),
+        # 系统设置（会话配置）以独立键注入，与节点显式 model 区分，
+        # 保证解析优先级：节点显式 > 角色 yaml > 系统设置。
+        session_model=node.config.get("_session_model"),
         cli_name=node.config.get("cli_name"),
         audit_rounds=node.config.get("audit_rounds"),
         output_callback=append_output,

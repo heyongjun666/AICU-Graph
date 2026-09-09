@@ -122,7 +122,10 @@ class TestCCChatWithRetryImageRecovery:
         assert cc.reset_count == 0  # 未重置会话
         # 第二次调用沿用保留的会话 ID，且不再重发原始任务
         assert cc.calls[1][0] == "abc-123"
-        assert cc.calls[1][1] == aicu._IMAGE_INPUT_RECOVERY_PROMPT
+        assert cc.calls[1][1].startswith(aicu._IMAGE_INPUT_RECOVERY_PROMPT)
+        # 恢复指令必须携带具体报错文本，让 CC 明确"为什么失败"，避免再次读图
+        assert "[具体报错]" in cc.calls[1][1]
+        assert "Model do not support image input" in cc.calls[1][1]
 
     def test_falls_back_to_fresh_conversation_with_guidance(self, monkeypatch):
         """会话不可恢复（conversation_id 为空）→ 重置后带『禁读图』说明重试原任务。"""
@@ -138,6 +141,9 @@ class TestCCChatWithRetryImageRecovery:
         assert cc.calls[1][1] != "原始任务"
         assert "不支持图片输入" in cc.calls[1][1]
         assert "原始任务" in cc.calls[1][1]
+        # 恢复指令必须携带具体报错文本
+        assert "[具体报错]" in cc.calls[1][1]
+        assert "Model do not support image input" in cc.calls[1][1]
 
     def test_raises_after_retries_exhausted(self, monkeypatch):
         """重试耗尽仍失败 → 如实抛出 ModelImageInputError（不再静默跳过）。"""
@@ -166,3 +172,47 @@ class TestCCChatWithRetryImageRecovery:
             aicu._cc_chat_with_retry(cc, "原始任务")
         assert cc.call_count == 2  # 1 次原始 + 1 次重试（CC_MAX_RETRIES=1）
         assert cc.reset_count == 1  # 仅在可重试的那次失败时重置
+
+
+class TestCCChatWithRetryStickyImageBlock:
+    """粘性防读图：触发过读图错误后，该 CC 后续所有调用都携带禁止读图硬约束。"""
+
+    def test_subsequent_calls_carry_no_image_constraint(self, monkeypatch):
+        """第一次读图报错恢复后，后续（如 revise）调用自动携带硬约束前缀。"""
+        aicu = _make_aicu(monkeypatch)
+        cc = _FakeCC(preserve_session=True)
+
+        # 第一次：读图报错 → 恢复重试成功，同时标记粘性标志
+        out1 = aicu._cc_chat_with_retry(cc, "任务一")
+        assert out1 == "recovered"
+        assert getattr(cc, "_image_input_blocked", False) is True
+
+        # 后续调用（例如 revise 轮次）：prompt 必须以禁止读图硬约束开头
+        out2 = aicu._cc_chat_with_retry(cc, "任务二（revise）")
+        assert out2 == "recovered"
+        last_prompt = cc.calls[-1][1]
+        assert last_prompt.startswith(aicu._IMAGE_INPUT_BLOCKED_CONSTRAINT)
+        assert "禁止" in last_prompt and "png" in last_prompt
+        assert "任务二（revise）" in last_prompt
+
+    def test_never_errors_gets_no_sticky_constraint(self, monkeypatch):
+        """未触发读图错误的 CC，后续调用不注入额外约束。"""
+
+        class _GoodCC:
+            def __init__(self):
+                self.conversation_id = None
+                self.calls = []
+
+            def chat(self, prompt, max_turns=None, timeout=7200):
+                self.calls.append(prompt)
+                return "ok"
+
+            def reset_conversation(self):
+                self.conversation_id = None
+
+        aicu = _make_aicu(monkeypatch)
+        cc = _GoodCC()
+        out = aicu._cc_chat_with_retry(cc, "普通任务")
+        assert out == "ok"
+        assert cc.calls[-1] == "普通任务"  # 无额外前缀
+        assert not getattr(cc, "_image_input_blocked", False)

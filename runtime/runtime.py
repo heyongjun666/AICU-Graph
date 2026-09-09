@@ -342,6 +342,7 @@ class Runtime(RuntimeGateway, SchedulerDelegate):
             for key in (
                 "cli_name",
                 "model",
+                "_session_model",
                 "api_base_url",
                 "api_key_env",
                 "skip_permissions",

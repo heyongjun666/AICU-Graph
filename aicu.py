@@ -165,6 +165,7 @@ class AICU:
                  num_ccs: Optional[int] = None,
                  parent_workspace: Optional[str] = None,
                  model: Optional[str] = None,
+                 session_model: Optional[str] = None,
                  cli_name: Optional[str] = None,
                  audit_rounds: Optional[int] = None,
                  role: Optional[str] = None,
@@ -189,7 +190,10 @@ class AICU:
                      roles/Worker/ 目录加载 YAML。默认 "worker"（向后兼容）。
         :param num_ccs: CC 数量（默认从 default.yaml 的 num_ccs 取）
         :param parent_workspace: 工作目录（必须提供）
-        :param model: 模型名称（默认从 default.yaml 的 model 取）
+        :param model: 模型名称（节点/任务显式指定；未传则按 角色 yaml → 系统设置 解析，
+                     全程无代码级兜底，均无则由目标 CLI 用自身默认模型）
+        :param session_model: 系统设置（会话配置）注入的模型名，解析优先级最低，
+                     仅当 显式 model 与 角色 yaml model 都未指定时使用
         :param cli_name: CLI 名称（默认从 default.yaml 的 cli_name 取）
         :param audit_rounds: 对抗审查最大轮数（默认从 default.yaml 的 audit_rounds 取）
         :param role: 角色名称（字符串，必须）。AICU 根据 role_type 加载对应子目录下的
@@ -259,8 +263,13 @@ class AICU:
         #    （因为这些字段 None/""/False 都可能是有效覆盖值，不能与"未传"混淆）
         if num_ccs is None:
             num_ccs = self.role_config.get("num_ccs", 1)
+        # 模型解析链（不要代码兜底）：节点显式 model > 角色 yaml 显式 model >
+        # 系统设置（session_model）> None（目标 CLI 使用自身默认模型）。
+        # 每个环节都允许 None，绝不落入写死的默认模型名。
         if model is None:
-            model = self.role_config.get("model", "DeepSeek-V4-Flash")
+            model = self.role_config.get("model")
+        if model is None:
+            model = session_model
         if cli_name is None:
             cli_name = self.role_config.get("cli_name")  # 可能仍是 None
         if audit_rounds is None:
@@ -590,6 +599,15 @@ class AICU:
         "DOM/计算样式断言等不依赖视觉的方式，继续完成你被分配的任务。"
     )
 
+    # 粘性防读图硬约束：某个 CC 一旦触发过读图错误，后续每一次调用
+    # （重试/修订/审查/审计）都携带本约束，防止任何后续轮次再次读图。
+    _IMAGE_INPUT_BLOCKED_CONSTRAINT = (
+        "【硬性约束】你此前曾因读取图片触发 API 400 报错（当前模型不支持图片输入）。"
+        "从现在起，禁止用任何工具读取图片/PDF 文件"
+        "（.png/.jpg/.jpeg/.gif/.webp/.bmp/.pdf），禁止截图目检。"
+        "所有视觉验证一律改用文本描述、DOM/计算样式断言、关键数值断言。"
+    )
+
     def _emit_cc_activity(self, cc: ClaudeCodeAgent, status: str, prompt: str = "", event: str = "") -> None:
         if not self.output_callback:
             return
@@ -618,12 +636,18 @@ class AICU:
         :return: CC 的回复文本
         """
         self._emit_cc_activity(cc, "running", prompt, "started")
+        # 粘性防读图：一旦本 CC 触发过读图错误，后续所有调用（重试/修订/审查/审计）
+        # 都携带【禁止读图】硬约束前缀，防止任何后续轮次再次读图。
+        if getattr(cc, "_image_input_blocked", False):
+            prompt = self._IMAGE_INPUT_BLOCKED_CONSTRAINT + "\n\n" + prompt
         for attempt in range(1, self.CC_MAX_RETRIES + 2):  # 最多 CC_MAX_RETRIES+1 次（1次原始 + N次重试）
             try:
                 response = cc.chat(prompt, max_turns=max_turns, timeout=timeout)
                 self._emit_cc_activity(cc, "completed", prompt, "finished")
                 return response
             except ModelImageInputError as e:
+                # 标记本 CC 触发过读图错误：此后所有调用均携带禁止读图硬约束
+                cc._image_input_blocked = True
                 # 模型不支持图片输入（读图触发 400 api_error）：模型能力限制而非
                 # 会话损坏。claude_code_agent 已尽力保留 conversation_id：
                 #   - 会话可续接 → 同会话 --resume 续接，给『跳过图片』恢复指令重试；
@@ -636,13 +660,21 @@ class AICU:
                     )
                     time.sleep(5 * attempt)  # 递增等待: 5s, 10s, ...
                     if cc.conversation_id:
-                        prompt = self._IMAGE_INPUT_RECOVERY_PROMPT
+                        # 同会话 --resume 续接，恢复指令携带具体报错文本，
+                        # 让 CC 明确"为什么失败"，避免再次读图。
+                        prompt = (
+                            self._IMAGE_INPUT_RECOVERY_PROMPT
+                            + "\n\n[具体报错]\n"
+                            + str(e)
+                        )
                     else:
                         cc.reset_conversation()
                         prompt = (
                             prompt
                             + "\n\n---\n\n[注意] 上一步你尝试读取图片导致 API 报错："
-                            "当前模型不支持图片输入。请忽略所有图片/截图内容，"
+                            "[具体报错]\n"
+                            + str(e)
+                            + "\n\n当前模型不支持图片输入。请忽略所有图片/截图内容，"
                             "不要再读取任何图片文件（.png/.jpg/.jpeg/.gif/.webp/.bmp），"
                             "改用文本、DOM/计算样式断言等不依赖视觉的方式继续完成任务。"
                         )

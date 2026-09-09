@@ -326,6 +326,7 @@ export const zh: Dict = {
   'submit.noRolesFound': '未找到角色',
   'submit.advancedConfig': '高级配置',
   'submit.numCCs': 'CC 数量',
+  'submit.modelPlaceholder': '留空 = 跟随系统设置',
   'submit.maxIterations': '最大迭代次数',
   'submit.submitting': '提交中…',
   'submit.submit': '提交',

@@ -326,6 +326,7 @@ export const en: Dict = {
   'submit.noRolesFound': 'No roles found',
   'submit.advancedConfig': 'Advanced Config',
   'submit.numCCs': 'Num CCs',
+  'submit.modelPlaceholder': 'Leave empty = follow system setting',
   'submit.maxIterations': 'Max Iterations',
   'submit.submitting': 'Submitting...',
   'submit.submit': 'Submit',

@@ -62,7 +62,9 @@ const SubmitTaskModal: React.FC = () => {
   const [showRoleDropdown, setShowRoleDropdown] = useState(false);
   const [roleSearch, setRoleSearch] = useState('');
   const [numCCs, setNumCCs] = useState(3);
-  const [model, setModel] = useState('gpt-4');
+  // model 默认留空 = 跟随系统设置（会话配置 _session_model）。
+  // 解析优先级：这里显式填写 > 角色 yaml 显式 > 系统设置 > CLI 自身默认。
+  const [model, setModel] = useState('');
   const [maxIterations, setMaxIterations] = useState(5);
   const [submitting, setSubmitting] = useState(false);
   const inputRef = useRef<HTMLTextAreaElement>(null);
@@ -74,7 +76,7 @@ const SubmitTaskModal: React.FC = () => {
       setRole('');
       setRoleSearch('');
       setNumCCs(3);
-      setModel('gpt-4');
+      setModel('');
       setMaxIterations(5);
       setSubmitting(false);
 
@@ -127,9 +129,11 @@ const SubmitTaskModal: React.FC = () => {
       }
       const config: NodeConfig = {
         num_ccs: numCCs,
-        model,
         max_iterations: maxIterations,
       };
+      // 仅当显式填写了模型才作为「节点显式 model」下发；
+      // 留空则交给服务端按 系统设置(_session_model) 解析，避免写死的旧模型压过系统设置。
+      if (model.trim()) config.model = model.trim();
 
       await createManager(sessionId, { task: task.trim(), role, config });
       setCurrentTaskText(task.trim());
@@ -258,6 +262,7 @@ const SubmitTaskModal: React.FC = () => {
                   <input
                     value={model}
                     onChange={(e) => setModel(e.target.value)}
+                    placeholder={t('submit.modelPlaceholder')}
                     style={{ ...inputStyle, width: '100%' }}
                   />
                 </div>

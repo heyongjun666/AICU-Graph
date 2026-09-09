@@ -1494,3 +1494,45 @@ def test_cc_activity_and_log_metadata_are_observable(tmp_path):
         assert completed["finished_at"]
     finally:
         runtime.shutdown()
+
+
+def test_log_appended_sse_payload_carries_stable_id(tmp_path):
+    """log_appended SSE 载荷必须携带与 _serialize_log 同源的内存稳定 id。
+
+    前端 GraphStore.logKey 对带 id 的日志用 `server:nodeId:id` 去重，SSE 实时追加与
+    HTTP 轮询拉到同一条日志应命中同一 key；若 SSE 载荷缺 id，前端会退化为 content 兜底
+    key，与 HTTP 的 server key 不一致，导致同一事件渲染两遍。
+    """
+    from runtime.session_server import _serialize_log
+
+    runtime = Runtime(
+        persistence=Persistence(file_path=str(tmp_path / "state.json")),
+        workspace_root=str(tmp_path / "workspace"),
+    )
+    captured: list[SSEEvent] = []
+    sid = runtime.event_bus.subscribe("log_appended", captured.append)
+    try:
+        node = _make_manager_node("log_sse_node", NodeStatus.RUNNING)
+        runtime.graph.add_node(node)
+        runtime.append_node_log(
+            node.id,
+            LogLevel.INFO,
+            "hello sse",
+            cc_id="CC-0",
+            phase="executing",
+            event="cc_started",
+            task="Generate the implementation",
+        )
+
+        assert len(captured) == 1
+        payload = captured[0].payload
+        assert payload["node_id"] == node.id
+        assert payload["message"] == "hello sse"
+
+        entry = runtime.get_logs(node.id)[0]
+        # SSE 载荷的 id 与 HTTP _serialize_log 派生的 id 一致（前端去重依据）
+        assert payload["id"] == id(entry) & 0x7FFFFFFF
+        assert payload["id"] == _serialize_log(node.id, entry)["id"]
+    finally:
+        runtime.event_bus.unsubscribe(sid)
+        runtime.shutdown()

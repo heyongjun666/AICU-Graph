@@ -2687,6 +2687,9 @@ class Runtime(RuntimeGateway, SchedulerDelegate):
                         sequence_id=0,
                         timestamp=time.time(),
                         payload={
+                            # 与 _serialize_log 同源的内存稳定 id：前端据此将 SSE 实时
+                            # 追加与 HTTP 轮询拉到同一条日志去重，避免同一事件显示两遍。
+                            "id": id(log_entry) & 0x7FFFFFFF,
                             "node_id": payload.get("node_id"),
                             "level": (
                                 log_entry.level.value

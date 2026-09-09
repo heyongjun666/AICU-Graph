@@ -15,7 +15,6 @@ import logging
 import os
 import signal
 import sys
-
 import uvicorn
 
 from executables.manager import Manager
@@ -53,9 +52,17 @@ def main():
     # 4. 信号处理：graceful shutdown
     def _shutdown(signum, frame):
         logger.info("Received signal %s, shutting down ...", signum)
-        session_manager.shutdown()
+        try:
+            session_manager.shutdown()
+        except Exception:  # noqa: BLE001  退出兜底，不掩盖信号处理
+            logger.exception("Graceful shutdown raised; forcing exit")
         logger.info("Shutdown complete")
-        sys.exit(0)
+        # 关键：不用 sys.exit(0)。进程可能仍有非 daemon 线程存活 —— 如正在执行的
+        # ThreadPoolExecutor worker（scheduler 线程池 / worker.py 里跑 aicu.ask 的
+        # 单任务 executor）在等待 AICU 子进程结束；interpreter 退出时 _python_exit
+        # 会 join 它们，若任务挂起则 join 永不完成 → Ctrl+C 后进程停不下来。
+        # 状态已由 session_manager.shutdown() 完成持久化，这里直接强制退出。
+        os._exit(0)
 
     signal.signal(signal.SIGINT, _shutdown)
     signal.signal(signal.SIGTERM, _shutdown)

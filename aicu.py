@@ -72,6 +72,16 @@ _ACCEPTANCE_PRINCIPLES_REVIEWER = (
     "（high/medium），不要替生产方解释成「测试写错了」「环境问题」而忽略。"
 )
 
+# 检查清单适用性说明：角色提示词已按任务规模裁剪深度（见各 role_md 的「任务适配协议」），
+# 评审/审计位必须采用同一口径，否则小任务会被按大型项目流程打回。
+# 说明落在既有 summary 自由文本中，不新增 JSON 字段、不改运行时协议。
+_CHECKLIST_APPLICABILITY_NOTE = (
+    "规则: 先判断每条检查项/审查角度是否适用于本次任务；"
+    "不适用项在 summary（审计位为 overall_assessment）中标注为 N/A 并说明理由。\n"
+    "仅当所有适用项通过（无 high/medium 缺陷）时才 approved=true；审计位以无 high/medium 缺陷为准。\n"
+    "N/A 不得用于规避真实缺陷。"
+)
+
 
 class AICU:
     """
@@ -1134,7 +1144,7 @@ class AICU:
             f'{{"approved": true/false, "defects": ['
             f'{{"check": "检查项", "description": "缺陷描述", "severity": "high/medium/low"}}], '
             f'"summary": "总体评价"}}\n\n'
-            f"规则: 只有所有检查项都通过（defects 为空）时才 approved=true。\n"
+            f"{_CHECKLIST_APPLICABILITY_NOTE}\n"
             f"只报告 high/medium 缺陷，忽略 low 级别问题。"
         )
         prompt = self._inject_roles_context(prompt)
@@ -1224,7 +1234,7 @@ class AICU:
             f'{{"approved": true/false, "defects": ['
             f'{{"check": "检查项", "description": "缺陷描述", "severity": "high/medium/low"}}], '
             f'"summary": "总体评价"}}\n\n'
-            f"规则: 只有所有检查项都通过（defects 为空）时才 approved=true。\n"
+            f"{_CHECKLIST_APPLICABILITY_NOTE}\n"
             f"只报告 high/medium 缺陷，忽略 low 级别问题。"
         )
         prompt = self._inject_roles_context(prompt)
@@ -1350,6 +1360,7 @@ class AICU:
             f'"defects": ['
             f'{{"check": "检查项", "description": "缺陷描述", "severity": "high/medium/low"}}], '
             f'"summary": "总体评价"}}\n\n'
+            f"{_CHECKLIST_APPLICABILITY_NOTE}\n"
             f"只报告 high/medium 缺陷。"
         )
         prompt = self._inject_roles_context(prompt)
@@ -1412,6 +1423,7 @@ class AICU:
             f'返回 JSON: {{"approved": true/false, "defects": ['
             f'{{"check": "检查项", "description": "缺陷描述", "severity": "high/medium/low"}}], '
             f'"summary": "总体评价"}}\n\n'
+            f"{_CHECKLIST_APPLICABILITY_NOTE}\n"
             f"只报告 high/medium 缺陷。"
         )
         prompt = self._inject_roles_context(prompt)
@@ -1543,6 +1555,7 @@ class AICU:
             f'{{"aspect": "审查角度", "description": "缺陷描述", '
             f'"severity": "high/medium/low", "location": "位置"}}], '
             f'"overall_assessment": "总体评价"}}\n\n'
+            f"{_CHECKLIST_APPLICABILITY_NOTE}\n"
             f"只报告 high/medium 缺陷，忽略 low 级别问题。\n"
             f"宁可漏报 low 也不要误报 high。"
         )

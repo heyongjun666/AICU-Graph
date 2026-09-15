@@ -275,8 +275,11 @@ def _create_real_aicu(ctx: ExecutableContext) -> Any:
     # 共享分区 = CC 产物唯一权威（不再产生 nodes/{id}/output 副本）。
     # 多 CC（pair/triple/full）同样直写同一分区：_copy_best_to_cc0 对同分区
     # 自动跳过复制，peer 编排只需产生方落分区、审查方在自己 CC 工作区出 review。
+    # shared_root 与 shared_target 分开传：前者只用于工作区域边界声明（Manager 节点
+    # 同样有 _shared_workspace，但 shared_target 仍为 None —— 它不直写产物分区）。
+    shared_root = (node.config or {}).get("_shared_workspace")
     shared_target = None
-    if node.exec_type == "worker" and (node.config or {}).get("_shared_workspace"):
+    if node.exec_type == "worker" and shared_root:
         shared_target = resolve_partition(node.config)
 
     aicu = AICU(
@@ -297,6 +300,8 @@ def _create_real_aicu(ctx: ExecutableContext) -> Any:
         skills_dir=skills_dir,
         skip_permissions=node.config.get("skip_permissions", True),
         shared_target=shared_target,
+        # 只喂边界声明，不影响产物归属判定（那是 shared_target 的职责）。
+        shared_root=shared_root,
     )
     with Worker._aicu_cache_lock:
         Worker._aicu_cache[node.id] = aicu
@@ -532,6 +537,12 @@ class Worker(Executable):
                 f"- **你专属的分区**: `{partition}`（= 共享根，全局写权限，高权限模式，仅在确实需要时使用）"
             )
         lines += [
+            "",
+            "⛔ **外层边界（硬性）**: 共享区虽是会话内完全共享，但你**不得自行**访问共享根与"
+            "本节点工作区**之外**的任何路径（宿主仓库源码、父级目录、其他会话的目录、"
+            "用户主目录、系统目录）。唯一例外是**用户自己的输入**明确点名了某个外部"
+            "地址/路径 —— 此时只可访问那一个被点名的目标，不得扩大。"
+            "本边界**优先于**下文所有「完全共享」表述。",
             "",
             "### 写入规则（完全共享）",
             "- **共享区文件完全共享**：会话内所有节点默认都能读写共享根下任意文件，"

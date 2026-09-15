@@ -189,7 +189,8 @@ class AICU:
                  skills: Optional[List[str]] = None,
                  skills_dir: Optional[str] = None,
                  skip_permissions: bool = True,
-                 shared_target: Optional[str] = None):
+                 shared_target: Optional[str] = None,
+                 shared_root: Optional[str] = None):
         """
         初始化 AICU
 
@@ -218,6 +219,11 @@ class AICU:
         :param shared_target: 共享分区绝对路径（V3-2.1）。非 None 时 CC 直写该分区，
                      产物权威 = 分区本身（不再产生 nodes/{id}/output 副本）。
                      所有 CC（含多 CC 编排）统一直写同一分区。
+        :param shared_root: 会话共享区根绝对路径（`{workspace_root}/shared`）。仅用于
+                     **工作区域边界声明**：在每次 CC 调用前置入"你只能访问这些路径"的硬约束
+                     （见 `_build_workspace_boundary_template`）。不传则边界块退化为只声明
+                     本节点工作区（Router CC 等无共享区场景）。它不影响产物归属判定 ——
+                     那是 shared_target 的职责。
         """
         # ---- 加载角色配置（数据驱动：default.yaml 为基础，{role}.yaml 覆盖） ----
         if role is None:
@@ -312,6 +318,8 @@ class AICU:
         if shared_target:
             shared_target = os.path.realpath(shared_target)
         self.shared_target = shared_target
+        # 会话共享区根：只喂给"工作区域边界"声明，不参与产物归属判定（那是 shared_target 的事）。
+        self.shared_root = os.path.realpath(shared_root) if shared_root else None
         self.workspace = Path(parent_workspace).resolve()
         self.workspace.mkdir(parents=True, exist_ok=True)
         self.model = model
@@ -441,6 +449,10 @@ class AICU:
             # 不建私有 deliverables 死目录（避免 cc_{i}/deliverables 空壳）。
             if self.deliverable_dir and not self.shared_target:
                 (cc.workspace / self.deliverable_dir).mkdir(parents=True, exist_ok=True)
+            # 工作区域边界：构造期算一次挂在 CC 上（路径不随调用变化），
+            # _cc_chat_with_retry 每次发送时读取。用动态属性而非 AICU 上的公共字段，
+            # 是为了让 AICU.__new__ 形态的测试 CC（无此属性）自然退化为"不加边界块"。
+            cc._workspace_boundary = self._build_workspace_boundary(cc)
             self.ccs.append(cc)
 
         print(f"[AICU] 初始化完成: {num_ccs} 个 CC，父目录: {self.workspace}")
@@ -618,6 +630,52 @@ class AICU:
         "所有视觉验证一律改用文本描述、DOM/计算样式断言、关键数值断言。"
     )
 
+    # 工作区域边界：**无条件**前置到每一次 CC 调用的硬约束（见 _cc_chat_with_retry）。
+    # 与 _IMAGE_INPUT_BLOCKED_CONSTRAINT 的两点不同：
+    #   1. 无条件生效（那个只在触发过读图错误后才带）；
+    #   2. 必须随每次 cc.chat() 重新附加 —— 读图重试分支会整体替换 prompt，
+    #      只在函数顶部加一次会在重试时静默丢失。
+    def _build_workspace_boundary(self, cc: ClaudeCodeAgent) -> str:
+        """为单个 CC 生成「你只能访问这些路径」的硬约束块。
+
+        这是提示词层的前置声明：AICU 起子进程只给了工具白名单
+        （--allowedTools Read Write Edit Bash），**不是路径白名单**，
+        所以"哪些路径可以碰"只能靠这里讲清楚。
+
+        注意：正文中**不得出现半角花括号**。审查/审计 prompt 末尾要求"只输出 JSON"，
+        边界块里出现 { } 会与输出契约混淆。
+        """
+        lines = [
+            "【工作区边界 · 硬性】",
+            "你**只能**访问下列路径。除此之外的任何路径一律不得读取、写入、执行或遍历 ——",
+            "包括宿主仓库源码、父级目录、其他会话的目录、用户主目录与系统目录。",
+            "工具本身不做路径限制，但「能读」不构成许可。",
+            "",
+        ]
+        if self.shared_root:
+            lines.append(
+                f"- 会话共享区: `{self.shared_root}`（可读可写，含兄弟分区，供协作复用）"
+            )
+        if self.shared_target:
+            lines.append(
+                f"- 你的专属分区: `{self.shared_target}`（你主要负责写入此处）"
+            )
+        cc_dir = getattr(cc, "workspace", None)
+        if cc_dir:
+            lines.append(
+                f"- 你自己的私有目录: `{cc_dir}`（草稿/中间产物，不要写进共享区）"
+            )
+        lines += [
+            "",
+            "唯一例外: 仅当**用户自己的输入**明确点名某个外部地址或路径时，才可访问那一个",
+            "被点名的目标，且不得扩大到它的父目录或同级路径。此外没有别的豁免。",
+            "本任务输入中已经明确给出的路径（例如依赖产物路径）视为已授权，可直接使用。",
+            "缺输入时如实说明缺什么，不要猜测、不要编造、也不要自行去范围外寻找。",
+            "",
+            "本约束不改变下方任务的产出目标与输出格式。",
+        ]
+        return "\n".join(lines)
+
     def _emit_cc_activity(self, cc: ClaudeCodeAgent, status: str, prompt: str = "", event: str = "") -> None:
         if not self.output_callback:
             return
@@ -652,7 +710,12 @@ class AICU:
             prompt = self._IMAGE_INPUT_BLOCKED_CONSTRAINT + "\n\n" + prompt
         for attempt in range(1, self.CC_MAX_RETRIES + 2):  # 最多 CC_MAX_RETRIES+1 次（1次原始 + N次重试）
             try:
-                response = cc.chat(prompt, max_turns=max_turns, timeout=timeout)
+                # 工作区域边界：在发送点附加，而不是在函数顶部加一次 —— 下面的重试分支
+                # 会整体替换 prompt（读图恢复指令 / 重置后的新 prompt），顶部加的会静默丢失。
+                # 读取用 getattr 兜底：AICU.__new__ 形态的测试 CC 没有该属性 → 不加块。
+                _boundary = getattr(cc, "_workspace_boundary", "")
+                _outgoing = f"{_boundary}\n\n{prompt}" if _boundary else prompt
+                response = cc.chat(_outgoing, max_turns=max_turns, timeout=timeout)
                 self._emit_cc_activity(cc, "completed", prompt, "finished")
                 return response
             except ModelImageInputError as e:

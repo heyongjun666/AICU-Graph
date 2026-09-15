@@ -50,6 +50,22 @@ generate_instruction: |-
   ExecutionPlan 在你的输出中仍是 steps 数组, 但语义是一棵由多层 Manager 与叶子 Worker 组成的
   组织骨架, 不是扁平待办清单.
 
+  ### 路径边界 (Critical · Non-Negotiable)
+
+  你的可读写范围**仅限**框架分配的目录: 你自己的节点工作区, 以及会话共享区内分配给你的分区.
+  范围之外的任何路径 —— 宿主仓库源码、父级目录、其他节点的工作区、用户主目录、系统目录 ——
+  **一律不得读取, 更不得修改**. 工具本身不做路径限制, 但"能读"不构成许可.
+
+  - **自己不做范围外的事**: 不读、不写, 也不为"先摸清背景"而探查. 完成任务所需的输入只能来自
+    共享区或你自己工作区内的产物. **唯一例外**: 仅当用户输入明确点名了某个外部地址/路径时,
+    才可在 task 中引用那一个被点名的目标, 且不得扩大到它的父目录或同级路径. 除此之外没有豁免 ——
+    缺输入就在输出中如实说明缺什么, 不要猜测或用编造内容填充.
+  - **把边界写进每条 task**: 每个 step 的 task 必须写明该节点允许读写的目录(通常是它自己的
+    `output_path` 分区, 以及协作需要读取的兄弟分区), 并明确"不得访问该范围之外的任何路径".
+  - **下游越界同样是本层的缺陷**: 你规划出的 task 若未约束边界, 下游越界访问宿主内容由本层负责.
+
+  违反路径边界**比产物质量缺陷更严重** —— 产物再好, 越界即失败.
+
   ### 动态树生长 (Critical · Dynamic Tree Growth)
 
   你只构建**本层直接下属节点**, 不一次性预测整棵树的最终形状:
@@ -322,11 +338,14 @@ generate_instruction: |-
   ✗ 是否有无真实数据流的假依赖 depends_on? → Phantom-Deps
   ✗ 是否有可独立并行的能力被错误串行合并? → Over-Serialization
   ✗ worker task 是否足够具体可独立执行? → VagueTask
+  ✗ 是否有 task 未写明可读写范围, 或计划本身默许了访问工作区之外的路径? → Path-Overreach
 
 # ---- 审查位 ----
 adversarial_role: |-
   严格审计执行组织树。按 audit_angles + review_checklist 逐项审查，重点关注能力缺失、exec_type 错标、不必要的 Manager 冗余。
   注意: exec_type=manager 的节点在单层 Plan 中不展开子节点是正确行为，勿将其视为缺陷。
+  **路径边界**: 每条 task 是否写明了该节点的可读写范围, 并明确禁止访问范围之外的路径? 计划中若有任何
+  指示或默许去读宿主仓库、父级目录、其他节点工作区或用户主目录的内容, 报 high —— 这比产物质量问题更严重。
 
 audit_role: |-
   执行组织风险审计专家, 发现组织结构中的隐性缺陷.
@@ -343,27 +362,33 @@ audit_angles:
 
 review_checklist:
 - - capability_coverage
-  - 能力完整性: 达成本目标所需的关键 Capability 有没有遗漏?
+  - 能力完整性：达成本目标所需的关键 Capability 有没有遗漏?
 - - role_coverage
-  - 角色覆盖完整性: 可用角色列表中, 有哪些角色的 suitable_for 覆盖了本任务**实际需要**的 Capability 却被遗漏? (仅领域语义重叠但任务不需要该能力 → 不算遗漏) → Missing-Role
+  - 角色覆盖完整性：可用角色列表中, 有哪些角色的 suitable_for 覆盖了本任务**实际需要**的 Capability 却被遗漏? (仅领域语义重叠但任务不需要该能力 → 不算遗漏) → Missing-Role
 - - boundary_correctness
-  - 边界正确性: 每个 step 的 exec_type 是否真实反映它是 Capability 还是 Terminal Action? (注意不要把"manager step 未在本 Plan 内展开子节点"误判为缺陷)
+  - 边界正确性：每个 step 的 exec_type 是否真实反映它是 Capability 还是 Terminal Action? (注意不要把"manager step 未在本 Plan 内展开子节点"误判为缺陷)
 - - honest_termination
-  - 终止诚实性: 标记为 worker 的 step 是否真同时满足 T1-T4?
+  - 终止诚实性：标记为 worker 的 step 是否真同时满足 T1-T4?
 - - dependency_soundness
-  - 依赖合理性: depends_on 表达的是运行期实质前置约束还是仅文档级的松散关联?
+  - 依赖合理性：depends_on 表达的是运行期实质前置约束还是仅文档级的松散关联?
 - - parallelism
-  - 并行性: 是否将可独立并行的能力(评判/验收/整理/交付准备)错误串行合并到单一 Manager 分支? 是否本可并行推进却被排到链尾拉长交付路径?
+  - 并行性：是否将可独立并行的能力(评判/验收/整理/交付准备)错误串行合并到单一 Manager 分支? 是否本可并行推进却被排到链尾拉长交付路径?
 - - tree_balance
-  - 子树均衡度: 不同分支最大深度差距是否过大?
+  - 子树均衡度：不同分支最大深度差距是否过大?
 - - role_alignment
-  - 角色贴合度: 所选 role 是否落在其 suitable_for 范围内且不被 not_for 否决?
+  - 角色贴合度：所选 role 是否落在其 suitable_for 范围内且不被 not_for 否决?
 - - reuse_awareness
-  - 复用意识: 有无可利用的已完成兄弟产物?若有则本Plan是否显式引入?
+  - 复用意识：有无可利用的已完成兄弟产物?若有则本Plan是否显式引入?
 - - workspace_group_correctness
-  - 共享组正确性: 需要互读真实文件/协作的 worker 是否都分配到明确 output_path 分区? 同一非空分区是否被多个节点声明(冲突)? output_path 是否含穿越(绝对路径/..段)?
+  - 共享组正确性：需要互读真实文件/协作的 worker 是否都分配到明确 output_path 分区? 同一非空分区是否被多个节点声明(冲突)? output_path 是否含穿越(绝对路径/..段)?
 - - shared_consistency_check
-  - 跨模块一致性: 跨模块接口/schema/配置对齐是否由 QA/reviewer 节点验证共享分区真实产物, 而非创建专门聚合节点?
+  - 跨模块一致性：跨模块接口/schema/配置对齐是否由 QA/reviewer 节点验证共享分区真实产物, 而非创建专门聚合节点?
+# 注意: review_checklist 的**描述行必须用全角冒号「：」**, 不能用半角 ": "。
+# 半角会让 YAML 把这一项解析成映射而非字符串, 于是 aicu.py:1223 的 `for name, desc in`
+# 拿到的 desc 是 dict, 渲染进审查提示词的会是 {'能力完整性': '...'} 这样的 Python 字面量。
+# 全文件所有条目均已按此约定改写, 新增条目请照做。
+- - path_boundary
+  - 路径边界：每条 task 是否写明了该节点的可读写范围, 并明确禁止访问范围之外的路径? 计划中若有任何指示或默许去读宿主仓库、父级目录、其他节点的工作区或用户主目录的内容, 报 high —— 这比产物质量问题更严重。本项**不适用 N/A**, 任何计划都必须为每个节点划定边界
 
 # ---- 领域角色（可编辑） ----
 # Manager 的 role_md 现在只承载「领域角色」部分（如「项目组长，负责组织各成员工作」）。

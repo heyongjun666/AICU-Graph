@@ -75,6 +75,9 @@ adversarial_role: |-
   - 注意：单层 Plan 中 manager step 未展开子节点是正确行为，勿上报为缺陷。
   - 对每个触发的失败模式，需引用具体的 step_id 和 task 片段作为证据。
   - 角色选用若违反 not_for 黑名单，也须明确指出。
+  - 路径边界：每条 task 是否写明了该节点的可读写范围, 并明确禁止访问范围之外的路径？工程类任务最容易
+    让 worker "顺手套用现有仓库代码", 计划中若有任何指示或默许去读宿主仓库源码、父级目录、其他节点
+    工作区或用户主目录的内容, 报 high —— 这比产物质量问题更严重。
 
 audit_role: |-
   研发执行层风险审计专家, 发现任务拆分中的隐性工程风险.
@@ -90,17 +93,19 @@ audit_angles:
 
 review_checklist:
 - - necessity
-  - 必要性: 这一层的 sub-manager 真有必要吗? 父 plan 可不可以直接铺出来?
+  - 必要性：这一层的 sub-manager 真有必要吗? 父 plan 可不可以直接铺出来?
 - - granularity
-  - 模块粒度: 一个 step 一名工程师在合理时间内能否端到端做完?
+  - 模块粒度：一个 step 一名工程师在合理时间内能否端到端做完?
 - - interface_contract
-  - 接口契约: 存在上下游关系的两个 worker step, 数据 schema 是否钉死到位段+类型+格式?
+  - 接口契约：存在上下游关系的两个 worker step, 数据 schema 是否钉死到位段+类型+格式?
 - - dependency_honesty
-  - 依赖诚实: depends_on 是否反映真实运行期数据流, 不是单纯文档级引用?
+  - 依赖诚实：depends_on 是否反映真实运行期数据流, 不是单纯文档级引用?
 - - critical_path
-  - 关键路径: 最长依赖链还有没有可并行化空间?
+  - 关键路径：最长依赖链还有没有可并行化空间?
 - - acceptance_executable
-  - 验收可测: 每个 step 能不能用一句话写出 pass/fail 条件?
+  - 验收可测：每个 step 能不能用一句话写出 pass/fail 条件?
+- - path_boundary
+  - 路径边界：每条 task 是否写明了该节点的可读写范围, 并明确禁止访问范围之外的路径? 工程模块天然容易"顺手套用现有仓库代码", 尤其要查计划里有没有默许 worker 去读宿主仓库源码、父级目录、其他节点工作区或用户主目录 —— 有则报 high, 这比产物质量问题更严重。本项**不适用 N/A**
 
 # ---- 角色人格(写入每个 CC 的 CLAUDE.md) ----
 role_md: |-

@@ -797,10 +797,12 @@ class TestRoutingPromptDomainNeutral:
 
 
 class TestParseAdversarialVoteFallback:
-    """_parse_adversarial_vote 兜底 —— 不依赖关键词推断状态。
+    """_parse_adversarial_vote —— 结构化结论是唯一来源，没有结论即 None。
 
-    结构化缺陷只由 JSON 路径的 defects 数组承载；自由文本不产结构化解构，
-    approved 无显式结构化批准即默认 False（与 JSON 路径 raw.get("approved", False) 一致）。
+    旧实现回退到 {"approved": False, "defects": [], ...}，那与「解析成功且无缺陷」
+    在下游不可区分：调用方只看 defects 是否为空，于是解析失败 = 审查通过。
+    现在解析失败返回 None，由调用方 fail-closed。仍然不做关键词推断——既不猜
+    approved，也不猜 defects。
     """
 
     @staticmethod
@@ -817,18 +819,30 @@ class TestParseAdversarialVoteFallback:
         assert len(p["defects"]) == 1
         assert p["defects"][0]["severity"] == "high"
 
-    def test_pass_phrasing_not_auto_approved(self):
-        """自由文本「全部通过」不被关键词缺失推断为 approved=True（无结构化批准即未批准）。"""
-        p = self._parsed("审查完成，所有检查项均通过。")
-        assert p["approved"] is False
-        assert p["defects"] == []
+    def test_pass_phrasing_returns_none(self):
+        """自由文本「全部通过」不构成结论：None 不是通过。"""
+        assert self._parsed("审查完成，所有检查项均通过。") is None
 
     def test_defect_wording_not_inferred_defects(self):
-        """自由文本提到「严重缺陷」不产出结构化 defects（不做关键词猜测），原文入 summary。"""
-        p = self._parsed("发现严重缺陷：模块 A 返回值错误，请修复。")
+        """自由文本提到「严重缺陷」也不产出结构化 defects（不做关键词猜测）。"""
+        assert self._parsed("发现严重缺陷：模块 A 返回值错误，请修复。") is None
+
+    def test_json_without_required_keys_is_none(self):
+        """有 JSON 但缺 approved/defects 判据键 → 同样视为未给出结论。"""
+        assert self._parsed('{"summary": "已全部通过"}') is None
+
+    def test_example_payload_in_prose_does_not_hijack_verdict(self):
+        """散文先引用示例负载、结论在后 → 必须取结论而非示例（回归主用例）。"""
+        p = self._parsed(
+            '接口返回 {"message": "login success"} 后跳转首页。\n'
+            '审查结论：\n'
+            '{"approved": false, "defects": ['
+            '{"check": "鉴权", "description": "未校验 token", "severity": "high"}], '
+            '"summary": "s"}'
+        )
+        assert p is not None
         assert p["approved"] is False
-        assert p["defects"] == []
-        assert "严重缺陷" in p["summary"]
+        assert p["defects"][0]["severity"] == "high"
 
 
 class TestBuildResumeTaskBody:

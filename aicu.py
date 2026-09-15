@@ -956,46 +956,69 @@ class AICU:
             result = result.replace(placeholder, value)
         return result
 
-    def _extract_json(self, text: str) -> Optional[dict]:
-        """从 CC 回复中提取 JSON（优先使用平衡大括号匹配，避免贪婪匹配跨 JSON 对象）"""
-        start = text.find('{')
-        if start >= 0:
-            depth = 0
-            in_string = False
-            escape_next = False
-            for i in range(start, len(text)):
-                ch = text[i]
-                if escape_next:
-                    escape_next = False
-                    continue
-                if ch == '\\' and in_string:
+    def _extract_json(self, text: str, required_keys: Optional[tuple] = None) -> Optional[dict]:
+        """从 CC 回复中提取 JSON 对象。
+
+        扫描全文**所有**大括号平衡块并逐个试解析，而不是只看第一个 '{'。审查者
+        的散文里常引用示例负载（如 ``{"message": "login success"}``），首个平衡块
+        往往是示例而非结论，取它会把判定劫持到错误的对象上。
+
+        Args:
+            text: CC 原始回复。
+            required_keys: 判定键集合。给定后只接受**同时包含全部这些键**的对象，
+                并在多个匹配中取最后一个（示例通常出现在结论文本之前）。无匹配
+                返回 None，由调用方 fail-closed —— 绝不把「没解析出结论」当「通过」。
+
+        Returns:
+            解析出的 dict；未给 required_keys 时返回第一个可解析对象，找不到返回 None。
+        """
+        candidates = self._iter_json_objects(text)
+        if required_keys:
+            matching = [
+                obj for _start, obj in candidates
+                if all(key in obj for key in required_keys)
+            ]
+            return matching[-1] if matching else None
+        return candidates[0][1] if candidates else None
+
+    @staticmethod
+    def _iter_json_objects(text: str) -> List[tuple]:
+        """单趟扫描，返回按出现位置排序的 ``(start, obj)``：所有能解析的平衡块。
+
+        O(len(text))：栈记录未闭合 '{' 的下标，遇 '}' 出栈即得一个候选区间，每个
+        候选只 json.loads 一次（不做「逐个起点各扫一遍」的 O(N·L) 展开）。
+
+        字符串内遇裸换行即复位 —— JSON 规范不允许字符串跨裸换行，而散文里的
+        不成对引号会污染 in_string 并让后续所有块失配，复位可让扫描重新对齐。
+        """
+        stack: List[int] = []
+        objects: List[tuple] = []
+        in_string = False
+        escape_next = False
+        for i, ch in enumerate(text):
+            if escape_next:
+                escape_next = False
+                continue
+            if in_string:
+                if ch == '\\':
                     escape_next = True
+                elif ch == '"':
+                    in_string = False
+                elif ch == '\n':
+                    in_string = False
+                continue
+            if ch == '"':
+                in_string = True
+            elif ch == '{':
+                stack.append(i)
+            elif ch == '}' and stack:
+                start = stack.pop()
+                try:
+                    objects.append((start, json.loads(text[start:i + 1])))
+                except (json.JSONDecodeError, ValueError):
                     continue
-                if ch == '"' and not escape_next:
-                    in_string = not in_string
-                    continue
-                if in_string:
-                    continue
-                if ch == '{':
-                    depth += 1
-                elif ch == '}':
-                    depth -= 1
-                    if depth == 0:
-                        candidate = text[start:i + 1]
-                        try:
-                            return json.loads(candidate)
-                        except (json.JSONDecodeError, ValueError):
-                            break
-        # Fallback: 从第一个 { 开始逐步扩展，找到第一个合法 JSON
-        if start >= 0:
-            for end in range(start + 1, len(text)):
-                if text[end] == '}':
-                    candidate = text[start:end + 1]
-                    try:
-                        return json.loads(candidate)
-                    except (json.JSONDecodeError, ValueError):
-                        continue
-        return None
+        objects.sort(key=lambda item: item[0])
+        return objects
 
     # ========== 进程管理 ==========
 
@@ -1099,6 +1122,10 @@ class AICU:
         for round_num in range(1, max_rounds + 1):
             print(f"\n[AICU-solo] 阶段2: 自审 (第 {round_num} 轮)")
             defects = self._solo_review(question, cc)
+            if defects is None:
+                print("  [warn] 自审响应无法解析为 JSON —— 视为未通过（不静默放行）")
+                consensus_reached = False
+                break
             if not defects:
                 consensus_reached = True
                 print(f"  自审通过")
@@ -1121,11 +1148,13 @@ class AICU:
             best_id=0,
             consensus_reached=consensus_reached,
             vote_rounds=round_num,
-            audit_defects=[],
         )
 
-    def _solo_review(self, question: str, cc: ClaudeCodeAgent) -> List[dict]:
-        """单 CC 自审：读取自己的产出，找出 high/medium 缺陷"""
+    def _solo_review(self, question: str, cc: ClaudeCodeAgent) -> Optional[List[dict]]:
+        """单 CC 自审：读取自己的产出，找出 high/medium 缺陷。
+
+        返回 None = 响应无法解析（调用方须判未通过）；[] = 解析成功且无缺陷。
+        """
         read_instruction = self._build_read_instruction_text(0)
 
         checklist_text = "\n".join(
@@ -1156,6 +1185,8 @@ class AICU:
         review_path = cc.workspace / "review.json"
         review_path.write_text(json.dumps(review_data, ensure_ascii=False, indent=2), encoding='utf-8')
 
+        if parsed is None:
+            return None
         return [d for d in parsed.get("defects", [])
                 if d.get("severity") in ("high", "medium")]
 
@@ -1191,6 +1222,10 @@ class AICU:
         for round_num in range(1, max_rounds + 1):
             print(f"\n[AICU-pair] 阶段2: CC-1 审查 (第 {round_num} 轮)")
             defects = self._pair_review(question, reviewer)
+            if defects is None:
+                print("  [warn] CC-1 审查响应无法解析为 JSON —— 视为未通过（不静默放行）")
+                consensus_reached = False
+                break
             if not defects:
                 consensus_reached = True
                 print(f"  CC-1 审查通过")
@@ -1211,11 +1246,13 @@ class AICU:
             best_id=0,
             consensus_reached=consensus_reached,
             vote_rounds=round_num,
-            audit_defects=[],
         )
 
-    def _pair_review(self, question: str, reviewer: ClaudeCodeAgent) -> List[dict]:
-        """CC-1 审查 CC-0 的产出"""
+    def _pair_review(self, question: str, reviewer: ClaudeCodeAgent) -> Optional[List[dict]]:
+        """CC-1 审查 CC-0 的产出。
+
+        返回 None = 响应无法解析（调用方须判未通过）；[] = 解析成功且无缺陷。
+        """
         read_instruction = self._build_read_instruction_text(0)
 
         checklist_text = "\n".join(
@@ -1245,6 +1282,8 @@ class AICU:
         review_path = reviewer.workspace / "review.json"
         review_path.write_text(json.dumps(review_data, ensure_ascii=False, indent=2), encoding='utf-8')
 
+        if parsed is None:
+            return None
         return [d for d in parsed.get("defects", [])
                 if d.get("severity") in ("high", "medium")]
 
@@ -1300,7 +1339,10 @@ class AICU:
         self._copy_best_to_cc0(best_id)
 
         # ---- 修订循环 ----
-        consensus_reached = not merge_result["defects"]
+        # parse_failed 时 defects 为空但语义是「没解析出结论」，绝不能算通过
+        consensus_reached = (
+            not merge_result["parse_failed"] and not merge_result["defects"]
+        )
         round_num = 0
         all_defects = merge_result["defects"]
 
@@ -1313,6 +1355,10 @@ class AICU:
             # CC-2 复查
             print(f"  CC-2 复查...")
             recheck = self._triple_review_only(question)
+            if recheck["parse_failed"]:
+                all_defects = []
+                consensus_reached = False
+                break
             all_defects = recheck["defects"]
             if not all_defects:
                 consensus_reached = True
@@ -1329,11 +1375,14 @@ class AICU:
             best_id=best_id,
             consensus_reached=consensus_reached,
             vote_rounds=round_num,
-            audit_defects=[],
         )
 
     def _triple_merge(self, question: str) -> dict:
-        """CC-2 比较两个方案、评分、融合，返回最优方案和缺陷"""
+        """CC-2 比较两个方案、评分、融合，返回最优方案和缺陷。
+
+        ``parse_failed=True`` 表示响应无法解析 —— 此时 defects 恒为空但语义是
+        「没有可信结论」，调用方必须据此判未通过，绝不能当成「无缺陷」。
+        """
         reviewer = self.ccs[2]
         read_0 = self._build_read_instruction_text(0)
         read_1 = self._build_read_instruction_text(1)
@@ -1365,7 +1414,11 @@ class AICU:
         )
         prompt = self._inject_roles_context(prompt)
         resp = self._cc_chat_with_retry(reviewer, prompt, timeout=7200)
-        parsed = self._extract_json(resp) or {}
+        parsed = self._extract_json(resp, required_keys=("scores", "best"))
+        parse_failed = parsed is None
+        if parse_failed:
+            print("  [warn] CC-2 融合响应无法解析为 JSON —— 视为未通过（不静默放行）")
+            parsed = {}
 
         # 解析评分
         raw_scores = parsed.get("scores", {})
@@ -1402,6 +1455,7 @@ class AICU:
             "scores": f"A={scores_a}, B={scores_b}",
             "defects": defects,
             "raw_scores": {0: {0: scores_a, 1: scores_b}, 2: {0: scores_a, 1: scores_b}},
+            "parse_failed": parse_failed,
         }
 
     def _triple_review_only(self, question: str) -> dict:
@@ -1429,9 +1483,12 @@ class AICU:
         prompt = self._inject_roles_context(prompt)
         resp = self._cc_chat_with_retry(reviewer, prompt, timeout=7200)
         parsed = self._parse_adversarial_vote(resp)
+        if parsed is None:
+            print("  [warn] CC-2 复查响应无法解析为 JSON —— 视为未通过（不静默放行）")
+            return {"defects": [], "parse_failed": True}
         defects = [d for d in parsed.get("defects", [])
                    if d.get("severity") in ("high", "medium")]
-        return {"defects": defects}
+        return {"defects": defects, "parse_failed": False}
 
     # ==================== CC≥4: full 模式 ====================
     # CC-0/CC-1 独立产出方案，CC-2 评审融合，CC-3 审计。
@@ -1482,7 +1539,9 @@ class AICU:
         self._copy_best_to_cc0(best_id)
 
         # 修订评审发现的缺陷
-        if merge_result["defects"]:
+        if merge_result["parse_failed"]:
+            print(f"  [warn] CC-2 评审响应无法解析为 JSON —— 评审维度记为未通过")
+        elif merge_result["defects"]:
             print(f"  → CC-0 修订评审缺陷...")
             self._revise_with_defect_list(question, self.ccs[0], merge_result["defects"])
 
@@ -1491,11 +1550,17 @@ class AICU:
         print(f"\n[AICU-full] 阶段3: CC-3 深度审计 (最多 {max_rounds} 轮)")
         audit_passed = False
         round_num = 0
-        last_audit_defects: List[dict] = []
+        last_audit_defects: Optional[List[dict]] = None
 
         for round_num in range(1, max_rounds + 1):
             print(f"\n  --- 审计第 {round_num} 轮 ---")
             audit_defects = self._full_audit(question)
+
+            if audit_defects is None:
+                print(f"  [warn] 审计响应无法解析为 JSON —— 视为审计未通过（不静默放行）")
+                last_audit_defects = None
+                audit_passed = False
+                break
             last_audit_defects = audit_defects
 
             if not audit_defects:
@@ -1515,8 +1580,12 @@ class AICU:
             print(f"\n[AICU-full] 审计未通过 (已 {max_rounds} 轮修复)")
 
         # ---- 汇总 ----
-        # consensus 条件：评审无缺陷 且 审计最终通过
-        consensus_reached = (not merge_result["defects"]) and audit_passed
+        # consensus 条件：评审无缺陷（且确实解析出了结论） 且 审计最终通过
+        consensus_reached = (
+            not merge_result["parse_failed"]
+            and not merge_result["defects"]
+            and audit_passed
+        )
         return self._finalize_result(
             question=question,
             scores=merge_result["raw_scores"],
@@ -1524,10 +1593,14 @@ class AICU:
             consensus_reached=consensus_reached,
             vote_rounds=round_num,
             audit_defects=last_audit_defects,
+            audit_passed=audit_passed,
         )
 
-    def _full_audit(self, question: str) -> List[dict]:
-        """CC-3 专属审计：寻找漏洞、风险和遗漏"""
+    def _full_audit(self, question: str) -> Optional[List[dict]]:
+        """CC-3 专属审计：寻找漏洞、风险和遗漏。
+
+        返回 None = 响应无法解析（调用方须判审计未通过）；[] = 解析成功且无缺陷。
+        """
         auditor = self.ccs[3]
 
         read_instruction = self._build_read_instruction_text(0)
@@ -1567,6 +1640,8 @@ class AICU:
         audit_path = auditor.workspace / "audit.json"
         audit_path.write_text(json.dumps(audit_data, ensure_ascii=False, indent=2), encoding='utf-8')
 
+        if parsed is None:
+            return None
         return [d for d in parsed.get("defects_found", [])
                 if d.get("severity") in ("high", "medium")]
 
@@ -1704,8 +1779,13 @@ class AICU:
 
     def _finalize_result(self, question: str, scores: dict, best_id: int,
                           consensus_reached: bool, vote_rounds: int,
-                          audit_defects: List[dict]) -> dict:
-        """汇总结果并保存"""
+                          audit_defects: Optional[List[dict]] = None,
+                          audit_passed: Optional[bool] = None) -> dict:
+        """汇总结果并保存。
+
+        audit_defects / audit_passed 默认 None = 该策略**没有审计阶段**（CC<4）。
+        仅当确实跑过审计时才写入这两个键 —— 见下方 result 组装的说明。
+        """
         avg_scores = self._aggregate_scores(scores) if scores else {0: 8.0}
 
         # 二进制后缀（best_solution_summary 拼接时跳过）
@@ -1795,8 +1875,6 @@ class AICU:
             "best_id": best_id,
             "consensus_reached": consensus_reached,
             "vote_rounds": vote_rounds,
-            "audit_defects": audit_defects,
-            "audit_passed": len(audit_defects) == 0,
             "strategy": self._peer_strategy_name(),
             "role_config": {
                 "output_file": self.output_file,
@@ -1806,14 +1884,25 @@ class AICU:
                 "audit_role": self.audit_role,
             },
         }
+        # audit 键只在**确实跑过审计**时写入。solo/pair/triple 没有审计阶段，
+        # 写 audit_passed=True 是伪造证据：executables/manager.py 的 _degrade_review
+        # 以 "audit_passed" in raw_output 判定「审计跑过且通过」，会被这个恒真的键
+        # 命中并降级为全量通过（fail-open）。不写则落回它文档化的 legacy 分支。
+        if audit_defects is not None or audit_passed is not None:
+            result["audit_defects"] = audit_defects if audit_defects is not None else []
+            result["audit_passed"] = (
+                bool(audit_passed) if audit_passed is not None
+                else len(result["audit_defects"]) == 0
+            )
         self._save_to_workspace("aicu_result.json",
             json.dumps(result, ensure_ascii=False, indent=2, default=str)
         )
 
         print(f"\n{'='*60}")
         print(f"[AICU] 最终产出: {final_dir}")
-        print(f"[AICU] 审查: {'通过' if consensus_reached else '未通过'}, "
-              f"审计: {'通过' if result['audit_passed'] else '已修订'}")
+        print(f"[AICU] 审查: {'通过' if consensus_reached else '未通过'}")
+        if "audit_passed" in result:
+            print(f"[AICU] 审计: {'通过' if result['audit_passed'] else '已修订'}")
         print(f"{'='*60}")
 
         return result
@@ -1875,31 +1964,36 @@ class AICU:
                 answer_scores.setdefault(answer_id, []).append(score)
         return {aid: sum(ss) / len(ss) for aid, ss in answer_scores.items()}
 
-    def _parse_adversarial_vote(self, text: str) -> dict:
-        raw = self._extract_json(text)
-        if raw:
-            approved = raw.get("approved", False)
-            if isinstance(approved, str):
-                approved = approved.lower() == "true"
-            defects = raw.get("defects", [])
-            if not isinstance(defects, list):
-                defects = []
-            return {"approved": bool(approved), "defects": defects, "summary": raw.get("summary", "")}
+    def _parse_adversarial_vote(self, text: str) -> Optional[dict]:
+        """解析对抗投票 JSON；无法解析返回 None，由调用方 fail-closed。
 
-        # 兜底：无法解析结构化 JSON 时，不依赖关键词推断状态（旧实现
-        # re.search('defect|缺陷|问题|错误|bug') 会把「无缺陷，已全部修复」等通过语态
-        # 误判为拒绝）。结构化缺陷只由 JSON 路径的 defects 数组承载；自由文本只作摘要记录。
-        # approved 兜底默认 False —— 与 JSON 路径 raw.get("approved", False) 一致：
-        # 「缺少显式结构化批准即视为未批准」，绝不在无结构化证据时臆造通过。
-        return {"approved": False, "defects": [], "summary": text[:500]}
+        None 与 ``{"defects": []}`` 语义不同：前者是「审查者没给出可解析的结论」，
+        后者是「解析成功且无 high/medium 缺陷」。把前者当后者就是静默放行。
 
-    def _parse_audit(self, text: str) -> dict:
-        raw = self._extract_json(text)
-        if raw:
-            defects = raw.get("defects_found", [])
-            if not isinstance(defects, list):
-                defects = []
-            return {"defects_found": defects, "overall_assessment": raw.get("overall_assessment", "")}
-        return {"defects_found": [], "overall_assessment": text[:500]}
+        不依赖关键词推断状态：旧实现 re.search('defect|缺陷|问题|错误|bug') 会把
+        「无缺陷，已全部修复」等通过语态误判为拒绝。结论只由结构化 JSON 承载。
+        """
+        raw = self._extract_json(text, required_keys=("approved", "defects"))
+        if raw is None:
+            return None
+        approved = raw.get("approved", False)
+        if isinstance(approved, str):
+            approved = approved.lower() == "true"
+        defects = raw.get("defects", [])
+        if not isinstance(defects, list):
+            defects = []
+        return {"approved": bool(approved), "defects": defects,
+                "summary": raw.get("summary", "")}
+
+    def _parse_audit(self, text: str) -> Optional[dict]:
+        """解析审计 JSON；无法解析返回 None，语义区分同 _parse_adversarial_vote。"""
+        raw = self._extract_json(text, required_keys=("defects_found", "overall_assessment"))
+        if raw is None:
+            return None
+        defects = raw.get("defects_found", [])
+        if not isinstance(defects, list):
+            defects = []
+        return {"defects_found": defects,
+                "overall_assessment": raw.get("overall_assessment", "")}
 
 

@@ -591,15 +591,15 @@ class TestReviewApplicabilityNote:
         defects = aicu._pair_review("问题", aicu.ccs[1])
         assert [d["severity"] for d in defects] == ["high", "medium"]
 
-    def test_parse_failure_still_fails_closed(self, tmp_path, monkeypatch):
-        """解析失败仍 fail-closed（approved=False），本次改动不得影响该行为。"""
+    def test_parse_failure_yields_none_not_empty_defects(self, tmp_path, monkeypatch):
+        """解析失败返回 None（不是 []）—— 调用方据此判未通过，本次改动不得退回静默放行。"""
         aicu = _make_aicu(tmp_path, num_ccs=2)
         monkeypatch.setattr(
             aicu, "_cc_chat_with_retry",
             lambda cc, prompt, timeout=7200, **kw: "不是 JSON",
         )
-        parsed = aicu._parse_adversarial_vote("不是 JSON")
-        assert parsed.get("approved") is False
+        assert aicu._parse_adversarial_vote("不是 JSON") is None
+        assert aicu._pair_review("问题", aicu.ccs[1]) is None
 
 
 # ============================================================================

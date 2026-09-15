@@ -4,7 +4,6 @@ import {
   ChevronRight,
   File,
   Folder,
-  PackageOpen,
   RefreshCw,
   X,
 } from 'lucide-react';
@@ -27,8 +26,7 @@ function formatBytes(bytes: number): string {
 /**
  * SessionOutputsDialog — 会话级「查看产出」文件树浏览器（V3-2.2）。
  * 打开即加载 shared 根；面包屑 Outputs / {partition} / {subpath}。
- * 仅 kind === 'artifact_partition' 行显示 producer 徽标（role + artifact_type + step_ref）
- * + delivery state 徽章；文件预览走 previewable 分支（否则「二进制/不可预览文件」）。
+ * 文件预览走 previewable 分支（否则「二进制/不可预览文件」）。
  */
 const SessionOutputsDialog: React.FC<SessionOutputsDialogProps> = ({ open, sessionId, onClose }) => {
   const { t } = useI18n();
@@ -145,16 +143,6 @@ const SessionOutputsDialog: React.FC<SessionOutputsDialogProps> = ({ open, sessi
                     <span className="workspace-entry-icon">{entry.type === 'directory' ? <Folder size={16} /> : <File size={16} />}</span>
                     <span className="workspace-entry-name">
                       <span className="outputs-entry-title">{entry.name}</span>
-                      {entry.kind === 'artifact_partition' && entry.producer && (
-                        <span className="outputs-badges">
-                          <span className="outputs-badge outputs-producer" title={t('outputs.producedBy', { role: entry.producer.role })}>
-                            <PackageOpen size={11} /> {entry.producer.role} · {entry.producer.artifact_type} · {entry.producer.step_ref}
-                          </span>
-                          {entry.delivery?.state && (
-                            <span className={`outputs-badge outputs-delivery outputs-delivery-${String(entry.delivery.state).toLowerCase()}`}>{entry.delivery.state}</span>
-                          )}
-                        </span>
-                      )}
                     </span>
                     <small>{entry.type === 'directory' ? t('outputs.folder') : formatBytes(entry.size)}</small>
                   </button>

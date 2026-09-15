@@ -25,10 +25,6 @@ audit_rounds: 2
 # ---- skills ----
 skills: [diagnosing-bugs, codegraph]
 
-# ---- 交付契约 ----
-artifact_contract:
-  artifact_type: document
-  validators: [exists, non_empty, verdict_block]
 
 # ---- 产出文件 ----
 output_file: null

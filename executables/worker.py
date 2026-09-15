@@ -20,8 +20,6 @@ from typing import Any, Optional
 from executables.base import Executable, ExecutableContext
 from runtime.agent_events import event_queue_dirs
 from runtime.context import build_codegraph_context, notify_artifact_updated
-from runtime.delivery import delivery_enabled as _delivery_enabled
-from runtime.delivery import gate_enabled as _delivery_gate_enabled
 from runtime.models import NodeStatus, ErrorObject, LogEntry, LogLevel
 from runtime.workspace_resolver import resolve_partition
 
@@ -36,8 +34,7 @@ def _normalize_worker_artifact(ctx: ExecutableContext, artifact_path: str) -> st
     copy/move 修复事实**（Runtime 只证明事实，不修复事实）：
       - 声明路径已在分区内（CC 直写 / AICU shared_target 直写）→ 幂等返回
       - 声明路径在分区外 → 产物权威 = 分区（Runtime 事实），返回分区，不复制
-    空分区由 Gate ``non_empty`` 拦下 → delivery_state=invalid → auto-retry/repair，
-    不静默救援。
+    空分区不静默救援：下游读到空目录即事实。
     """
     workspace_getter = getattr(ctx.runtime, "get_node_workspace", None)
     if not artifact_path or not callable(workspace_getter):
@@ -79,108 +76,8 @@ def _normalize_worker_artifact(ctx: ExecutableContext, artifact_path: str) -> st
     return destination
 
 
-def _load_worker_artifact_contract(ctx: ExecutableContext) -> Any:
-    """从角色 yaml 读取 ``artifact_contract:``；失败回退默认契约（fail-silent）。
-
-    roles_dir 与 aicu.py 一致：项目根 ``roles/``（Worker 由 aicu 按同一目录解析
-    角色配置，契约声明与运行时角色配置天然对齐）。测试角色缺省走默认契约。
-    """
-    from runtime.delivery.contracts import ArtifactContract
-
-    try:
-        from runtime.roles_manager import RolesManager
-
-        roles_dir = os.path.join(
-            os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "roles"
-        )
-        return RolesManager(roles_dir).get_artifact_contract(
-            getattr(ctx.node, "role", "") or "default", "worker"
-        )
-    except Exception:  # noqa: BLE001
-        return ArtifactContract()
-
-
-def _validate_worker_artifact_gate(ctx: ExecutableContext, artifact_path: str) -> str:
-    """Artifact Gate（V3-2 Delivery；AICU_DELIVERY=1 且 AICU_ARTIFACT_GATE!=0 才启用）。
-
-    Args:
-        ctx: ExecutableContext（含 runtime / node）。
-        artifact_path: _normalize_worker_artifact 归一化后的产物路径。
-
-    Returns:
-        "validated"（Gate 通过，调用方写入 delivery_state）。
-
-    Raises:
-        ArtifactGateError: 硬门失败（containment/exists/type/contract）——Worker 捕获后
-            转 FAILED + delivery_state="invalid"，不静默放行。
-    """
-    from runtime.delivery import gate as _gate
-
-    node_root = os.path.realpath(ctx.runtime.get_node_workspace(ctx.node.id))
-    config = ctx.node.config or {}
-    shared_root = config.get("_shared_workspace")
-    if shared_root:
-        # Shared 模式：只允许分区（shared-only），Node Workspace 不作为交付根。
-        # CC 把产物写在 nodes/** 会被 Gate 拦下 → FAILED + delivery_state=invalid，
-        # 由现有 _try_auto_retry 原地重试至 max_iterations。这正是「不修复事实只证明事实」。
-        roots = _gate.ArtifactRoots(shared_root=resolve_partition(config), node_root=None)
-    else:
-        # Legacy 模式：Node workspace 兜底（兼容旧会话/旧测试）。
-        roots = _gate.ArtifactRoots(shared_root=None, node_root=node_root)
-    contract = _load_worker_artifact_contract(ctx)
-    result = _gate.check_gate(artifact_path, roots, contract)
-    if not result.passed:
-        raise _gate.ArtifactGateError(
-            ErrorObject.create_artifact_gate_error(result.errors),
-            "; ".join(result.errors),
-        )
-    return "validated"
-
-
-def _publish_worker_artifact(ctx: ExecutableContext, artifact_path: str) -> None:
-    """把 Worker 产物写入 Artifact Registry（非权威 Snapshot，失败仅 log）。
-
-    职责归属（方案 C）：Worker=生产（写入其分区），交付=Runtime（确定性框架代码）。
-    **Registry 写失败 ≠ Worker 失败**——PASS 后 Registry FAIL 不影响 COMPLETED，
-    delivery_state 不被污染（Assembly 以 filesystem 重新扫描为最终事实）。
-    每次 COMPLETED 重建同名 step_ref 条目，覆盖 repair/resume 改写。
-    """
-    from runtime.delivery.registry import FilesystemRegistry, build_artifact_entry
-
-    config = ctx.node.config or {}
-    shared_root = config.get("_shared_workspace")
-    if not shared_root:
-        return
-    entry = build_artifact_entry(
-        ctx.node,
-        artifact_path,
-        _load_worker_artifact_contract(ctx),
-        shared_root,
-        config.get("_output_path") or "",
-    )
-    FilesystemRegistry(shared_root).write(entry)
-
-
 def _resolve_dep_artifact_path(ctx: ExecutableContext, dep) -> str:
-    """依赖节点产出路径：Delivery 开启时经 Registry 解析确定性绝对路径。
-
-    解析失败/未开启降级 = 现状（node.artifact_path 直传 → workspace 兜底），
-    不引入新错误面。Symbolic Reference 只解析身份，内容正确性仍由 LLM Read 确认。
-    """
-    try:
-        if _delivery_enabled():
-            config = ctx.node.config or {}
-            shared_root = config.get("_shared_workspace")
-            dep_ref = getattr(dep, "step_ref", "") or ""
-            if shared_root and dep_ref:
-                from runtime.delivery.registry import FilesystemRegistry
-
-                resolved = FilesystemRegistry(shared_root).resolve(f"@{dep_ref}")
-                if resolved:
-                    return resolved
-    except Exception:  # noqa: BLE001
-        logger.debug("Registry resolve failed for dep '%s' (fallback)", getattr(dep, 'id', '?'),
-                     exc_info=True)
+    """依赖节点产出路径：node.artifact_path 直传，缺失时 workspace 兜底。"""
     artifact = getattr(dep, "artifact_path", "") or ""
     if artifact:
         return artifact
@@ -529,8 +426,7 @@ class Worker(Executable):
                     role = getattr(d, 'role', '?') or '?'
                     task = (getattr(d, 'task', '') or '')[:120].replace('\n', ' ')
 
-                    # Delivery 开启时优先用 Registry 解析的确定性绝对路径；
-                    # 否则回退 node.artifact_path / workspace 兜底（字节级不变）。
+                    # node.artifact_path 直传，缺失时 workspace 兜底。
                     dep_path = _resolve_dep_artifact_path(ctx, d)
 
                     lines.append(f"**依赖 {dep_index} — [{role}]** {task}")
@@ -1082,9 +978,6 @@ class Worker(Executable):
             )
         future = executor.submit(aicu.ask, task_body)
 
-        # Artifact Gate 开关预声明（供下方 except 引用；仅在成功路径到达 Gate 处置位）
-        delivery_gate_on = False
-
         # resume 失败兜底（仅 Revise 复用路径，窄范围）：CC --resume 续接的 AICU
         # 首次 ask 抛异常时（会话失效/resume 失败），pop 缓存 + 无 --resume 重建会话
         # 重试一次；普通激活续接路径不触发，异常原样传播（下方 FAILED 回填）。
@@ -1123,27 +1016,6 @@ class Worker(Executable):
                 ctx, result.get("final_output_path", "")
             )
 
-            # Artifact Gate（V3-2 Delivery；AICU_DELIVERY=1 且 AICU_ARTIFACT_GATE!=0 才启用）。
-            # 硬门失败抛 ArtifactGateError → 下方 FAILED + delivery_state="invalid"，
-            # 由现有 _try_auto_retry 原地重试至 max_iterations（不消耗 collaboration budget）。
-            # 产物缺失时 Gate 必然失败 → 短路无损。
-            delivery_gate_on = _delivery_gate_enabled()
-            artifact_delivery_state = None
-            if delivery_gate_on:
-                artifact_delivery_state = _validate_worker_artifact_gate(ctx, artifact_path)
-
-            # Artifact Registry publish（Delivery 伞形门控；非权威 Snapshot）。
-            # 写失败仅 log，不影响 COMPLETED / delivery_state。
-            if _delivery_enabled():
-                try:
-                    _publish_worker_artifact(ctx, artifact_path)
-                except Exception:  # noqa: BLE001
-                    logger.warning(
-                        "Registry publish failed for node '%s' (ignored, non-authoritative)",
-                        ctx.node.id,
-                        exc_info=True,
-                    )
-
             # 上下文失效边界：Worker 只知"有产出写入共享组"，不依赖 CodeGraph。
             # notify_artifact_updated 内部 dispatch 到 GroupGraphState.mark_stale（Phase 4 可扩展）。
             shared_root = (ctx.node.config or {}).get("_shared_workspace")
@@ -1174,8 +1046,6 @@ class Worker(Executable):
                 "artifact_path": artifact_path,
                 "log": log_entries,
             }
-            if delivery_gate_on and artifact_delivery_state:
-                update_kwargs["delivery_state"] = artifact_delivery_state
             ctx.runtime.update_node_status(
                 ctx.node.id,
                 NodeStatus.COMPLETED,
@@ -1190,7 +1060,6 @@ class Worker(Executable):
                 return NodeStatus.PAUSED
 
             # Build structured error via factory method
-            # ArtifactGateError 自带结构化 ErrorObject（fail-fast 冒泡），其余走通用工厂。
             error = getattr(exc, "error", None) or ErrorObject.create_worker_execution_error()
 
             # 失败路径兜底摄取事件（Agent 可能在失败前已发布部分事件）。
@@ -1214,9 +1083,6 @@ class Worker(Executable):
                 "error": error,
                 "log": log_entries,
             }
-            # Gate 硬门失败（或 Gate 开启下执行失败）→ 交付状态标记 invalid
-            if delivery_gate_on:
-                update_kwargs["delivery_state"] = "invalid"
             ctx.runtime.update_node_status(
                 ctx.node.id,
                 NodeStatus.FAILED,

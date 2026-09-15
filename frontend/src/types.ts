@@ -295,34 +295,15 @@ export interface WorkspaceFile {
 // ============================================================================
 // Session Outputs（V3-2.2 会话级「查看产出」）
 // OutputEntry 与 WorkspaceEntry 分离：Outputs 是「最终产出浏览器」，不是
-// Workspace Debugger。Filesystem=内容事实源，Registry=产物身份/来源事实源，
-// Delivery=交付事实源。producer 表达「Artifact 的 producer metadata」。
+// Workspace Debugger。Filesystem = 内容事实源。
 // ============================================================================
-
-export interface ArtifactProducer {
-  node_id: string;
-  role: string;
-  step_ref: string;
-  artifact_type: string;
-  key_files: string[];
-}
-
-export interface DeliveryInfo {
-  state: string | null;
-  // P2 扩展位：issues?: DeliveryIssue[];
-}
-
-export type OutputKind = 'artifact_partition' | 'directory' | 'file';
 
 export interface OutputEntry {
   name: string;
   path: string;
   type: 'directory' | 'file';
-  kind: OutputKind;
   size: number;
   modified_at: number;
-  producer: ArtifactProducer | null;
-  delivery: DeliveryInfo | null;
 }
 
 export interface OutputListing {

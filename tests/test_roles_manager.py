@@ -137,32 +137,6 @@ class TestUpdateDeleteRole:
             rm.delete_role("ghost", role_type="worker")
 
 
-class TestArtifactContract:
-    def test_missing_role_falls_back_to_default_contract(self, tmp_path):
-        rm = RolesManager(str(tmp_path))
-        c = rm.get_artifact_contract("ghost", "worker")
-        assert c.validators == ["exists", "non_empty"]
-        assert c.artifact_type == "generic"
-
-    def test_parses_role_contract_and_merges_default(self, tmp_path):
-        _write_role_yaml(
-            tmp_path, "worker", "dev",
-            "artifact_contract:\n  validators: [exists]\n",
-        )
-        rm = RolesManager(str(tmp_path))
-        assert rm.get_artifact_contract("dev", "worker").validators == ["exists"]
-
-        # 角色未声明 → 继承 default.yaml 契约
-        _write_role_yaml(
-            tmp_path, "worker", "default",
-            "artifact_contract:\n  validators: [non_empty]\n",
-        )
-        _write_role_yaml(tmp_path, "worker", "dev2", "summary: x\n")
-        assert rm.get_artifact_contract("dev2", "worker").validators == [
-            "non_empty",
-        ]
-
-
 class TestRoleSchema:
     def test_field_type_derivation_and_hidden_fields(self, tmp_path):
         _write_role_yaml(
@@ -185,12 +159,10 @@ class TestRoleSchema:
     def test_manager_schema_hides_protocol_fields(self, tmp_path):
         _write_role_yaml(
             tmp_path, "manager", "default",
-            "summary: M\ngenerate_instruction: X\nreview_checklist: []\n"
-            "artifact_contract: {}\n",
+            "summary: M\ngenerate_instruction: X\nreview_checklist: []\n",
         )
         schema = RolesManager(str(tmp_path)).get_role_schema("manager")
         names = {f["name"] for f in schema["fields"]}
         assert "generate_instruction" not in names
         assert "review_checklist" not in names
-        assert "artifact_contract" not in names
         assert "summary" in names

@@ -117,7 +117,7 @@ Role 和 Skills 是节点执行时使用的能力配置。它们保存在 `roles
 - Manager / Worker 执行体和 ExecutionPlan 校验；
 - 多会话 Runtime、任务图、调度器和状态持久化；
 - Event Bus、SSE 事件流和节点日志；
-- 共享工作区、Artifact 管理和交付检查；
+- 共享工作区与 Artifact 管理；
 - 多种 AI Coding CLI 适配器及模型 / Provider 配置；
 - React 前端工作台；
 - 真实 CLI 执行和较完整的 Python / 前端测试套件。
@@ -182,7 +182,7 @@ api_keys.json
 - Manager / Worker Runtime；
 - Role、Skills 和能力配置；
 - 事件驱动协作与长周期任务执行；
-- Artifact、共享工作区和交付保障；
+- Artifact 与共享工作区；
 - CLI 适配、评估和测试。
 
 提交代码前请先阅读现有文档和测试，并确保不提交本地凭证及运行产物。

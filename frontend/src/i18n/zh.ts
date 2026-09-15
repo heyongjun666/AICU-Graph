@@ -436,7 +436,6 @@ export const zh: Dict = {
   'outputs.noOutputs': '暂无产出。',
   'outputs.folder': '文件夹',
   'outputs.listingTruncated': '列表在 1000 条处截断。',
-  'outputs.producedBy': '由 {role} 产出',
 
   // ---- 会话工作空间 ----
   'workspace.title': '工作空间设置',

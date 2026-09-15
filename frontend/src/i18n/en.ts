@@ -436,7 +436,6 @@ export const en: Dict = {
   'outputs.noOutputs': 'No outputs yet.',
   'outputs.folder': 'Folder',
   'outputs.listingTruncated': 'Listing truncated at 1000 entries.',
-  'outputs.producedBy': 'produced by {role}',
 
   // ---- Session workspace ----
   'workspace.title': 'Workspace settings',

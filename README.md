@@ -117,7 +117,7 @@ The repository currently includes:
 - Manager / Worker executables and `ExecutionPlan` validation;
 - Multi-session Runtime, task graphs, scheduling, and state persistence;
 - Event Bus, SSE event streams, and node logs;
-- Shared workspaces, artifact management, and delivery checks;
+- Shared workspaces and artifact management;
 - Multiple AI coding CLI adapters and model / provider configuration;
 - A React workbench;
 - Real CLI execution and a substantial Python / frontend test suite.
@@ -182,7 +182,7 @@ Contributions are welcome in areas including:
 - Manager / Worker Runtime;
 - Roles, skills, and capability configuration;
 - Event-driven collaboration and long-running execution;
-- Artifacts, shared workspaces, and delivery guarantees;
+- Artifacts and shared workspaces;
 - CLI adapters, evaluation, and testing.
 
 Please read the existing documentation and tests before submitting changes, and never commit local credentials or runtime artifacts.

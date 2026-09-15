@@ -37,8 +37,7 @@ from runtime.planner import PlanValidationError, Planner
 from runtime.scheduler import Scheduler
 from runtime.workspace_resolver import _partition_of, resolve_shared_workspace
 
-from runtime.delivery.gate import FRAMEWORK_DIR_NAMES
-from runtime.delivery.preview import mime_type_for, previewable_path
+from runtime.shared_io import FRAMEWORK_DIR_NAMES, mime_type_for, previewable_path
 
 logger = logging.getLogger(__name__)
 
@@ -2197,49 +2196,19 @@ class Runtime(RuntimeGateway, SchedulerDelegate):
 
     # ---- Session Outputs：会话级「查看产出」（V3-2.2） ----
     # 架构约束：所有 Session Outputs filesystem 操作只经 resolve_shared_workspace()
-    # → shared root；业务代码不得自行推导 {workspace_root}/shared。「哪条 entry 最新」
-    # 由 FilesystemRegistry.latest_per_partition() 单一权威判定（复用 resolve/@role 语义），
-    # UI/Runtime 不得另定规则。Registry Protocol write/read/resolve 不变。
+    # → shared root；业务代码不得自行推导 {workspace_root}/shared。
 
     @staticmethod
     def _norm_shared_rel(root: str, path: str) -> str:
         """规范化共享相对路径：'.' / 'backend' / 'backend/src'（forward slash，无 './' 前缀）。"""
         return os.path.relpath(path, root).replace(os.sep, "/")
 
-    def _partition_metadata(self, shared_root: str) -> dict:
-        """partition(realpath) → (producer, delivery)。只读 Registry snapshot（非权威）。
-        latest 判定在 FilesystemRegistry.latest_per_partition（Registry 单一权威）；
-        getattr 守卫 → 无该方法的 mock 后端返回 {}。
-        性能边界：允许一次 list 读全部 Registry metadata；Registry entry 规模增大后
-        再引入 index/cache（不现在过度优化）。"""
-        from runtime.delivery.registry import FilesystemRegistry
-
-        reg = FilesystemRegistry(shared_root)
-        latest = getattr(reg, "latest_per_partition", lambda: {})() or {}
-        out: dict = {}
-        for partition, e in latest.items():
-            if not partition.startswith(os.path.realpath(shared_root) + os.sep):
-                continue  # 空分区=共享根本身（高权限模式），不出现在分区行
-            node = self.graph.get_node(e.node_id)
-            out[partition] = (
-                {
-                    "node_id": e.node_id,
-                    "role": e.role,
-                    "step_ref": e.step_ref,
-                    "artifact_type": e.artifact_type,
-                    "key_files": list(e.key_files or []),
-                },
-                {"state": getattr(node, "delivery_state", None)},
-            )
-        return out
-
     def list_session_shared(self, path: str = "") -> dict[str, Any]:
         """会话级「查看产出」：shared 根文件树。
 
         Args:
-            path: 共享根下相对路径（"" = 根）。顶层列出分区（跳过框架目录，注册分区行
-                带 producer+delivery，kind=artifact_partition）；子目录为普通清单
-                （kind=directory/file，producer/delivery=None）。
+            path: 共享根下相对路径（"" = 根）。顶层列出分区目录（跳过框架目录），
+                子目录为普通清单。
 
         Returns:
             {"path": 规范化相对路径, "entries": [OutputEntry], "truncated": bool}。
@@ -2259,7 +2228,6 @@ class Runtime(RuntimeGateway, SchedulerDelegate):
                 return {"path": ".", "entries": [], "truncated": False}
             raise FileNotFoundError(path)
         partition_level = os.path.realpath(target) == os.path.realpath(root)
-        producers = self._partition_metadata(root) if partition_level else {}
         entries, truncated = [], False
         for entry in sorted(
             os.scandir(target), key=lambda it: (not it.is_dir(), it.name.lower())
@@ -2274,22 +2242,12 @@ class Runtime(RuntimeGateway, SchedulerDelegate):
                 continue
             stat = entry.stat(follow_symlinks=False)
             is_dir = entry.is_dir(follow_symlinks=False)
-            real = os.path.realpath(entry.path)
-            producer, delivery = producers.get(real, (None, None))
-            kind = (
-                "artifact_partition"
-                if (is_dir and real in producers)
-                else ("directory" if is_dir else "file")
-            )
             entries.append({
                 "name": entry.name,
                 "path": self._norm_shared_rel(root, entry.path),
                 "type": "directory" if is_dir else "file",
-                "kind": kind,
                 "size": stat.st_size,
                 "modified_at": stat.st_mtime,
-                "producer": producer,
-                "delivery": delivery,
             })
             if len(entries) >= 1000:
                 truncated = True

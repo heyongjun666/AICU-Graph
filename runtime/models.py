@@ -488,10 +488,6 @@ class Node:
     pending_revise: bool = False
     # === 闭环协作台账（A2：Manager 逐轮 review 累积，业务产出 closed_loop.json） ===
     collaboration_ledger: list[dict] = field(default_factory=list)
-    # === 交付状态（V3-2 Delivery Reliability，正交第二状态机，不碰 Node 状态机） ===
-    # 取值：None(=pending，未验证) / "validated"（Gate 通过）/ "delivered"（Assembly 通过）
-    #      / "invalid"（Gate FAIL 或 Assembly BLOCK）。COMPLETED ≠ DELIVERED。
-    delivery_state: Optional[str] = None
 
     def __setattr__(self, name, value):
         """拦截 status 赋值，校验状态转换基础规则。"""

@@ -3,11 +3,9 @@
 覆盖（V3-2.2 计划 test_session_shared.py 用例）：
 - 空树：无 shared 目录 / 有 shared 但为空 → {"path": ".", "entries": [], "truncated": false}；
   响应不含 shared_root（前端视共享根为抽象资源）
-- 顶层分区：注册分区行 kind=="artifact_partition" + producer{node_id/role/step_ref/artifact_type/key_files}
-  + delivery{state}；未注册目录 kind=="directory" + producer/delivery=null（不虚构 producer）
+- 顶层分区：目录行 type=="directory"；普通文件行 type=="file"
 - 框架目录隐藏：FRAMEWORK_DIR_NAMES 显式项（.artifacts/.codegraph/.git/cc_0 等）+ 任意 cc_* 前缀
-- 子目录下钻：path="backend/src" → 普通清单，producer=null，规范化相对路径
-- 同一分区多条 entry → producer 取 step_ref 字典序最大（Registry latest_per_partition 单一权威）
+- 子目录下钻：path="backend/src" → 普通清单，规范化相对路径
 - 路径规范化：根→"."，forward slash，无 "./" 前缀
 - read_session_shared_file：文本预览 / 二进制不可预览（content=null）/ 目录当文件读 →
   FileNotFoundError / 1MB 截断 truncated / 越界 ValueError / 缺失 FileNotFoundError
@@ -22,11 +20,9 @@ import tempfile
 
 import pytest
 
-from runtime.delivery.contracts import ArtifactContract
-from runtime.delivery.preview import mime_type_for, previewable_path
-from runtime.delivery.registry import FilesystemRegistry, build_artifact_entry
 from runtime.models import ExecutionPlan, Step
 from runtime.runtime import Runtime
+from runtime.shared_io import mime_type_for, previewable_path
 from runtime.workspace_resolver import resolve_shared_workspace
 
 
@@ -51,28 +47,20 @@ def _shared(rt: Runtime) -> str:
     return resolve_shared_workspace(rt.workspace_root)
 
 
-def _register_partition(rt: Runtime, step_ref: str, role: str,
-                        output_path: str, delivery_state: str | None,
-                        files: dict) -> tuple:
-    """建 root + 节点 + 写分区文件 + Registry 登记，返回 (node, partition 绝对路径)。"""
+def _make_partition(rt: Runtime, step_ref: str, role: str,
+                    output_path: str, files: dict) -> str:
+    """建 root + 节点 + 写分区文件，返回 partition 绝对路径。"""
     root = rt.submit_root_manager("build app")
-    nodes = rt.inject_plan(root, ExecutionPlan(steps=[
+    rt.inject_plan(root, ExecutionPlan(steps=[
         _step(step_ref, {"output_path": output_path}, role=role),
     ]))
-    node = nodes[0]
-    node.delivery_state = delivery_state
-    shared = _shared(rt)
-    partition = os.path.join(shared, output_path)
+    partition = os.path.join(_shared(rt), output_path)
     for rel, content in files.items():
         p = os.path.join(partition, rel)
         os.makedirs(os.path.dirname(p), exist_ok=True)
         with open(p, "w", encoding="utf-8") as f:
             f.write(content)
-    reg = FilesystemRegistry(shared)
-    reg.write(build_artifact_entry(
-        node, partition, ArtifactContract(artifact_type="code"), shared, output_path,
-    ))
-    return node, partition
+    return partition
 
 
 # ============================================================================
@@ -109,47 +97,34 @@ def test_framework_dirs_hidden(tmp_path):
     assert names == {"backend"}, f"框架目录应整体隐藏，got {names}"
 
 
-def test_partition_with_producer(tmp_path):
+def test_partition_row_is_plain_directory(tmp_path):
     rt = _mk_runtime(tmp_path)
-    node, _ = _register_partition(
-        rt, "be", "backend", "backend", "validated",
-        {"src/api.py": "def main(): pass\n"},
-    )
+    _make_partition(rt, "be", "backend", "backend", {"src/api.py": "def main(): pass\n"})
     be_entry = next(e for e in rt.list_session_shared()["entries"] if e["name"] == "backend")
-    assert be_entry["kind"] == "artifact_partition"
     assert be_entry["type"] == "directory"
-    assert be_entry["producer"]["step_ref"] == "be"
-    assert be_entry["producer"]["node_id"] == node.id
-    assert be_entry["producer"]["role"] == "backend"
-    assert be_entry["producer"]["artifact_type"] == "code"
-    assert "src/api.py" in be_entry["producer"]["key_files"]
-    assert be_entry["delivery"] == {"state": "validated"}
     assert be_entry["path"] == "backend"
+    assert "producer" not in be_entry
+    assert "delivery" not in be_entry
 
 
-def test_unregistered_partition_kind_directory(tmp_path):
-    """Filesystem 存在但无 Registry 记录 → 不虚构 producer/delivery。"""
+def test_unregistered_directory(tmp_path):
     rt = _mk_runtime(tmp_path)
     shared = _shared(rt)
     os.makedirs(os.path.join(shared, "random"))
     with open(os.path.join(shared, "random", "hello.txt"), "w") as f:
         f.write("hi")
     entry = next(e for e in rt.list_session_shared()["entries"] if e["name"] == "random")
-    assert entry["kind"] == "directory"
-    assert entry["producer"] is None
-    assert entry["delivery"] is None
+    assert entry["type"] == "directory"
 
 
-def test_top_level_file_kind_file(tmp_path):
+def test_top_level_file(tmp_path):
     rt = _mk_runtime(tmp_path)
     shared = _shared(rt)
     os.makedirs(shared)
     with open(os.path.join(shared, "README.md"), "w") as f:
         f.write("# outputs")
     entry = next(e for e in rt.list_session_shared()["entries"] if e["name"] == "README.md")
-    assert entry["kind"] == "file"
-    assert entry["producer"] is None
-    assert entry["delivery"] is None
+    assert entry["type"] == "file"
 
 
 # ============================================================================
@@ -166,10 +141,8 @@ def test_drill_down_subdir(tmp_path):
     assert result["path"] == "backend/src"
     entry = result["entries"][0]
     assert entry["name"] == "api.py"
-    assert entry["kind"] == "file"
+    assert entry["type"] == "file"
     assert entry["path"] == "backend/src/api.py"
-    assert entry["producer"] is None
-    assert entry["delivery"] is None
 
 
 def test_path_normalization_root_and_sub(tmp_path):
@@ -189,54 +162,18 @@ def test_path_normalization_root_and_sub(tmp_path):
 def test_multiple_partitions_listed(tmp_path):
     rt = _mk_runtime(tmp_path)
     root = rt.submit_root_manager("build app")
-    nodes = rt.inject_plan(root, ExecutionPlan(steps=[
+    rt.inject_plan(root, ExecutionPlan(steps=[
         _step("be", {"output_path": "backend"}, role="backend"),
         _step("fe", {"output_path": "frontend"}, role="frontend"),
     ]))
-    be, fe = nodes
-    be.delivery_state = "validated"
     shared = _shared(rt)
-    reg = FilesystemRegistry(shared)
-    for node in (be, fe):
-        partition = os.path.join(shared, node.config["_output_path"])
+    for output_path in ("backend", "frontend"):
+        partition = os.path.join(shared, output_path)
         os.makedirs(partition, exist_ok=True)
         with open(os.path.join(partition, "f.txt"), "w") as f:
             f.write("x")
-        reg.write(build_artifact_entry(
-            node, partition, ArtifactContract(artifact_type="code"),
-            shared, node.config["_output_path"],
-        ))
     names = {e["name"] for e in rt.list_session_shared()["entries"]}
     assert names == {"backend", "frontend"}
-
-
-# ============================================================================
-# 同一分区多条 entry → Registry latest_per_partition 规则
-# ============================================================================
-
-def test_latest_per_partition_selects_max_step_ref(tmp_path):
-    rt = _mk_runtime(tmp_path)
-    root = rt.submit_root_manager("build app")
-    nodes = rt.inject_plan(root, ExecutionPlan(steps=[
-        _step("be_v1", {"output_path": "backend", "allow_shared_output": True}, role="backend"),
-        _step("be_v2", {"output_path": "backend", "allow_shared_output": True}, role="backend"),
-    ]))
-    be_v1, be_v2 = nodes
-    be_v2.delivery_state = "validated"
-    shared = _shared(rt)
-    partition = os.path.join(shared, "backend")
-    os.makedirs(partition, exist_ok=True)
-    with open(os.path.join(partition, "api.py"), "w") as f:
-        f.write("x = 1\n")
-    reg = FilesystemRegistry(shared)
-    for n in (be_v1, be_v2):
-        reg.write(build_artifact_entry(
-            n, partition, ArtifactContract(artifact_type="code"), shared, "backend",
-        ))
-    entry = next(e for e in rt.list_session_shared()["entries"] if e["name"] == "backend")
-    # latest 判定收在 Registry（step_ref 字典序最大），UI/Runtime 不得另定规则
-    assert entry["producer"]["step_ref"] == "be_v2"
-    assert entry["delivery"] == {"state": "validated"}
 
 
 # ============================================================================
@@ -345,7 +282,7 @@ def test_symlink_midpath_escape_rejected(tmp_path):
 
 
 # ============================================================================
-# 列表截断 / Registry 扩展
+# 列表截断
 # ============================================================================
 
 def test_list_truncated_at_1000(tmp_path):
@@ -358,13 +295,6 @@ def test_list_truncated_at_1000(tmp_path):
     result = rt.list_session_shared()
     assert result["truncated"] is True
     assert len(result["entries"]) == 1000
-
-
-def test_registry_entries_and_latest_empty(tmp_path):
-    shared = os.path.join(str(tmp_path), "shared")
-    reg = FilesystemRegistry(shared)
-    assert reg.entries() == []
-    assert reg.latest_per_partition() == {}
 
 
 # ============================================================================

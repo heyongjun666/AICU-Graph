@@ -81,11 +81,8 @@ describe('session-scoped API', () => {
         name: 'api.py',
         path: 'backend/api.py',
         type: 'file',
-        kind: 'file',
         size: 17,
         modified_at: 0,
-        producer: null,
-        delivery: null,
       }],
     }));
     vi.stubGlobal('fetch', fetchMock);
@@ -94,7 +91,7 @@ describe('session-scoped API', () => {
 
     expect(fetchMock).toHaveBeenCalledWith('/v1/sessions/s1/shared?path=backend', expect.anything());
     expect(listing.path).toBe('backend');
-    expect(listing.entries[0].kind).toBe('file');
+    expect(listing.entries[0].type).toBe('file');
   });
 
   it('reads a session shared file preview', async () => {

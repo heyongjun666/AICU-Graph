@@ -40,14 +40,12 @@ def test_node_from_json_ignores_unknown_and_legacy_fields():
 
 def test_node_from_json_preserves_current_fields_that_may_be_removed_later():
     payload = _node_payload(
-        delivery_state="validated",
         max_activations=7,
         pending_routing=None,
     )
 
     restored = Node.from_json(json.dumps(payload))
 
-    assert restored.delivery_state == "validated"
     assert restored.max_activations == 7
     assert restored.pending_routing is None
 
@@ -94,7 +92,6 @@ def test_persistence_restores_graph_snapshot_with_legacy_fields(tmp_path):
 
     raw = json.loads((tmp_path / "graph.json").read_text(encoding="utf-8"))
     raw["nodes"]["root"]["removed_from_future_node_model"] = True
-    raw["nodes"]["root"]["delivery_state"] = "delivered"
     (tmp_path / "graph.json").write_text(
         json.dumps(raw), encoding="utf-8"
     )
@@ -105,7 +102,6 @@ def test_persistence_restores_graph_snapshot_with_legacy_fields(tmp_path):
     assert restored is not None
     assert set(restored.nodes) == {"root", "child"}
     assert restored.nodes["root"].manager_phase == "waiting"
-    assert restored.nodes["root"].delivery_state == "delivered"
     assert len(restored.edges) == 1
     assert restored.edges["edge-root-child"].type is EdgeType.PARENT
 

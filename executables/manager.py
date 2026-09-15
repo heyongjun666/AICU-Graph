@@ -35,9 +35,7 @@ from runtime.closed_loop import (
     write_deliverable_manifest,
 )
 from runtime.context import build_codegraph_context, build_review_context
-from runtime.delivery import delivery_enabled as _delivery_enabled
-from runtime.delivery.assembly import build_dir_index as _build_dir_index
-from runtime.delivery.issues import repair_strategy_for
+from runtime.shared_io import build_dir_index as _build_dir_index
 from runtime.workspace_resolver import _partition_of
 
 logger = logging.getLogger(__name__)
@@ -449,22 +447,6 @@ class Manager(Executable):
             # 由 AICU Router 决定交给谁，Scheduler 事件→重激活
             # 桥触发目标节点。
 
-            # V3-2 Assembly Gate：LLM 全部通过 ≠ 可交付。Delivery 开启时以确定性
-            # Assembly 复核最终产物（存在/非空/碰撞/依赖；Registry 漂移仅 Observation），
-            # blocking Issue 直接驱动精准修复，不走重新 review —— 消除 "LLM 评审 LLM"
-            # 再判通过的死循环（review prompt 的产物容忍语义由 Runtime 确定性校验兜底）。
-            assembly_manifest: Optional[dict] = None
-            delivery_verified = False
-            if _delivery_enabled():
-                assembly = self._run_assembly_gate(ctx, children)
-                if not assembly.passed:
-                    return self._repair_blocking_delivery(
-                        ctx, assembly.blocking_issues, ledger, review_path,
-                        iteration_count, max_iterations,
-                    )
-                delivery_verified = True
-                assembly_manifest = assembly.manifest
-
             log_entries = [
                 LogEntry(
                     ts=datetime.now(),
@@ -478,8 +460,6 @@ class Manager(Executable):
                 collaboration_ledger=ledger,
                 log=log_entries,
             )
-            if delivery_verified:
-                update_kwargs["delivery_state"] = "delivered"
             ctx.runtime.update_node_status(
                 ctx.node.id,
                 NodeStatus.COMPLETED,
@@ -512,14 +492,9 @@ class Manager(Executable):
                         ctx.node.id[:8], closed_loop_path,
                     )
                     # C3：PASSED 时同时落盘交付物清单（最终产物完整性审计）。
-                    if assembly_manifest is not None:
-                        # V3-2 Assembly 权威清单：manifest = scan(shared_root)，
-                        # 只描述真实存在文件（评审约束 3：Registry 仅补 metadata）。
-                        manifest = assembly_manifest
-                    else:
-                        manifest = build_deliverable_manifest(
-                            ctx.node, children, escalations=escalations,
-                        )
+                    manifest = build_deliverable_manifest(
+                        ctx.node, children, escalations=escalations,
+                    )
                     manifest_path = write_deliverable_manifest(manifest, ws)
                     logger.info(
                         "Manager '%s' deliverable_manifest written: %s "
@@ -601,142 +576,6 @@ class Manager(Executable):
                     f"Max iterations ({max_iterations}) exceeded, "
                     f"{len(failed_assessments)} children still failing: "
                     f"{', '.join(a['step_ref'] for a in failed_assessments)}"
-                ),
-            ),
-        ]
-        ctx.runtime.update_node_status(
-            ctx.node.id,
-            NodeStatus.FAILED,
-            error=error,
-            artifact_path=review_path,
-            collaboration_ledger=ledger,
-            log=log_entries,
-        )
-        return NodeStatus.FAILED
-
-    @staticmethod
-    def _run_assembly_gate(ctx: ExecutableContext, children: list[Any]):
-        """运行 Assembly Gate（确定性、只读 Node metadata，不 mutate Node 状态）。
-
-        children 以 Node 对象传入，此处转换为 Assembly 消费的只读 dict
-        （step_ref/node_id/role/artifact_path/config.{_output_path,depends_on}），
-        保证 runtime/delivery 层不触碰 Node 状态（评审约束 2）。Registry 仅用于
-        drift Observation 核对，缺失/失败不影响 manifest（约束 3）。
-        """
-        from runtime.delivery.assembly import verify_assembly
-        from runtime.delivery.registry import FilesystemRegistry
-
-        shared_root = (ctx.node.config or {}).get("_shared_workspace") or ""
-        if not shared_root and children:
-            shared_root = (children[0].config or {}).get("_shared_workspace") or ""
-        assembly_children = []
-        for c in children:
-            cfg = c.config or {}
-            assembly_children.append({
-                "step_ref": c.step_ref or c.id,
-                "node_id": c.id,
-                "role": c.role,
-                "artifact_path": c.artifact_path,
-                "config": {
-                    "_output_path": cfg.get("_output_path"),
-                    "depends_on": cfg.get("depends_on"),
-                },
-            })
-        registry = None
-        if shared_root:
-            try:
-                registry = FilesystemRegistry(shared_root)
-            except Exception:  # noqa: BLE001
-                registry = None
-        return verify_assembly(assembly_children, shared_root, registry=registry)
-
-    def _repair_blocking_delivery(
-        self,
-        ctx: ExecutableContext,
-        blocking_issues: list,
-        ledger: list,
-        review_path: str,
-        iteration_count: int,
-        max_iterations: int,
-    ) -> NodeStatus:
-        """Assembly blocking Issue → 精准修复（复用 submit_fix_plan 原地续接）。
-
-        确定性复核发现产物缺失/空/碰撞/依赖不匹配，直接驱动失败子节点重跑；
-        不走重新 review（review prompt 会再次判通过 —— 消除死循环）。达
-        max_iterations 才 FAILED。
-        """
-        children = ctx.runtime.get_children(ctx.node.id)
-        role_by_ref: dict[str, str] = {}
-        for c in children:
-            role_by_ref[c.step_ref or c.id] = c.role or "code"
-        failed = [
-            {
-                "step_ref": issue.step_ref,
-                "reason": issue.reason,
-                "fix": {
-                    "role": role_by_ref.get(issue.step_ref, "code"),
-                    "task": (
-                        f"[Assembly] {issue.issue_type} "
-                        f"(strategy={repair_strategy_for(issue.issue_type)}): "
-                        f"{issue.reason}"
-                    ),
-                },
-            }
-            for issue in blocking_issues
-        ]
-        failed_step_refs = {a["step_ref"] for a in failed}
-        if iteration_count + 1 < max_iterations:
-            new_iteration = iteration_count + 1
-            log_entries = [
-                LogEntry(
-                    ts=datetime.now(),
-                    level=LogLevel.WARN,
-                    message=(
-                        f"Assembly blocked delivery — {len(failed)} deterministic "
-                        f"delivery issues: {', '.join(sorted(failed_step_refs))}; "
-                        f"targeted fix ({new_iteration}/{max_iterations})"
-                    ),
-                ),
-            ]
-            try:
-                ctx.runtime.submit_fix_plan(ctx.node.id, failed, new_iteration)
-            except Exception as exc:
-                logger.error(
-                    "Failed to submit assembly fix plan for manager '%s': %s",
-                    ctx.node.id, exc,
-                )
-                ctx.runtime.update_node_status(
-                    ctx.node.id,
-                    NodeStatus.FAILED,
-                    error=ErrorObject.create_plan_validation_error(),
-                    artifact_path=review_path,
-                    log=log_entries,
-                )
-                return NodeStatus.FAILED
-            ctx.runtime.update_node_status(
-                ctx.node.id,
-                NodeStatus.WAITING,
-                manager_phase="waiting",
-                iteration_count=new_iteration,
-                artifact_path=review_path,
-                collaboration_ledger=ledger,
-                log=log_entries,
-            )
-            logger.info(
-                "Manager '%s' assembly fix: replacing %d delivery-failed children (%s)",
-                ctx.node.id, len(failed), ", ".join(sorted(failed_step_refs)),
-            )
-            return NodeStatus.WAITING
-
-        # 无剩余迭代 → FAILED（delivery_state 不落 delivered）
-        error = ErrorObject.create_max_iteration_exceeded()
-        log_entries = [
-            LogEntry(
-                ts=datetime.now(),
-                level=LogLevel.ERROR,
-                message=(
-                    f"Max iterations ({max_iterations}) exceeded with delivery "
-                    f"issues: {', '.join(sorted(failed_step_refs))}"
                 ),
             ),
         ]

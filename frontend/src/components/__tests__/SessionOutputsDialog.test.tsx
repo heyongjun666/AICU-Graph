@@ -24,29 +24,18 @@ const partitionListing = {
     name: 'backend',
     path: 'backend',
     type: 'directory',
-    kind: 'artifact_partition',
     size: 0,
     modified_at: 0,
-    producer: {
-      node_id: 'node_1',
-      role: 'backend',
-      step_ref: 'backend_impl',
-      artifact_type: 'source_code',
-      key_files: ['src/api.py'],
-    },
-    delivery: { state: 'validated' },
   }],
 };
 
 describe('SessionOutputsDialog', () => {
-  it('renders a partition row with producer badge and delivery badge', async () => {
+  it('renders a partition row', async () => {
     vi.mocked(api.listSessionShared).mockResolvedValue(partitionListing);
 
     render(<SessionOutputsDialog open sessionId="s1" onClose={() => undefined} />);
 
     expect(await screen.findByText('backend')).toBeDefined();
-    expect(screen.getByText('backend · source_code · backend_impl')).toBeDefined();
-    expect(screen.getByText('validated')).toBeDefined();
     expect(api.listSessionShared).toHaveBeenCalledWith('s1', '');
   });
 
@@ -59,11 +48,8 @@ describe('SessionOutputsDialog', () => {
         name: 'api.py',
         path: 'backend/api.py',
         type: 'file',
-        kind: 'file',
         size: 17,
         modified_at: 0,
-        producer: null,
-        delivery: null,
       }],
     });
 
@@ -85,11 +71,8 @@ describe('SessionOutputsDialog', () => {
         name: 'report.md',
         path: 'report.md',
         type: 'file',
-        kind: 'file',
         size: 9,
         modified_at: 0,
-        producer: null,
-        delivery: null,
       }],
     });
     vi.mocked(api.readSessionSharedFile).mockResolvedValue({
@@ -118,11 +101,8 @@ describe('SessionOutputsDialog', () => {
         name: 'blob.bin',
         path: 'blob.bin',
         type: 'file',
-        kind: 'file',
         size: 4,
         modified_at: 0,
-        producer: null,
-        delivery: null,
       }],
     });
     vi.mocked(api.readSessionSharedFile).mockResolvedValue({

@@ -35,7 +35,6 @@
 - [十、逐文件职责映射（新手定位表）](#十逐文件职责映射新手定位表)
   - [10.1 根目录](#101-根目录)
   - [10.2 runtime/](#102-runtime)
-  - [10.3 runtime/delivery/](#103-runtimedelivery)
   - [10.4 runtime/context/](#104-runtimecontext)
   - [10.5 executables/](#105-executables)
   - [10.6 roles/（数据驱动配置）](#106-roles数据驱动配置)
@@ -61,7 +60,7 @@
 
 ### 一句话总结
 
-> **AICU = 一张图（Graph）+ 一棵组织树 + 一套事件通信总线 + 一批 Manager/Worker 执行体 + 一层交付保障（Artifact/Assembly Gate）+ 一个多会话 Web 服务（FastAPI + SSE）+ 一个 React 工作台前端。**
+> **AICU = 一张图（Graph）+ 一棵组织树 + 一套事件通信总线 + 一批 Manager/Worker 执行体 + 一个多会话 Web 服务（FastAPI + SSE）+ 一个 React 工作台前端。**
 
 ---
 
@@ -114,7 +113,6 @@ AICU-Graph 的核心运行服务由 `main.py` 启动，使用 `runtime/` 提供�
 | **AICU** | AI 执行引擎：把任务转成 Agent 提示词并编排多 peer（num_ccs） | `aicu.py` |
 | **ClaudeCodeAgent** | 程序化封装 AI Coding CLI：多轮对话、超时杀进程 | `claude_code_agent.py` |
 | **Executable** | 可执行体抽象（Manager/Worker 是其子类），统一使用真实 AICU | `executables/base.py` `registry.py` |
-| **Delivery（交付保障）** | Artifact Gate + Registry + Assembly Gate 三层 | `runtime/delivery/` |
 | **Session** | 一次独立的多会话运行（session_id + 独立 Runtime）| `runtime/session_manager.py` |
 
 ---
@@ -139,7 +137,7 @@ AICU-Graph 的核心运行服务由 `main.py` 启动，使用 `runtime/` 提供�
 │            ├─ AICURouter（独立路由：Event + 组织图 → 目标 Nodes）          │
 │            ├─ AgentEventManager（Event Bus：路由/投递/扫描）                │
 │            ├─ Persistence（graph.json 快照）                               │
-│            ├─ closed_loop / delivery（闭环台账 + 交付保障）                │
+│            ├─ closed_loop（闭环台账）                                      │
 │            └─ RolesManager / SkillsManager（配置驱动）                    │
 ├────────────────────────────────────────────────────────────────────────┤
 │ 执行体层  Executable ABC → Manager / Worker                               │
@@ -267,22 +265,17 @@ AICU-Graph 的核心运行服务由 `main.py` 启动，使用 `runtime/` 提供�
 - 安全边界：C1 全局协作预算（超限升级 `collaboration_budget_exceeded`）、父 Manager 通知清除 + `rewind_parent_chain_for_retry`、`mark_terminal`。`activation_count` 仅作观测计数，不限制节点重激活；**不再有 related_nodes 能力边界 / A3 Manager 目标拦截 / required_role 校验**，角色与目标判断由 Router LLM 负责。
 - Manager 兜底：`Manager.run()` 阶段完成后 `flush_node_events`（scheduler tick 扫描仅在存在 RUNNING 节点时执行，Manager 无 worker 时需自己 flush）；`_build_event_context_block` 主读 pending_context，fallback 读 inbox 事件（覆盖"目标先于事件 READY/RUNNING"竞态）。
 
-### 6.8 闭环与交付可靠性（Delivery）
+### 6.8 闭环与产物可靠性
 
-**文件**：`runtime/closed_loop.py`、`runtime/delivery/*`
+**文件**：`runtime/closed_loop.py`
 
-核心观念：**`COMPLETED ≠ DELIVERED`**；Shared FS 是产物单一事实源。
+Shared FS（共享分区）是产物单一事实源。
+
+> 历史说明：曾存在一层由 `AICU_DELIVERY` 门控的 Artifact Gate / Registry /
+> Assembly Gate 交付校验（`runtime/delivery/`）。它默认关闭、实际从未启用，
+> 已整体移除。判读产物只看共享分区里的真实文件，不再有第二套交付状态机。
 
 - **Closed-loop（A2）**：`build_closed_loop_report` → 输出 `{output}/closed_loop.json`（含 collaboration_ledger、escalations、verdict{overall_passed, children_total, converged, escalation_count}；`converged = overall_passed and not escalations`）。`write_deliverable_manifest` → `deliverable_manifest.json`（`delivery_complete = all(artifact_path non-None)`）。`<!-- VERDICT {...} -->` 结构化缺陷块契约供测试/验收角色回写。
-- **Delivery 层**（`AICU_DELIVERY=1` 总开关）：
-  - **Artifact Gate**（`gate.py`）：确定性机械校验——containment（在共享根内）、exists、type、contract，通过 `check_gate` 返回错误；`ArtifactGateError` 携带 ErrorObject。`FRAMEWORK_DIR_NAMES` 排除框架目录。
-  - **Artifact Registry**（`registry.py`）：非权威快照，`{shared_root}/.artifacts/{step_ref}.json`；`FilesystemRegistry.resolve(@step_ref, @step_ref/sub, @role:name)`。写失败 ≠ Worker 失败。
-  - **Assembly Gate**（`assembly.py`）：Session 总装核对，manifest = `scan_shared_root` 扫描真实文件（Registry 只补元数据）；blocking issues：missing_artifact / empty_artifact / output_collision / dependency_mismatch；observation：registry_drift。`compute_session_delivery_state`（invalid/pending/delivered）。
-  - **Issues**（`issues.py`）：`DeliveryIssue{severity, issue_type, ...}`，`REPAIR_STRATEGIES`（ARTIFACT_NOT_CREATED → retry_worker；WRONG_LOCATION → revise_instruction；CONTRACT_FAILED → qa_repair），`repair_strategy_for()`。
-  - **Contracts**（`contracts.py`）：`ArtifactContract{artifact_type, required_types, validators}`；`TYPE_RULES`（code/document/config/dataset）；`parse_contract`。
-  - **Preview**（`preview.py`）：`previewable_path`（文本扩展名白名单）与 `mime_type_for`。
-  - **门控**：`delivery_enabled()` = `AICU_DELIVERY=="1"`；`gate_enabled()` = delivery_enabled 且 `AICU_ARTIFACT_GATE != "0"`。
-
 ### 6.9 共享工作区（Shared Workspace）
 
 **文件**：`runtime/workspace_resolver.py`
@@ -308,7 +301,7 @@ AICU-Graph 的核心运行服务由 `main.py` 启动，使用 `runtime/` 提供�
 
 | 文件 | 职责 |
 |---|---|
-| `runtime/roles_manager.py` | 扫描 `roles/Manager/` + `roles/Worker/` YAML；`list_roles`（跳过 default.yaml）、`get_artifact_contract`（default+role 合并）、`get_role_schema`、`get_role`、`add_role/update_role`；role_id 模式 `^[a-z][a-z0-9_]*$` |
+| `runtime/roles_manager.py` | 扫描 `roles/Manager/` + `roles/Worker/` YAML；`list_roles`（跳过 default.yaml）、`get_role_schema`、`get_role`、`add_role/update_role`；role_id 模式 `^[a-z][a-z0-9_]*$` |
 | `runtime/skills_manager.py` | 扫描带 `SKILL.md` 的目录（主目录 + 额外目录）；`list_skills / get_skill / save_skill` |
 | `runtime/persistence.py` | `graph.json` 快照的 save/load；graph_version 单调性 |
 | `runtime/sse_manager.py` | `SSEManager` 订阅 EventBus `"*"`，`deque(maxlen=10000, ttl=1800)`，微批合并（同 type <200ms 合并），`get_events_since`（空 → snapshot 回退）、`get_snapshot_event`、`get_stats`、`format_sse` |
@@ -330,7 +323,7 @@ AICU-Graph 的核心运行服务由 `main.py` 启动，使用 `runtime/` 提供�
 
 - **两阶段状态机**：`manager_phase ∈ {expand, review, waiting, ...}`。
   - `_expand`：装配 expand prompt → `_call_aiCU_with_retry` → `_parse_plan` → `submit_plan`（或 `submit_revision_plan` 若 `pending_revise`）→ 置 WAITING + waiting。
-  - `_review`：收集子节点（含产物内容/目录索引）→ 装配 review prompt → `_parse_review_assessments`（返回 assessments+status）→ 全通过时按配置执行 Assembly Gate 和修复 → COMPLETED + closed_loop；有失败且迭代未超 → `submit_fix_plan` 定向修复。
+  - `_review`：收集子节点（含产物内容/目录索引）→ 装配 review prompt → `_parse_review_assessments`（返回 assessments+status）→ 全通过 → COMPLETED + closed_loop；有失败且迭代未超 → `submit_fix_plan` 定向修复。
 - **关键内部方法**：
   - `_parse_plan`：dict/str/final_output_path 三种形态解析，尾部花括号修复 + `_parse_markdown_plan` 兜底。
   - `_build_expand_prompt`：上下文快照 + event_context_block + event inbox/publish + revise_candidates + codegraph + task。
@@ -339,7 +332,6 @@ AICU-Graph 的核心运行服务由 `main.py` 启动，使用 `runtime/` 提供�
   - `_build_execution_context_snapshot`：祖先链 + 兄弟节点（按状态排序）+ 可复用产物。
   - `_resolve_review_content` / `_write_review_output` / `_parse_review_assessments`：评审输出的内容归一化、落盘、pass/fail 判定。
   - `_build_repair_context_block` / `_build_repair_review_prompt` / `_degrade_review`：定向修复上下文注入、修复态评审 prompt、评审降级（无可用评审时兜底）。
-  - `_run_assembly_gate` / `_repair_blocking_delivery`：交付保障在 Manager 完成阶段执行。
 - **Manager 也是 Producer + Consumer**：expand/review prompt 注入事件发布/收件箱指令（`_build_event_publish_instructions`），阶段完成后 `flush_node_events`。
 
 ### 7.3 Worker（worker.py）
@@ -351,8 +343,8 @@ AICU-Graph 的核心运行服务由 `main.py` 启动，使用 `runtime/` 提供�
   4. `build_codegraph_context`；
   5. 首次运行 → `_build_worker_context`（完整上下文：共享产物清单、事件收件箱/发布块、任务）；续跑 → resume 体（--resume conversation_id + 事件 inbox/publish 块）；
   6. `aicu.ask` 提交给单线程 executor；
-  7. 成功 → `_normalize_worker_artifact`（共享分区=单一事实源）、Artifact Gate `_validate_worker_artifact_gate`（失败 → FAILED + delivery_state="invalid"）、`_publish_worker_artifact`、`notify_artifact_updated(shared_root)`、`flush_node_events` → COMPLETED + artifact_path + log；
-  8. 异常 → FAILED + `ErrorObject.create_worker_execution_error()` + delivery_state="invalid"（若 gate 开）；
+  7. 成功 → `_normalize_worker_artifact`（共享分区=单一事实源）、`notify_artifact_updated(shared_root)`、`flush_node_events` → COMPLETED + artifact_path + log；
+  8. 异常 → FAILED + `ErrorObject.create_worker_execution_error()`；
   9. `finally`：executor.shutdown + 缓存清理（paused 保留缓存；`activation_count==0` 则 pop）。
 - 生命周期：`stop`（killpg 杀进程组）、`pause`、`resume`（重跑 run()）、`cleanup_resources`。
 - **上下文装配辅助方法**：
@@ -360,7 +352,7 @@ AICU-Graph 的核心运行服务由 `main.py` 启动，使用 `runtime/` 提供�
   - `_build_tiered_reading_instructions(deps)`：**多依赖分级阅读**（依赖 ≥4 触发）——一级全景 Glob 扫描 → 二级精读接口层（≤5 个文件）→ 三级按需深入；含 >800 行文件截断保护，避免通读所有依赖产物导致上下文溢出。
   - `_build_shared_workspace_instructions` / `_build_event_publish_instructions` / `_build_event_inbox_instructions` / `_build_routing_context` / `_build_resume_task_body`。
   - `_handle_cc_stream_output`：real 模式 CC 流式输出分流——`activity` 流只更新 `cc_activity`（不写 node.log）；stderr 写 ERROR 级 log；stdout 默认不写（`AICU_NODE_LOG_STREAMING=1` 才全量写）。
-  - `_validate_model`：模型名校验；`_load_worker_artifact_contract` / `_resolve_dep_artifact_path`：产物契约加载与依赖产物路径解析。
+  - `_validate_model`：模型名校验；`_resolve_dep_artifact_path`：依赖产物路径解析（`artifact_path` 直传，缺失时 workspace 兜底）。
 - **Revise 续跑回退**：pop 缓存 → 不带 --resume 重建 → 重试一次。
 
 ### 7.4 注册表（registry.py）
@@ -414,7 +406,6 @@ AICU-Graph 的核心运行服务由 `main.py` 启动，使用 `runtime/` 提供�
 | 8 | **Event Queue 统一（outbox/inbox/live 契约，inbox 唯一待消费队列）** | `runtime/agent_events.py` `event_queue_dirs` | 无独立开关，代码路径默认参与运行 |
 | 9 | Revise 增量续跑（选择性复用子节点） | `executables/manager.py` `runtime/planner.py` `translate_revision` | — |
 | 10 | 协作闭环（collaboration_ledger → closed_loop.json + deliverable_manifest.json） | `runtime/closed_loop.py` | — |
-| 11 | 交付保障（Artifact Gate / Registry / Assembly Gate） | `runtime/delivery/*` | `AICU_DELIVERY=1` |
 | 12 | 共享工作区（会话级单根 + 每节点写分区 + 防穿越） | `runtime/workspace_resolver.py` | — |
 | 13 | CodeGraph 代码图谱上下文 | `runtime/context/*` | `AICU_CODEGRAPH=1` |
 | 14 | 角色/技能配置驱动 | `runtime/roles_manager.py` `runtime/skills_manager.py` | — |
@@ -450,7 +441,7 @@ AICU-Graph 的核心运行服务由 `main.py` 启动，使用 `runtime/` 提供�
 
 | 文件 | 职责 |
 |---|---|
-| `models.py` | **数据模型**：Node / Edge / EdgeType / ExecutionPlan / Step / EventMessage（10 个字段含事件描述和路由状态）/ RoutingDecision（activate/contexts/mark_terminal/reason）/ LogEntry / LogLevel / NodeStatus（含 `READY`）/ ManagerPhase / ErrorObject 等；`to_dict/from_dict` 序列化；Node 含 `cc_activity`/`delivery_state`/`pending_revise`/`activation_count`/`pending_context` |
+| `models.py` | **数据模型**：Node / Edge / EdgeType / ExecutionPlan / Step / EventMessage（10 个字段含事件描述和路由状态）/ RoutingDecision（activate/contexts/mark_terminal/reason）/ LogEntry / LogLevel / NodeStatus（含 `READY`）/ ManagerPhase / ErrorObject 等；`to_dict/from_dict` 序列化；Node 含 `cc_activity`/`pending_revise`/`activation_count`/`pending_context` |
 | `graph.py` | 内存图（Node+Edge + 邻接索引），`add_node/update_node/get_node/all_nodes/add_edge/remove_edge/dependencies/children`、`graph_version`（状态/结构都变）、`structure_version`（仅组织结构变更自增，Router 据此切换上下文）、`set_on_mutation` 变更回调 |
 | `planner.py` | 计划翻译和常规图构建的主要入口：`translate` / `translate_revision`（增量复用）/ `restore` / `rewind_parent_chain_for_retry` / `validate_plan` / `create_retry_node`（废弃）；Graph 仍公开提供底层变更方法 |
 | `plan_validator.py` | 确定性机械校验：num_ccs、exec_type↔role、软告警（不做任何通信关系校验） |
@@ -463,24 +454,12 @@ AICU-Graph 的核心运行服务由 `main.py` 启动，使用 `runtime/` 提供�
 | `event_bus.py` | **SSE 层事件总线**（`SSEEvent` + 通配符订阅，供 SSEManager/Scheduler 用），与 `agent_events.py`（节点间 Agent 通信总线）是两条独立总线：前者管前端 SSE 推送，后者管 Agent 协作事件 |
 | `persistence.py` | `graph.json` 快照 save/load、graph_version 单调恢复 |
 | `workspace_resolver.py` | 共享工作区解析：`resolve_shared_workspace` / `resolve_partition` / `_partition_of`（realpath+commonpath 防穿越） |
-| `roles_manager.py` | 角色配置：扫描 YAML、`list_roles` / `get_artifact_contract` / `get_role_schema` / `get_role` / `add_role` / `update_role` |
+| `roles_manager.py` | 角色配置：扫描 YAML、`list_roles` / `get_role_schema` / `get_role` / `add_role` / `update_role` |
 | `skills_manager.py` | 技能目录扫描：`list_skills` / `get_skill` / `save_skill` |
 | `sse_manager.py` | SSE 事件流：环形缓冲、微批合并、`get_events_since`（空→snapshot 回退）、`get_snapshot_event` |
 | `server.py` | `create_app` 单会话 FastAPI app（CONFIG_WHITELIST、节点 CRUD、日志查询、SSE `/v1/graph/events`） |
 | `session_manager.py` | 多会话生命周期：create/list/pause/resume/stop/delete、`sessions.json` 原子持久化、`_summary` 状态推导 |
 | `session_server.py` | `create_session_app` 多会话 app（roles/skills/sessions/nodes/workspace/edges/SSE per-session） |
-
-### 10.3 runtime/delivery/
-
-| 文件 | 职责 |
-|---|---|
-| `__init__.py` | 开关：`delivery_enabled()`（AICU_DELIVERY==1）、`gate_enabled()` |
-| `gate.py` | **Artifact Gate**：`check_gate`（containment→exists→type→contract）、`ArtifactRoots`、`FRAMEWORK_DIR_NAMES`、`extract_verdict`、`ArtifactGateError` |
-| `contracts.py` | `ArtifactContract`、`TYPE_RULES`（code/document/config/dataset）、`parse_contract` |
-| `issues.py` | `DeliveryIssue`、`REPAIR_STRATEGIES`、`issue_type_from_gate_error`、`repair_strategy_for` |
-| `registry.py` | **Artifact Registry**：`FilesystemRegistry` → `{shared_root}/.artifacts/{step_ref}.json`、`resolve`（@step_ref/@role:name）、`latest_per_partition` |
-| `assembly.py` | **Assembly Gate**：`scan_shared_root`（manifest=真实文件扫描）、`verify_assembly`（blocking issues）、`compute_session_delivery_state` |
-| `preview.py` | `previewable_path` / `mime_type_for`（前端预览用） |
 
 ### 10.4 runtime/context/
 
@@ -497,8 +476,8 @@ AICU-Graph 的核心运行服务由 `main.py` 启动，使用 `runtime/` 提供�
 | 文件 | 职责 |
 |---|---|
 | `base.py` | `Executable` ABC（run/stop/pause/resume/cleanup_resources）+ 协议（RuntimeGateway/SchedulerDelegate/ExecutableRegistry）+ `BaseContext` |
-| `manager.py` | **Manager 执行体**：expand/review 状态机、prompt 装配（事件上下文/事件 inbox/revise 候选/codegraph/repair context）、plan 解析、Assembly Gate 执行、评审输出归一化（`_resolve_review_content`/`_parse_review_assessments`）、评审降级（`_degrade_review`） |
-| `worker.py` | **Worker 执行体**：首跑/续跑/revise-resume、产物归一、Artifact Gate、事件发布/收件箱、缓存生命周期、**多依赖分级阅读（`_build_tiered_reading_instructions`）**、**CC 流式输出分流（`_handle_cc_stream_output`）**、模型名校验（`_validate_model`）、产物契约加载（`_load_worker_artifact_contract`） |
+| `manager.py` | **Manager 执行体**：expand/review 状态机、prompt 装配（事件上下文/事件 inbox/revise 候选/codegraph/repair context）、plan 解析、评审输出归一化（`_resolve_review_content`/`_parse_review_assessments`）、评审降级（`_degrade_review`） |
+| `worker.py` | **Worker 执行体**：首跑/续跑/revise-resume、产物归一、事件发布/收件箱、缓存生命周期、**多依赖分级阅读（`_build_tiered_reading_instructions`）**、**CC 流式输出分流（`_handle_cc_stream_output`）**、模型名校验（`_validate_model`）、依赖产物路径解析（`_resolve_dep_artifact_path`） |
 | `registry.py` | `ExecutableRegistry` 工厂（`register`/`create`） |
 | `tests/ 中的 fake` | `测试 fake`：离线确定性假 AI（测试 fake） |
 | `__init__.py` | 包导出 |
@@ -510,7 +489,7 @@ AICU-Graph 的核心运行服务由 `main.py` 启动，使用 `runtime/` 提供�
 | `roles/Manager/default.yaml` | Manager 基类配置（8 步决策策略） |
 | `roles/Manager/engineering_coord.yaml` `release_planner.yaml` | 具体 Manager 角色覆盖 |
 | `roles/Worker/default.yaml` | Worker 基类配置 |
-| `roles/Worker/acceptance.yaml` `architecture.yaml` `code.yaml` `data_analysis.yaml` `deploy.yaml` `dev_lead.yaml` `dev_member.yaml` `document.yaml` `grill.yaml` `incremental_plan.yaml` `prototype.yaml` `requirements.yaml` `test.yaml` | 具体 Worker 角色；部分角色配置包含 `artifact_contract` |
+| `roles/Worker/acceptance.yaml` `architecture.yaml` `code.yaml` `data_analysis.yaml` `deploy.yaml` `dev_lead.yaml` `dev_member.yaml` `document.yaml` `grill.yaml` `incremental_plan.yaml` `prototype.yaml` `requirements.yaml` `test.yaml` | 具体 Worker 角色 |
 | `roles/system_role/default.yaml` `roles/system_role/router.yaml` | 系统级角色配置 |
 
 ### 10.7 tests/ 与根级测试脚本
@@ -524,7 +503,6 @@ AICU-Graph 的核心运行服务由 `main.py` 启动，使用 `runtime/` 提供�
 | `tests/test_event_reactivation_bridge.py` | 事件→重激活桥单测 |
 | `tests/test_router_lifecycle.py` | AICU Router 单测（组织图快照 / prompt / 目标解析 / 生命周期） |
 | `tests/test_plan_validator.py` | 结构校验单测 |
-| `tests/test_artifact_gate.py` `test_artifact_registry.py` `test_assembly_gate.py` `test_delivery_issues.py` | 交付层单测 |
 | `tests/test_closed_loop.py` | 闭环台账单测 |
 | `tests/test_codegraph_context.py` | CodeGraph 上下文单测 |
 | `tests/test_runtime.py` `test_scheduler.py` `test_scheduler_retry.py` `test_scheduler_manager.py` `test_manager.py` `test_worker.py` `test_convergence_budget.py` `test_manager_collaboration.py` `test_rootcause_fixes.py` `test_root_revise.py` `test_routing_reactivation.py` `test_concurrency_robustness.py` | 核心运行时单测（含调度重试 `test_scheduler_retry.py`） |
@@ -596,11 +574,8 @@ AICU-Graph 的核心运行服务由 `main.py` 启动，使用 `runtime/` 提供�
 
 | 想做什么 | 读这些文件 |
 |---|---|
-| 改 Artifact Gate 校验规则 | `runtime/delivery/gate.py`、`runtime/delivery/contracts.py` |
-| 改产物类型规则 | `runtime/delivery/contracts.py`（TYPE_RULES） |
-| 改总装校验 / 阻塞问题分类 | `runtime/delivery/assembly.py`、`runtime/delivery/issues.py` |
-| 改产物注册表 | `runtime/delivery/registry.py` |
 | 改闭环台账内容 | `runtime/closed_loop.py` |
+| 改产物目录索引 / 预览规则 | `runtime/shared_io.py`（`build_dir_index` / `previewable_path` / `mime_type_for`） |
 | 改共享工作区路径规则 | `runtime/workspace_resolver.py` |
 
 ### E. 调度 / 状态 / 生命周期
@@ -625,7 +600,7 @@ AICU-Graph 的核心运行服务由 `main.py` 启动，使用 `runtime/` 提供�
 | 改前端图渲染 | `frontend/src/components/GraphCanvas.tsx` `TreeNode.tsx` |
 | 加前端标签页 | `frontend/src/components/NodeInspector.tsx` + 对应新组件 |
 | 改前端状态管理 | `frontend/src/stores/*.ts` |
-| 加/改环境变量功能开关 | `runtime/delivery/__init__.py`、`runtime/context/__init__.py`、`runtime/scheduler.py`、`executables/worker.py` |
+| 加/改环境变量功能开关 | `runtime/context/__init__.py`、`runtime/scheduler.py`、`executables/worker.py` |
 
 ---
 
@@ -633,8 +608,6 @@ AICU-Graph 的核心运行服务由 `main.py` 启动，使用 `runtime/` 提供�
 
 | 环境变量 | 作用 | 默认 |
 |---|---|---|
-| `AICU_DELIVERY` | 交付保障总开关 | 空（关） |
-| `AICU_ARTIFACT_GATE` | Artifact Gate 细分开关（`!= "0"` 且 delivery 开才生效） | 开 |
 | `AICU_CODEGRAPH` | CodeGraph 上下文注入开关 | 空（关） |
 | `CODEGRAPH_BIN` | codegraph CLI 路径 | 默认 |
 | `MAX_COLLABORATION_ROUNDS`（运行时属性） | 全局协作轮数上限（C1） | 10 |
@@ -655,15 +628,15 @@ AICU-Graph 的核心运行服务由 `main.py` 启动，使用 `runtime/` 提供�
    → 生成子 Manager / Worker 节点（无 related_nodes；协作靠事件 + Router）
 4. Scheduler 继续推进：
    → Worker 节点激活 → Worker.run() → aicu.ask → AI 在 workspaces/{id}/cc_0/ 干活
-   → 产物归一到 shared/{output_path} → Artifact Gate → COMPLETED
+   → 产物归一到 shared/{output_path} → COMPLETED
    → Worker 发事件（objective 描述事件本身）→ AICU Router 结合组织图决策目标 → 投递目标 inbox
 5. 处于 WAITING/COMPLETED 状态的目标节点（如 backend_impl）可被事件→重激活桥唤醒（inbox 有事件即处理）；FAILED/PAUSED/STOPPED 不会由该桥自动恢复
    → 读 pending_context（event_objective）→ 修复 → 再发事件通知 test 复验
 6. 子节点全部完成后 → 父 Manager 收到通知 → _review 评审
-   → 全通过；启用 `AICU_DELIVERY=1` 时执行 Assembly Gate，Gate 通过后才标记 delivered
+   → 全通过
    → 按配置写入 closed_loop.json / deliverable_manifest.json，随后 COMPLETED
    → 逐级向上直到根 Manager 收敛
-7. 前端通过 SSE 实时看到：图变化、节点状态、事件流（谁产生事件 → Router 路由 → 目标消费）。启用 `AICU_DELIVERY=1` 时，产物还会经过 Artifact/Assembly Gate；未启用时 Delivery 层不执行，节点 `COMPLETED` 不等于已交付。
+7. 前端通过 SSE 实时看到：图变化、节点状态、事件流（谁产生事件 → Router 路由 → 目标消费）。产物的事实来源是共享分区里的真实文件。
 ```
 
 ---
@@ -676,7 +649,7 @@ AICU-Graph 的核心运行服务由 `main.py` 启动，使用 `runtime/` 提供�
 | 事件没到达目标节点 | 看 `runtime/agent_events.py` 的 `_route_locked`/`_deliver`；检查 `runtime/router.py`（Router 是否返回目标、目标 node_id 是否正确） |
 | 节点没被重激活 | 看 `runtime/scheduler.py` 的 `_process_reactivation_events`；确认事件已投递到目标 inbox 且目标非 RUNNING；检查 C1 协作预算 |
 | Manager 评审卡住 | 看 `executables/manager.py` 的 `_review` 与 `_parse_review_assessments`；事件是否被 `flush_node_events` 兜底 |
-| 产物报 invalid | 看 `runtime/delivery/gate.py`（Artifact Gate 的 containment/exists/type/contract） |
+| 产物没落到共享分区 | 看 `executables/worker.py` 的 `_normalize_worker_artifact` 与 `runtime/workspace_resolver.py` 的分区解析 |
 | 想看真实事件流转 | `events.json` 全局日志 + 前端 Event Stream / `runtime/sse_manager.py` |
 | 想运行确定性测试 | `python3 run_tests.py`（运行项目内置测试） |
 

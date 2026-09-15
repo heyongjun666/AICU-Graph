@@ -5,7 +5,6 @@ import {
   File,
   Folder,
   FolderOpen,
-  PackageOpen,
   RefreshCw,
   X,
 } from 'lucide-react';
@@ -184,16 +183,6 @@ const SharedWorkspacePanel: React.FC<SharedWorkspacePanelProps> = ({
                     <span className="workspace-entry-icon">{entry.type === 'directory' ? <Folder size={16} /> : <File size={16} />}</span>
                     <span className="workspace-entry-name">
                       <span className="outputs-entry-title">{entry.name}</span>
-                      {entry.kind === 'artifact_partition' && entry.producer && (
-                        <span className="outputs-badges">
-                          <span className="outputs-badge outputs-producer" title={t('outputs.producedBy', { role: entry.producer.role })}>
-                            <PackageOpen size={11} /> {entry.producer.role} · {entry.producer.artifact_type} · {entry.producer.step_ref}
-                          </span>
-                          {entry.delivery?.state && (
-                            <span className={`outputs-badge outputs-delivery outputs-delivery-${String(entry.delivery.state).toLowerCase()}`}>{entry.delivery.state}</span>
-                          )}
-                        </span>
-                      )}
                     </span>
                     <small>{entry.type === 'directory' ? t('outputs.folder') : formatBytes(entry.size)}</small>
                   </button>

@@ -170,21 +170,6 @@ class TestContractCompatibility:
     def test_num_ccs_unchanged(self, role):
         assert _cfg(role).get("num_ccs") == _BASELINE_NUM_CCS[role]
 
-    def test_artifact_contract_only_on_code_test_acceptance(self):
-        owners = {
-            role for role in ALL_ROLES if "artifact_contract" in _cfg(role)
-        }
-        assert owners == {"code", "test", "acceptance"}
-
-    def test_artifact_contract_values_unchanged(self):
-        code = _cfg("code")["artifact_contract"]
-        assert code["artifact_type"] == "code"
-        assert code["validators"] == ["exists", "non_empty", "source_file"]
-        for role in ("test", "acceptance"):
-            ac = _cfg(role)["artifact_contract"]
-            assert ac["artifact_type"] == "document"
-            assert ac["validators"] == ["exists", "non_empty", "verdict_block"]
-
     @pytest.mark.parametrize("role", ["test", "acceptance"])
     def test_verdict_block_protocol_preserved(self, role):
         txt = _text(role, "generate_instruction")

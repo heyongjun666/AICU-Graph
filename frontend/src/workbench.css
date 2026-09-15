@@ -308,13 +308,6 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .outputs-browser { min-height: 320px; border: 1px solid #e6e8eb; border-radius: 8px; }
 .outputs-entry { align-items: start; padding: 9px 8px; }
 .outputs-entry-title { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
-.outputs-badges { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 5px; }
-.outputs-badge { padding: 2px 6px; display: inline-flex; align-items: center; gap: 4px; border-radius: 4px; font-size: 10px; font-weight: 600; }
-.outputs-producer { background: #eef4f2; color: #176b55; }
-.outputs-delivery { background: #edf2f7; color: #35577d; }
-.outputs-delivery-validated { background: #e6f4ea; color: #1e7e34; }
-.outputs-delivery-failed { background: #fdecec; color: #b3261e; }
-.outputs-delivery-pending { background: #fdf3e3; color: #9a6b16; }
 .spin { animation: spin 1s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
 

@@ -51,7 +51,7 @@ _ROLE_ADVANCED_FIELDS = {
     "output_file", "final_file", "modular_output", "main_doc",
     "generate_instruction", "revise_instruction", "review_checklist",
     "adversarial_role", "audit_role", "audit_angles",
-    "deliverable_dir", "artifact_contract",
+    "deliverable_dir",
 }
 
 # 不展示在角色创建表单中的字段：这些字段有运行时兜底默认值（如 index_file 恒为
@@ -68,7 +68,7 @@ _MANAGER_HIDDEN_SCHEMA_FIELDS = frozenset({
     "generate_instruction", "revise_instruction",
     "review_checklist", "adversarial_role", "audit_role", "audit_angles",
     "output_file", "final_file", "modular_output", "main_doc",
-    "deliverable_dir", "artifact_contract",
+    "deliverable_dir",
 })
 
 
@@ -189,21 +189,6 @@ class RolesManager:
             role_cfg = yaml.safe_load(file) or {}
         return {**defaults, **role_cfg}
 
-    def get_artifact_contract(self, role_id: str, role_type: str = "worker"):
-        """读取角色 yaml 的 ``artifact_contract:``（default + role 覆盖合并）。
-
-        Returns:
-            runtime.delivery.contracts.ArtifactContract；角色缺失/解析失败回退默认
-            契约（{validators: [exists, non_empty]}，向后兼容老角色）。
-        """
-        from runtime.delivery.contracts import ArtifactContract, parse_contract
-
-        try:
-            config = self._effective_role_config(role_id, role_type)
-        except (KeyError, OSError):
-            return ArtifactContract()
-        return parse_contract(config.get("artifact_contract"))
-
     def _get_field_catalog(
         self, role_type: str
     ) -> tuple[dict[str, Any], dict[str, Any]]:
@@ -237,7 +222,7 @@ class RolesManager:
             "generate_instruction": "Generate instruction", "revise_instruction": "Revise instruction",
             "review_checklist": "Review checklist", "adversarial_role": "Adversarial role",
             "audit_role": "Audit role", "audit_angles": "Audit angles", "role_md": "Role instructions",
-            "deliverable_dir": "Deliverable directory", "artifact_contract": "Artifact contract",
+            "deliverable_dir": "Deliverable directory",
         }
         labels_zh = {
             "summary": "摘要", "description": "描述",
@@ -249,7 +234,7 @@ class RolesManager:
             "generate_instruction": "生成指令", "revise_instruction": "修订指令",
             "review_checklist": "审查清单", "adversarial_role": "对抗角色",
             "audit_role": "审计角色", "audit_angles": "审计角度", "role_md": "角色指令",
-            "deliverable_dir": "交付目录", "artifact_contract": "产物契约",
+            "deliverable_dir": "交付目录",
         }
         descriptions_zh = {
             "summary": "一句话精炼描述该角色的核心职责与擅长范围，供 Manager 选角时参考。",
@@ -274,7 +259,6 @@ class RolesManager:
             "audit_angles": "审计阶段：审计 Agent 逐一排查的风险维度列表。",
             "role_md": "所有环节：Agent 的角色人格定义，描述身份、使命、工作流程与产出要求。",
             "deliverable_dir": "交付阶段：交付物在 workspace 内的子目录，技能内部产物隔离在根目录。默认 deliverables。",
-            "artifact_contract": "交付阶段：产物契约，声明产物的机械特征（内容类型 + 校验器），用于交付门禁的确定性校验。",
         }
         descriptions_en = {
             "summary": "One-line description of the role's core responsibilities and strengths, shown to the Manager when matching roles.",
@@ -299,7 +283,6 @@ class RolesManager:
             "audit_angles": "Audit phase: list of risk dimensions the audit agent checks one by one.",
             "role_md": "All phases: role persona definition describing identity, mission, workflow, and output requirements.",
             "deliverable_dir": "Delivery phase: subdirectory for deliverables within the workspace; skill-internal outputs are isolated at the root. Default deliverables.",
-            "artifact_contract": "Delivery phase: artifact contract declaring mechanical traits (content type + validators) for deterministic checks at the delivery gate.",
         }
         # Manager 与 Worker 的 summary/suitable_for/not_for 语义不同：
         # Manager = 组织/规划/协调能力，Worker = 具体执行能力。示例需按角色类型区分，

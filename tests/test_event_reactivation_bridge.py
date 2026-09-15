@@ -174,11 +174,13 @@ class TestBridgeReactivation:
     def test_terminal_node_target_event_reactivates(self, tmp_path):
         """终态 backend 收到 test 发的事件 → 转 READY（进入 Revise）+ 事件上下文注入。"""
         h = _BridgeHarness(tmp_path)
+        h.graph.update_node("B1", artifact_path="deliverables/result.json")
         _write_event(h.root, "B1", _feedback_event("T1"))
         h.run_bridge()
 
         b = h.graph.get_node("B1")
         assert b.status == NodeStatus.READY
+        assert b.artifact_path == "deliverables/result.json"
         assert b.activation_count == 1
         assert "multiply(2,3)=5" in b.pending_context["event_content"]
         assert b.pending_context["event_producer"] == "T1"

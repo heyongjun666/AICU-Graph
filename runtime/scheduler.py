@@ -941,6 +941,7 @@ class Scheduler:
         step_id: str,
         routing: RoutingDecision,
         now_ts: Optional[str] = None,
+        reset_artifacts: bool = True,
     ) -> bool:
         """激活单个目标节点（原 _handle_routing 循环体逐行搬移）。
 
@@ -1010,7 +1011,7 @@ class Scheduler:
             pending_context=ctx,
             rewind_parent=True,
             bump_activation=True,
-            reset_artifacts=True,
+            reset_artifacts=reset_artifacts,
         )
         if not reactivated:
             return False
@@ -1147,6 +1148,7 @@ class Scheduler:
         previous_status = node.status
         activated = self._activate_target(
             producer_node or node, node, step_id, routing,
+            reset_artifacts=False,
         )
         if activated:
             # 已有子节点的 Manager 收到事件 → 进入 Revise（增量续跑：复用既有子节点），

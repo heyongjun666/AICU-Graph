@@ -94,6 +94,28 @@ type UIStateStore = UIState & UIActions;
 // 初始状态
 // ============================================================================
 
+/** 界面语言的本地缓存键。后端配置是权威来源，这里只是一份同步缓存。 */
+const LANGUAGE_KEY = 'graph-workbench.language';
+
+/**
+ * 同步读取本地缓存的界面语言。
+ *
+ * 语言在服务端（全局配置）持久化，但那是**异步**获取的：若初始值写死为
+ * 'zh'，每次刷新都会先按中文绘制一帧、等 /v1/config 返回后再翻成英文，
+ * 表现为「中文一闪而过」。在 store 初始化时同步读缓存即可消除该闪烁
+ * （与 SessionStore 读取 activeSessionId 同一套路）。
+ *
+ * 缓存只是加速首屏，App 启动后仍会用服务端值纠正；读不到或存储不可用
+ * （隐私模式 / 禁用存储）时回退 'zh'。
+ */
+function readCachedLanguage(): 'zh' | 'en' {
+  try {
+    return localStorage.getItem(LANGUAGE_KEY) === 'en' ? 'en' : 'zh';
+  } catch {
+    return 'zh';
+  }
+}
+
 const initialState: UIState = {
   modals: {
     [ModalType.SubmitTask]: false,
@@ -113,7 +135,7 @@ const initialState: UIState = {
   exportPhase: ExportPhase.Idle,
   currentTaskText: '',
   globalSearchKeyword: '',
-  language: 'zh',
+  language: readCachedLanguage(),
 };
 
 // ============================================================================
@@ -189,7 +211,15 @@ export const useUIStateStore = create<UIStateStore>((set) => ({
   setGlobalSearchKeyword: (keyword: string) => set({ globalSearchKeyword: keyword }),
 
   // ---- 语言 ----
-  setLanguage: (language: 'zh' | 'en') => set({ language }),
+  setLanguage: (language: 'zh' | 'en') => {
+    // 同步写缓存，供下次刷新的首屏直接命中（避免中文闪烁）
+    try {
+      localStorage.setItem(LANGUAGE_KEY, language);
+    } catch {
+      /* 存储不可用时仅影响首屏语言，不影响本次切换 */
+    }
+    set({ language });
+  },
 
   // ---- 重置 ----
   reset: () => set({ ...initialState }),

@@ -431,6 +431,9 @@ export const zh: Dict = {
   'events.none': '（无）',
   'events.collapse': '折叠',
   'events.expand': '展开',
+  'events.status.routed.title': '已路由：Router 已决策目标，待投递',
+  'events.status.delivered.title': '已投递：全部目标 inbox 已落盘',
+  'events.status.consumed.title': '已消费：全部目标已处理（inbox 已清空）',
 
   // ---- 会话产出 ----
   'outputs.title': '会话产出',

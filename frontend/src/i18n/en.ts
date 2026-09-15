@@ -431,6 +431,9 @@ export const en: Dict = {
   'events.none': '(none)',
   'events.collapse': 'Collapse',
   'events.expand': 'Expand',
+  'events.status.routed.title': 'Routed: the router has chosen the targets, delivery pending',
+  'events.status.delivered.title': 'Delivered: every target inbox has been written',
+  'events.status.consumed.title': 'Consumed: every target has processed it (inboxes cleared)',
 
   // ---- Session outputs ----
   'outputs.title': 'Session outputs',

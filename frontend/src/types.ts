@@ -187,6 +187,10 @@ export interface GlobalConfig {
   api_base_url: string | null;
   api_key_env: string | null;
   language?: 'zh' | 'en';
+  /** 单节点 agent 数量是否由 Manager 动态规划（false = 全部节点使用 default_num_ccs）。 */
+  dynamic_num_ccs?: boolean;
+  /** dynamic_num_ccs=false 时所有节点统一的 agent 数量，取值 1–4。 */
+  default_num_ccs?: number;
 }
 
 /** 后端 /v1/config 响应。 */

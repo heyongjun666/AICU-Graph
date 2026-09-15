@@ -1057,3 +1057,115 @@ def test_internal_username_empty_value_deletes(session_client):
     assert resp.status_code == 200
     assert resp.json() == {"username": None, "saved": False}
     assert session_client.get("/v1/config/internal-username").json() == {"username": None}
+
+
+# ============================================================================
+# 单节点 agent 数量策略（dynamic_num_ccs / default_num_ccs）
+# ============================================================================
+
+def test_num_ccs_policy_defaults_and_roundtrip(session_client):
+    """默认 = 动态 + 1；关闭后必须回 false 而不是被兜底吞成 null。"""
+    config = session_client.get("/v1/config").json()["config"]
+    assert config["dynamic_num_ccs"] is True
+    assert config["default_num_ccs"] == 1
+
+    resp = session_client.patch(
+        "/v1/config",
+        json={"config": {"dynamic_num_ccs": False, "default_num_ccs": 2}},
+    )
+    assert resp.status_code == 200, resp.text
+    # 关键回归：`value or None` 会把 False 吞成 None，此断言专门守这个坑。
+    assert resp.json()["config"]["dynamic_num_ccs"] is False
+    assert resp.json()["config"]["default_num_ccs"] == 2
+
+    config = session_client.get("/v1/config").json()["config"]
+    assert config["dynamic_num_ccs"] is False
+    assert config["default_num_ccs"] == 2
+
+
+def test_num_ccs_default_out_of_range_rejected(session_client):
+    for bad in (0, 5, -1, "abc", None):
+        resp = session_client.patch(
+            "/v1/config", json={"config": {"default_num_ccs": bad}}
+        )
+        assert resp.status_code == 400, f"{bad!r} should be rejected"
+    # 拒绝后不得污染已存配置
+    assert session_client.get("/v1/config").json()["config"]["default_num_ccs"] == 1
+
+
+def test_num_ccs_policy_persists_across_manager_reload(session_client, tmp_path):
+    """持久化：重新加载 global config 后仍是 false（老 config.json 自动补默认）。"""
+    session_client.patch(
+        "/v1/config", json={"config": {"dynamic_num_ccs": False, "default_num_ccs": 3}}
+    )
+    from runtime.session_manager import SessionManager
+    reloaded = SessionManager(
+        registry=None,
+        root_dir=str(tmp_path / "sessions"),
+        workspace_root=str(tmp_path),
+        restore=False,
+    )
+    try:
+        config = reloaded.get_global_config()
+        assert config["dynamic_num_ccs"] is False
+        assert config["default_num_ccs"] == 3
+    finally:
+        reloaded.shutdown()
+
+
+def test_num_ccs_policy_applies_to_new_session_nodes(session_client, session_manager):
+    """开关关闭 → 新会话里 Manager 规划的 num_ccs 被压成默认值。"""
+    session_client.patch(
+        "/v1/config", json={"config": {"dynamic_num_ccs": False, "default_num_ccs": 1}}
+    )
+    session_id = _create_session(session_client)["id"]
+
+    runtime = session_manager.get_session(session_id).runtime
+    assert runtime.dynamic_num_ccs is False
+    assert runtime.default_num_ccs == 1
+
+    resp = session_client.post(
+        f"/v1/sessions/{session_id}/nodes",
+        json={"task": "t", "exec_type": "worker", "config": {"num_ccs": 3}},
+    )
+    assert resp.status_code == 201, resp.text
+    assert resp.json()["config"]["num_ccs"] == 1
+
+
+def test_num_ccs_policy_pushed_to_existing_sessions(session_client, session_manager):
+    """已存在的会话即时收到策略更新；已建节点不回改。"""
+    session_id = _create_session(session_client)["id"]
+    runtime = session_manager.get_session(session_id).runtime
+    assert runtime.dynamic_num_ccs is True
+
+    pre = session_client.post(
+        f"/v1/sessions/{session_id}/nodes",
+        json={"task": "pre", "exec_type": "worker", "config": {"num_ccs": 3}},
+    )
+    assert pre.status_code == 201, pre.text
+    pre_node_id = pre.json()["id"]
+    assert pre.json()["config"]["num_ccs"] == 3
+
+    session_client.patch(
+        "/v1/config", json={"config": {"dynamic_num_ccs": False, "default_num_ccs": 1}}
+    )
+
+    assert runtime.dynamic_num_ccs is False
+    assert runtime.default_num_ccs == 1
+    # 已建节点保持原值（不回溯）
+    assert runtime.get_node(pre_node_id).config["num_ccs"] == 3
+    # 此后新建的节点按新策略
+    post = session_client.post(
+        f"/v1/sessions/{session_id}/nodes",
+        json={"task": "post", "exec_type": "worker", "config": {"num_ccs": 3}},
+    )
+    assert post.status_code == 201, post.text
+    assert post.json()["config"]["num_ccs"] == 1
+
+
+def test_num_ccs_policy_rejects_unknown_keys(session_client):
+    """白名单仍然生效：未登记的键不能借这个口子进来。"""
+    resp = session_client.patch(
+        "/v1/config", json={"config": {"totally_unknown_key": 1}}
+    )
+    assert resp.status_code == 400

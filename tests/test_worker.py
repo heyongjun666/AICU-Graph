@@ -354,6 +354,8 @@ class TestRealMode:
             "skills": ["review"],
             "skills_dir": "/tmp/skills",
             "skip_permissions": False,
+            # 单节点 agent 数量策略钉死后的值（runtime._apply_num_ccs_policy 写入）
+            "num_ccs": 1,
         })
         ctx = _make_context(node=node, runtime=runtime)
         monkeypatch.setattr(aicu_module, "AICU", CapturingAICU)
@@ -369,6 +371,7 @@ class TestRealMode:
         assert captured["skills"] == ["review"]
         assert captured["skills_dir"] == "/tmp/skills"
         assert captured["skip_permissions"] is False
+        assert captured["num_ccs"] == 1
 
         captured["output_callback"]("stdout", "incremental output")
         assert runtime.status_updates[-1][2]["log_message"] == "incremental output"

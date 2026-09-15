@@ -85,3 +85,131 @@ describe('WorkbenchSettings roles form', () => {
     expect(container.querySelectorAll('.role-field')).toHaveLength(22);
   });
 });
+
+
+describe('WorkbenchSettings execution section', () => {
+  const renderSettings = () => {
+    const view = render(
+      <WorkbenchSettings open onClose={() => {}} onSaved={() => {}} />,
+    );
+    return view;
+  };
+
+  const openWorkspaceTab = async (container: HTMLElement) => {
+    fireEvent.click(screen.getByText('工作区与执行'));
+    // 等待异步 getGlobalConfig 落地（右侧面板渲染出执行区块）
+    await waitFor(() =>
+      expect(screen.getByText('单节点 agent 数量动态配置')).toBeDefined(),
+    );
+    return container;
+  };
+
+  const toggleOf = (container: HTMLElement) =>
+    container.querySelector('.settings-toggle input[type="checkbox"]') as HTMLInputElement;
+
+  const numInput = (container: HTMLElement) =>
+    container.querySelector('.settings-section input[type="number"]') as HTMLInputElement | null;
+
+  it('defaults to dynamic with no number input', async () => {
+    // getGlobalConfig mock（beforeEach）未提供新字段，模拟旧后端 / 老 config.json
+    const { container } = renderSettings();
+    await openWorkspaceTab(container);
+
+    expect(toggleOf(container).checked).toBe(true);
+    expect(numInput(container)).toBeNull();
+  });
+
+  it('defaults to dynamic when the backend returns the fields explicitly', async () => {
+    vi.mocked(api.getGlobalConfig).mockResolvedValue({
+      config: {
+        workspace_root: null, cli_name: null, model: null,
+        api_base_url: null, api_key_env: null,
+        dynamic_num_ccs: true, default_num_ccs: 2,
+      },
+      clis: [],
+      default_cli: 'claude',
+    });
+    const { container } = renderSettings();
+    await openWorkspaceTab(container);
+
+    expect(toggleOf(container).checked).toBe(true);
+    expect(numInput(container)).toBeNull();
+  });
+
+  it('reveals a 1-4 number input when the toggle is turned off', async () => {
+    const { container } = renderSettings();
+    await openWorkspaceTab(container);
+
+    fireEvent.click(toggleOf(container));
+
+    const input = await waitFor(() => {
+      const el = numInput(container);
+      expect(el).not.toBeNull();
+      return el as HTMLInputElement;
+    });
+    expect(input.min).toBe('1');
+    expect(input.max).toBe('4');
+    expect(input.value).toBe('1');
+  });
+
+  it('shows the persisted default count when reopened with the toggle off', async () => {
+    vi.mocked(api.getGlobalConfig).mockResolvedValue({
+      config: {
+        workspace_root: null, cli_name: null, model: null,
+        api_base_url: null, api_key_env: null,
+        dynamic_num_ccs: false, default_num_ccs: 3,
+      },
+      clis: [],
+      default_cli: 'claude',
+    });
+    const { container } = renderSettings();
+    await openWorkspaceTab(container);
+
+    expect(toggleOf(container).checked).toBe(false);
+    expect((numInput(container) as HTMLInputElement).value).toBe('3');
+  });
+
+  it('saves the toggle state and default count', async () => {
+    vi.mocked(api.updateGlobalConfig).mockResolvedValue({ config: {} as never });
+    const { container } = renderSettings();
+    await openWorkspaceTab(container);
+
+    fireEvent.click(toggleOf(container));
+    fireEvent.change(numInput(container) as HTMLInputElement, { target: { value: '3' } });
+    fireEvent.click(screen.getByText('保存执行配置'));
+
+    await waitFor(() => expect(api.updateGlobalConfig).toHaveBeenCalled());
+    expect(vi.mocked(api.updateGlobalConfig).mock.calls[0][0]).toMatchObject({
+      dynamic_num_ccs: false,
+      default_num_ccs: 3,
+    });
+  });
+
+  it('clamps out-of-range values before saving', async () => {
+    vi.mocked(api.updateGlobalConfig).mockResolvedValue({ config: {} as never });
+    const { container } = renderSettings();
+    await openWorkspaceTab(container);
+
+    fireEvent.click(toggleOf(container));
+    fireEvent.change(numInput(container) as HTMLInputElement, { target: { value: '9' } });
+    fireEvent.click(screen.getByText('保存执行配置'));
+
+    await waitFor(() => expect(api.updateGlobalConfig).toHaveBeenCalled());
+    expect(vi.mocked(api.updateGlobalConfig).mock.calls[0][0]).toMatchObject({
+      default_num_ccs: 4,
+    });
+  });
+
+  it('does not touch execution settings when saving the workspace only', async () => {
+    vi.mocked(api.updateGlobalConfig).mockResolvedValue({ config: {} as never });
+    const { container } = renderSettings();
+    await openWorkspaceTab(container);
+
+    fireEvent.click(screen.getByText('保存工作区'));
+
+    await waitFor(() => expect(api.updateGlobalConfig).toHaveBeenCalled());
+    const payload = vi.mocked(api.updateGlobalConfig).mock.calls[0][0];
+    expect(payload).not.toHaveProperty('dynamic_num_ccs');
+    expect(payload).not.toHaveProperty('default_num_ccs');
+  });
+});

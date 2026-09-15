@@ -41,6 +41,8 @@ _GLOBAL_CONFIG_KEYS = {
     "api_base_url",
     "api_key_env",
     "language",
+    "dynamic_num_ccs",
+    "default_num_ccs",
 }
 
 _GLOBAL_CONFIG_DEFAULTS = {
@@ -50,7 +52,15 @@ _GLOBAL_CONFIG_DEFAULTS = {
     "api_base_url": None,
     "api_key_env": None,
     "language": "zh",
+    # 单节点 agent（CC）数量策略：开 = 由 Manager 规划决定（现状）；
+    # 关 = 全部节点统一钉死为 default_num_ccs。
+    "dynamic_num_ccs": True,
+    "default_num_ccs": 1,
 }
+
+# 单节点 agent（CC）数量的合法区间，与 plan_validator._VALID_NUM_CCS 对齐。
+_MIN_NUM_CCS = 1
+_MAX_NUM_CCS = 4
 
 
 def _now() -> str:
@@ -277,6 +287,10 @@ class SessionManager:
 
         仅接受 ``_GLOBAL_CONFIG_KEYS`` 中的字段；``workspace_root`` 会解析为
         绝对路径并确保目录存在，空值表示清除该项。
+
+        ``dynamic_num_ccs`` / ``default_num_ccs`` 为单节点 agent 数量策略，
+        保存后会推送到所有已存在的会话 Runtime，使改动对正在运行的会话即时生效
+        （已建节点的 config 不回改，只影响此后新建/重新 prepare 的节点）。
         """
         unknown = {key for key in config if key not in _GLOBAL_CONFIG_KEYS}
         if unknown:
@@ -289,10 +303,44 @@ class SessionManager:
                     self.global_config[key] = resolved
                 elif key == "language":
                     self.global_config[key] = value if value in ("zh", "en") else "zh"
+                elif key == "dynamic_num_ccs":
+                    # 不能用下面的 `value or None` 兜底：False 会被吞成 None，
+                    # 开关状态将无法持久化。
+                    self.global_config[key] = True if value is None else bool(value)
+                elif key == "default_num_ccs":
+                    try:
+                        parsed = int(value)
+                    except (TypeError, ValueError):
+                        raise ValueError(
+                            f"default_num_ccs must be an integer in "
+                            f"{_MIN_NUM_CCS}..{_MAX_NUM_CCS}"
+                        )
+                    if not _MIN_NUM_CCS <= parsed <= _MAX_NUM_CCS:
+                        raise ValueError(
+                            f"default_num_ccs must be in "
+                            f"{_MIN_NUM_CCS}..{_MAX_NUM_CCS}"
+                        )
+                    self.global_config[key] = parsed
                 else:
                     self.global_config[key] = value or None
             self._save_global_config()
+            self._push_num_ccs_policy()
             return dict(self.global_config)
+
+    def _push_num_ccs_policy(self) -> None:
+        """把当前单节点 agent 数量策略推送到所有已存在会话的 Runtime。
+
+        调用方需持有 ``self._lock``。节点 config 一旦定稿即持久化，此处不改动
+        已建节点，只更新 Runtime 上的策略，供后续 ``_prepare_node_config`` 使用。
+        """
+        dynamic = bool(self.global_config.get("dynamic_num_ccs", True))
+        default = int(self.global_config.get("default_num_ccs", 1))
+        for handle in list(self._sessions.values()):
+            runtime = getattr(handle, "runtime", None)
+            if runtime is None:
+                continue
+            runtime.dynamic_num_ccs = dynamic
+            runtime.default_num_ccs = default
 
     # ---- 凭据（按模型厂商保存的 API Key）—— 委托 CredentialStore ----
 
@@ -606,6 +654,8 @@ class SessionManager:
             shared_workspace=metadata.shared_workspace,
             roles_dir=self.roles_dir,
             router_config=self.global_config,
+            dynamic_num_ccs=self.global_config.get("dynamic_num_ccs", True),
+            default_num_ccs=self.global_config.get("default_num_ccs", 1),
         )
         runtime.set_pause_completion_callback(
             lambda interrupted, session_id=metadata.id: self._complete_pause(

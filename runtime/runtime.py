@@ -106,6 +106,8 @@ class Runtime(RuntimeGateway, SchedulerDelegate):
         roles_dir: Optional[str] = None,
         router_aicu_instance: Optional[Any] = None,
         router_config: Optional[dict[str, Any]] = None,
+        dynamic_num_ccs: Optional[bool] = None,
+        default_num_ccs: Optional[int] = None,
     ):
         self.max_concurrency = max_concurrency
         self.workspace_root = workspace_root or os.getcwd()
@@ -114,6 +116,13 @@ class Runtime(RuntimeGateway, SchedulerDelegate):
         self.shared_workspace = (
             os.path.abspath(shared_workspace) if shared_workspace else None
         )
+
+        # 单节点 agent（CC）数量策略（session 级，由全局设置注入）：
+        #   dynamic_num_ccs=True  → 维持现状，由 Manager 规划决定每个节点的数量；
+        #   dynamic_num_ccs=False → 所有节点一律钉死为 default_num_ccs。
+        # None 归一为「动态 + 默认 1」，保证旧调用方与 legacy server 行为不变。
+        self.dynamic_num_ccs = True if dynamic_num_ccs is None else bool(dynamic_num_ccs)
+        self.default_num_ccs = self._clamp_num_ccs(default_num_ccs)
 
         # PlanValidator 角色集（exec_type↔role 一致性校验用）。
         # roles_dir 未注入时保持 None → 该校验跳过（向后兼容，不依赖 roles 目录）。
@@ -386,6 +395,37 @@ class Runtime(RuntimeGateway, SchedulerDelegate):
         # 归一化保证订阅匹配（_subscribes）与 Worker prompt 注入的前提是合法形状。
         if prepared.get("events") is not None:
             prepared["events"] = self._normalize_events_config(prepared["events"])
+
+        # ---- 单节点 agent 数量策略（Session 级 · 最后收口） ----
+        # 必须放在最后：无条件压过 plan 传入值、Manager 角色 YAML 的 num_ccs
+        # 以及手动节点传入值。开关开启时原样返回，行为与改动前完全一致。
+        return self._apply_num_ccs_policy(prepared)
+
+    # ========================================================================
+    # 单节点 agent（CC）数量策略
+    # ========================================================================
+
+    @staticmethod
+    def _clamp_num_ccs(value: Optional[int]) -> int:
+        """把 num_ccs 收敛到合法区间；None/非法值回退为 1。
+
+        合法性依据 plan_validator._VALID_NUM_CCS = (1, 2, 3, 4)。这里的注入发生在
+        plan 校验之后，属于校验盲区，必须自行兜底：num_ccs=0 会让 AICU 建出零个 CC。
+        """
+        try:
+            parsed = int(value) if value is not None else 1
+        except (TypeError, ValueError):
+            parsed = 1
+        return min(4, max(1, parsed))
+
+    def _apply_num_ccs_policy(self, config: Optional[dict]) -> dict:
+        """开关关闭时把所有节点的 num_ccs 统一钉死为 ``default_num_ccs``。
+
+        开关开启（默认）时原样返回浅拷贝，不做任何改动。
+        """
+        prepared = dict(config or {})
+        if not self.dynamic_num_ccs:
+            prepared["num_ccs"] = self.default_num_ccs
         return prepared
 
     # ========================================================================
@@ -824,7 +864,9 @@ class Runtime(RuntimeGateway, SchedulerDelegate):
             if step.config:
                 merged = dict(child.config or {}) if child is not None else {}
                 merged.update(step.config)
-                updates["config"] = merged
+                # 修复 step 若带 num_ccs 会压掉已钉死的值；本路径同样不走
+                # _prepare_node_config，需自行套用策略。
+                updates["config"] = self._apply_num_ccs_policy(merged)
             self.scheduler.reactivate(
                 child.id,
                 target_status=NodeStatus.READY,
@@ -1465,6 +1507,9 @@ class Runtime(RuntimeGateway, SchedulerDelegate):
             node, merged_config = self._validate_revise_request(
                 node_id, task, config, "manager"
             )
+            # 本路径不走 _prepare_node_config（直接写回 graph），需自行套用策略，
+            # 否则开关关闭后 revise 会把节点重新放大回 Manager 规划值。
+            merged_config = self._apply_num_ccs_policy(merged_config)
             pending_context = {
                 "collaboration_type": "revise",
                 "original_task": node.task,

@@ -106,4 +106,5 @@ def validate_warnings(plan: ExecutionPlan) -> list[str]:
             f"Single layer has {worker_count} direct workers (exceeds the prompt "
             f"guideline of 5); consider grouping related workers under sub-manager nodes."
         )
+
     return warnings

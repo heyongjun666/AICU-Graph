@@ -356,7 +356,6 @@ class Scheduler:
                 #     worker flush_node_events 兜底摄取）。事件不参与调度：只投递 inbox。
                 if running_count > 0:
                     self._scan_agent_events()
-
                 with self._state_lock:
                     paused = self._paused
                     if not paused:

@@ -283,6 +283,54 @@ class TestCodexAdapter:
         assert out["result"] == "final answer"
         assert out["session_id"] == "c1"
 
+    def test_parse_result_reads_agent_message_item(self):
+        """codex exec --json 现行输出把正文包在 item 信封里（实测形态）。
+
+        老解析器只看顶层 result/output/text/message，认不出这种形态，于是
+        chat() 兜底返回整段原始 NDJSON —— 用户看到的就是一大坨 JSON 而不是回复。
+        """
+        adapter = get_adapter("codex")
+        raw = "\n".join([
+            json.dumps({"type": "thread.started", "thread_id": "t1"}),
+            json.dumps({"type": "item.completed", "item": {
+                "id": "item_0", "type": "reasoning", "text": "想一下",
+            }}),
+            json.dumps({"type": "item.completed", "item": {
+                "id": "item_1", "type": "agent_message", "text": "可用",
+            }}),
+            json.dumps({"type": "turn.completed", "usage": {"output_tokens": 1}}),
+        ])
+        out = adapter.parse_result(raw)
+        assert out["result"] == "可用"
+        assert out["session_id"] == "t1"
+
+    def test_parse_result_ignores_non_message_items(self):
+        """过程事件（命令输出）不得被当成回复采集。"""
+        adapter = get_adapter("codex")
+        raw = "\n".join([
+            json.dumps({"type": "item.completed", "item": {
+                "id": "item_0", "type": "command_execution",
+                "command": "ls", "aggregated_output": "a.txt",
+            }}),
+            json.dumps({"type": "item.completed", "item": {
+                "id": "item_1", "type": "error", "message": "模型元数据缺失",
+            }}),
+        ])
+        out = adapter.parse_result(raw)
+        # 没有 agent_message 事件时保持原有兜底：整段原文（调用方据此报错排查）
+        assert out["result"] == raw
+
+    def test_format_stream_event_reads_agent_message_item(self):
+        adapter = get_adapter("codex")
+        line = json.dumps({"type": "item.completed", "item": {
+            "id": "item_1", "type": "agent_message", "text": "可用",
+        }})
+        assert adapter.format_stream_event(line) == "可用"
+        command = json.dumps({"type": "item.completed", "item": {
+            "id": "item_0", "type": "command_execution", "aggregated_output": "a.txt",
+        }})
+        assert adapter.format_stream_event(command) == ""
+
 
 class TestQwenAdapter:
     def test_base_command_model_and_yolo(self):
@@ -299,6 +347,53 @@ class TestQwenAdapter:
         adapter = get_adapter("qwen")
         assert adapter.print_flags(streaming=True) == ["--output-format", "stream-json"]
         assert adapter.print_flags(streaming=False) == ["--output-format", "json"]
+
+    def test_parse_result_stream_json(self):
+        """stream-json 的 JSONL 要取出正文，不能把整段 JSON 当答案返回。
+
+        实测形状（qwen --output-format stream-json，glm-5.2 与 deepseek-v4-pro 同形）：
+        首行 system，中间 assistant（正文在 message 里），末行 result。正文不在
+        行顶层的 role/content 上，所以早期只认 role=="assistant" 的兜底收不到东西，
+        会把整个 JSONL 原样返回 —— 用户在流式界面里看到的就是一坨 JSON。
+        """
+        raw = "\n".join([
+            json.dumps({"type": "system", "subtype": "init", "session_id": "sess-1"}),
+            json.dumps({"type": "assistant", "message": {"role": "assistant",
+                                                         "content": [{"type": "text", "text": "可用"}]}}),
+            json.dumps({"type": "result", "subtype": "success", "result": "可用",
+                        "session_id": "sess-1"}),
+        ])
+        parsed = get_adapter("qwen").parse_result(raw)
+        assert parsed["result"] == "可用"
+        assert parsed["session_id"] == "sess-1"
+
+    def test_parse_result_single_object_still_openai_style(self):
+        """单对象 JSON 仍走 OpenAI 风格那条，别被事件流解析抢走。"""
+        raw = json.dumps({"role": "assistant", "content": "可用"})
+        assert get_adapter("qwen").parse_result(raw)["result"] == "可用"
+
+    def test_format_stream_event_reads_assistant_envelope(self):
+        """流式显示要认出 assistant 信封，否则界面上一路没有任何输出。
+
+        实测 qwen 的 stream-json：正文在 {"type":"assistant","message":{...}} 里，
+        行顶层没有 role；thinking 块也在同样的信封里，必须留空不显示。
+        """
+        adapter = get_adapter("qwen")
+        thinking = json.dumps({
+            "type": "assistant",
+            "message": {"role": "assistant",
+                        "content": [{"type": "thinking", "thinking": "用户要两个字"}]},
+        })
+        text = json.dumps({
+            "type": "assistant",
+            "message": {"role": "assistant",
+                        "content": [{"type": "text", "text": "可用"}]},
+        })
+        assert adapter.format_stream_event(thinking) == ""
+        assert adapter.format_stream_event(text) == "可用"
+        # 非正文事件（system / goal_state / result）一律不产出
+        assert adapter.format_stream_event(
+            json.dumps({"type": "stream_event", "event": {"type": "goal_state"}})) == ""
 
     def test_max_turns_uses_max_session_turns(self):
         adapter = get_adapter("qwen")
@@ -1436,3 +1531,49 @@ class TestCrossVendorEndpoint:
     # ------------------------------------------------------------ 下拉过滤
 
 
+class TestResultEventShapes:
+    """--output-format json 的三种形态都要能解析出最终文本。
+
+    claude 是单个对象，codebuddy 与 qwen 是事件数组（实测），stream-json 是 JSONL。
+    数组形态曾经完全解析不出来，AICU 会把整坨 JSON 当回复显示给用户。
+    """
+
+    ARRAY = [
+        {"type": "system", "subtype": "init", "session_id": "sid-1"},
+        {"type": "assistant", "message": {"role": "assistant", "content": []}},
+        {"type": "result", "subtype": "success", "result": "可用", "session_id": "sid-1"},
+    ]
+
+    @pytest.mark.parametrize("cli", ["claude", "codebuddy"])
+    def test_claude_family_parses_event_array(self, cli):
+        out = get_adapter(cli).parse_result(json.dumps(self.ARRAY, indent=2))
+        assert out == {"result": "可用", "session_id": "sid-1", "subtype": "success", "errors": []}
+
+    def test_qwen_parses_event_array(self):
+        out = get_adapter("qwen").parse_result(json.dumps(self.ARRAY, indent=2))
+        assert out["result"] == "可用"
+        assert out["session_id"] == "sid-1"
+
+    @pytest.mark.parametrize("cli", ["claude", "codebuddy"])
+    def test_single_object_still_parses(self, cli):
+        raw = json.dumps({"subtype": "error_during_execution", "errors": "boom"})
+        out = get_adapter(cli).parse_result(raw)
+        assert out["subtype"] == "error_during_execution"
+        assert out["errors"] == ["boom"]
+
+    @pytest.mark.parametrize("cli", ["claude", "codebuddy"])
+    def test_stream_json_lines_still_parse(self, cli):
+        raw = "\n".join(
+            json.dumps(event)
+            for event in [{"type": "assistant", "text": "略"}, self.ARRAY[-1]]
+        )
+        assert get_adapter(cli).parse_result(raw)["result"] == "可用"
+
+    @pytest.mark.parametrize("cli", ["claude", "codebuddy"])
+    def test_plain_text_returns_none(self, cli):
+        """纯文本不是 JSON，返回 None 由上层退回原始输出。"""
+        assert get_adapter(cli).parse_result("普通文本回复") is None
+
+    def test_qwen_plain_text_falls_back_to_raw(self):
+        """qwen 另有纯文本模式，兜底把原文当回复（既有行为，不因数组支持而改变）。"""
+        assert get_adapter("qwen").parse_result("普通文本回复")["result"] == "普通文本回复"

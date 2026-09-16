@@ -521,6 +521,68 @@ def _opencode_config_content(
     )
 
 
+def _result_events(raw: str) -> list:
+    """把 CLI 的 JSON 输出拆成事件列表，顺序不变。
+
+    同一个 ``--output-format json`` 在不同 CLI 下有三种形态，这里统一归一：
+      - 单个 JSON 对象（claude）
+      - 事件数组（codebuddy / qwen —— 实测两者都把事件装进一个 JSON 数组）
+      - 每行一个对象的 JSONL（各家 stream-json）
+    整段不是 JSON（纯文本回复）时返回空列表，由调用方兜底。
+    """
+    text = raw.strip()
+    if not text:
+        return []
+    try:
+        value = json.loads(text)
+    except json.JSONDecodeError:
+        value = None
+    if isinstance(value, dict):
+        return [value]
+    if isinstance(value, list):
+        return [event for event in value if isinstance(event, dict)]
+    events = []
+    for line in text.splitlines():
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(event, dict):
+            events.append(event)
+    return events
+
+
+def _claude_style_result(raw: str) -> Optional[dict]:
+    """取 Claude Code 风格的结果对象并归一化（claude / codebuddy / qwen 同形）。
+
+    ``--output-format json`` 在 claude 下就是单个结果对象，直接归一化；codebuddy /
+    qwen 输出事件数组（末条 ``type=result``），stream-json 则每行一个事件 ——
+    后两种取最后一条 result 事件。取不到返回 None，调用方退回原始输出。
+    """
+    text = raw.strip()
+    if not text:
+        return None
+    events = _result_events(raw)
+    candidates = [
+        event
+        for event in events
+        if event.get("type") == "result" or "result" in event
+    ]
+    # 单个对象且没有 result 字段时它就是结果对象本身（如只有 subtype/errors 的
+    # error_during_execution），不能因为挑不出 result 事件就丢掉。
+    if len(events) == 1 and not candidates:
+        candidates = events
+    if not candidates:
+        return None
+    event = candidates[-1]
+    return {
+        "result": event.get("result") or event.get("text"),
+        "session_id": event.get("session_id") or event.get("conversation_id"),
+        "subtype": event.get("subtype"),
+        "errors": _coerce_errors(event.get("errors")),
+    }
+
+
 def _coerce_errors(errors_value) -> list:
     """把各类 errors 表示归一化为字符串列表。"""
     if errors_value is None:
@@ -554,8 +616,14 @@ def _render_openai_content(content) -> str:
 def _extract_event_text(event: dict) -> str:
     """从通用 JSONL 事件 dict 提取文本（OpenCode / Pi / Gemini 等 json 事件）。"""
     for key in ("text", "content", "output", "response"):
-        if isinstance(event.get(key), str) and event[key]:
-            return event[key]
+        value = event.get(key)
+        if isinstance(value, str) and value:
+            return value
+        # 内容也可能是 OpenAI 风格的内容块数组（如 {"content":[{"type":"text",...}]}）
+        if isinstance(value, list):
+            rendered = _render_openai_content(value)
+            if rendered:
+                return rendered
     msg = event.get("message")
     if isinstance(msg, dict):
         for key in ("content", "text"):
@@ -575,6 +643,11 @@ def _extract_event_text(event: dict) -> str:
         ]
         if chunks:
             return "\n".join(chunks)
+    # OpenCode 的事件把内容包在单个 part 里：
+    # {"type":"text","part":{"type":"text","text":"..."}}（实测）
+    part = event.get("part")
+    if isinstance(part, dict):
+        return _extract_event_text(part)
     return ""
 
 
@@ -842,34 +915,7 @@ class ClaudeCodeAdapter(CliAdapter):
         return ""
 
     def parse_result(self, raw: str) -> Optional[dict]:
-        try:
-            value = json.loads(raw.strip())
-            if not isinstance(value, dict):
-                return None
-            return self._normalize(value)
-        except json.JSONDecodeError:
-            # 非单条 JSON：可能是一组 stream-json 行，取最后一条 result 事件
-            events = []
-            for line in raw.splitlines():
-                try:
-                    value = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                if isinstance(value, dict):
-                    events.append(value)
-            for event in reversed(events):
-                if event.get("type") == "result" or "result" in event:
-                    return self._normalize(event)
-            return None
-
-    @staticmethod
-    def _normalize(value: dict) -> dict:
-        return {
-            "result": value.get("result") or value.get("text"),
-            "session_id": value.get("session_id") or value.get("conversation_id"),
-            "subtype": value.get("subtype"),
-            "errors": _coerce_errors(value.get("errors")),
-        }
+        return _claude_style_result(raw)
 
 
 class CodeBuddyAdapter(ClaudeCodeAdapter):
@@ -910,6 +956,30 @@ class CodeBuddyAdapter(ClaudeCodeAdapter):
             if api_key:
                 env[self.api_key_env] = api_key
         return env
+
+
+# codex exec --json 的事件信封：正文在 ``item`` 里，``item.type`` 说明这条是什么
+# （agent_message / reasoning / command_execution / file_change / error …）。
+# 只有 agent_message 是给用户看的回复；其余是过程事件，不能混进最终答案，
+# 否则命令输出会被当成回复。
+# 实测形态：{"type":"item.completed","item":{"id":"item_1","type":"agent_message","text":"可用"}}
+_CODEX_MESSAGE_ITEM_TYPES = ("agent_message", "assistant_message", "message")
+
+
+def _codex_item_text(event: dict) -> str:
+    """从 codex 的 item 信封里取回复文本；不是回复事件则返回空串。"""
+    item = event.get("item")
+    if not isinstance(item, dict) or item.get("type") not in _CODEX_MESSAGE_ITEM_TYPES:
+        return ""
+    for key in ("text", "content", "message"):
+        value = item.get(key)
+        if isinstance(value, str) and value:
+            return value
+        if isinstance(value, list):
+            rendered = _render_openai_content(value)
+            if rendered:
+                return rendered
+    return ""
 
 
 class CodexAdapter(CliAdapter):
@@ -1015,6 +1085,9 @@ class CodexAdapter(CliAdapter):
             event = json.loads(line)
         except json.JSONDecodeError:
             return line
+        item_text = _codex_item_text(event)
+        if item_text:
+            return item_text
         for key in ("content", "text", "message", "output"):
             if isinstance(event.get(key), str) and event[key]:
                 return event[key]
@@ -1041,6 +1114,10 @@ class CodexAdapter(CliAdapter):
             if not isinstance(value, dict):
                 continue
             parsed_any = True
+            # 先认 item 信封（codex 现行输出），它比下面的通用键扫描更权威。
+            item_text = _codex_item_text(value)
+            if item_text:
+                result = item_text
             for key in ("result", "output", "text", "answer", "response"):
                 candidate = value.get(key)
                 if isinstance(candidate, str) and candidate:
@@ -1054,7 +1131,13 @@ class CodexAdapter(CliAdapter):
                     rendered = _render_openai_content(msg.get("content"))
                     if rendered:
                         result = rendered
-            sid = value.get("session_id") or value.get("conversation_id")
+            # codex 的续接 id 叫 thread_id（thread.started 事件里给出），
+            # 不采它则 codex 的多轮对话实际不会 --resume，每轮都是新会话。
+            sid = (
+                value.get("session_id")
+                or value.get("conversation_id")
+                or value.get("thread_id")
+            )
             if sid:
                 session_id = sid
             if value.get("subtype"):
@@ -1343,6 +1426,14 @@ class QwenAdapter(CliAdapter):
         except json.JSONDecodeError:
             return line
         if isinstance(event, dict):
+            # qwen 的 stream-json 用 Claude Code 同形信封，正文藏在
+            # {"type":"assistant","message":{"role":"assistant","content":[...]}} 里，
+            # 行顶层没有 role。少了这一步整个流式过程一行都吐不出来（实测回调 0 条），
+            # 界面上就只会在结束时突然显示最终答案。
+            # 复用 _extract_event_text：它只取 type=="text" 的块，thinking 块返回空串。
+            message = event.get("message")
+            if isinstance(message, dict) and message.get("role") == "assistant":
+                return _extract_event_text(message)
             role = event.get("role")
             if role in ("assistant", "tool"):
                 return _render_openai_content(event.get("content"))
@@ -1353,6 +1444,12 @@ class QwenAdapter(CliAdapter):
 
     def parse_result(self, raw: str) -> Optional[dict]:
         text = raw.strip()
+        # qwen 的 --output-format json 实测输出的是事件数组（末条 type=result，
+        # 与 Claude Code 同形）——优先按这个形状取，取不到再走下面的 OpenAI 风格兜底。
+        if text.startswith("["):
+            parsed = _claude_style_result(raw)
+            if parsed:
+                return parsed
         # 优先尝试单对象 JSON（--output-format json）
         try:
             value = json.loads(text)
@@ -1379,6 +1476,15 @@ class QwenAdapter(CliAdapter):
                 "subtype": value.get("subtype"),
                 "errors": _coerce_errors(value.get("errors") or value.get("error")),
             }
+        # 多行 JSONL（stream-json）：qwen 用的也是 Claude Code 同形的事件流 ——
+        # 首行 {"type":"system",...}，中间 {"type":"assistant","message":{...}}，
+        # 末行 {"type":"result","result":"可用"}。先按这个形状取；取不到再走下面
+        # 的 OpenAI 风格逐行收集兜底。
+        # 少了这一步流式输出会被当成纯文本原样返回：下面的兜底只认 role=="assistant"
+        # 的行，而 qwen 把正文放在 message 里，收集为空 → 整个 JSONL 变成答案。
+        parsed = _claude_style_result(raw)
+        if parsed and parsed.get("result"):
+            return parsed
         # 多行 JSONL（stream-json）：OpenAI 风格，收集 assistant 文本 + session_id
         result_parts = []
         session_id = None
@@ -1710,6 +1816,21 @@ class PiAdapter(CliAdapter):
         # 位置参数传 message
         return ([prompt], False)
 
+    @staticmethod
+    def _assistant_text(event: dict) -> str:
+        """取事件里的 assistant 文本；非 assistant 的一律返回空串。
+
+        pi 的 ``--mode json`` 会把用户消息也回显成 message_start / message_end
+        （实测 message.role == "user"、content 就是 prompt），直接复用通用提取器
+        会把用户的问题当成模型的回复。
+        """
+        message = event.get("message")
+        if isinstance(message, dict):
+            if message.get("role") != "assistant":
+                return ""
+            return _extract_event_text(message)
+        return _extract_event_text(event)
+
     def format_stream_event(self, line: str) -> str:
         try:
             event = json.loads(line)
@@ -1717,7 +1838,7 @@ class PiAdapter(CliAdapter):
             return line
         if not isinstance(event, dict):
             return ""
-        return _extract_event_text(event)
+        return self._assistant_text(event)
 
     def parse_result(self, raw: str) -> Optional[dict]:
         text = raw.strip()
@@ -1733,7 +1854,7 @@ class PiAdapter(CliAdapter):
             value = None
         if isinstance(value, dict):
             parsed_any = True
-            rendered = _extract_event_text(value)
+            rendered = self._assistant_text(value)
             if rendered:
                 result_parts.append(rendered)
             session_id = _extract_session_id(value)
@@ -1749,8 +1870,10 @@ class PiAdapter(CliAdapter):
                 if not isinstance(event, dict):
                     continue
                 parsed_any = True
-                rendered = _extract_event_text(event)
-                if rendered:
+                rendered = self._assistant_text(event)
+                # 同一段回复会在 message_end / turn_end 等事件里重复出现，去重后
+                # 再拼接，否则一段回复会被列好几遍。
+                if rendered and rendered not in result_parts:
                     result_parts.append(rendered)
                 sid = _extract_session_id(event)
                 if sid:

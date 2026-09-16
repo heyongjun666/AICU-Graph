@@ -192,6 +192,21 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .form-error { padding: 9px 10px; border: 1px solid #efc5c1; border-radius: 6px; background: #fff3f1; color: #982f26; font-size: 12px; }
 .dialog-actions { display: flex; justify-content: flex-end; gap: 8px; }
 .inspector-editor .dialog-actions { margin-top: 14px; }
+/* 候选角色池的三种模式：单选互斥，只有选中那项的内容会展开。 */
+.candidate-pool-modes { display: flex; flex-direction: column; gap: 6px; }
+.candidate-pool-mode { padding: 9px 10px; display: flex; align-items: center; gap: 8px; border: 1px solid #dfe2e6; border-radius: 6px; color: #4f5961; font-size: 12px; cursor: pointer; }
+/* 横排必须带上 `.workbench-dialog` 才生效：第 180 行的 `.workbench-dialog label` 声明了
+   flex-direction: column，权重 (0,1,1) 压过单个类 (0,1,0) —— 只在这一条里写是盖不住的，
+   单选框照样跑到文字上面。`.dependency-picker label` 靠同名权重 + 靠后覆盖，这里做不到。 */
+.workbench-dialog .candidate-pool-mode { flex-direction: row; }
+.candidate-pool-mode:has(input:checked) { border-color: #4d8d7c; background: #f2f7f5; color: #176b55; }
+/* 必须显式复位：上面 `.workbench-dialog input` 的 width:100% + 内边距 + 描边会把这个单选框
+   撑成横贯整行的大白框，圆点居中、文字被挤到下一行。与 `.dependency-picker input` 同理。 */
+.candidate-pool-mode input { width: auto; flex: 0 0 auto; margin: 0; padding: 0; border: 0; background: none; }
+/* 「智能推荐」占位：功能未开放，整行置灰且不可选。 */
+.candidate-pool-mode.is-disabled { border-style: dashed; background: #fafbfb; color: #8a9499; cursor: not-allowed; }
+.candidate-pool-mode span { display: flex; flex-direction: column; gap: 2px; }
+.candidate-pool-mode small { color: #9aa3a8; font-size: 11px; }
 
 .empty-workspace, .workspace-state { height: 100%; padding: 24px; display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center; }
 .empty-symbol { width: 52px; height: 52px; margin-bottom: 18px; display: grid; place-items: center; border: 1px solid #cbd4d1; border-radius: 8px; background: #e8efed; color: #176b55; }

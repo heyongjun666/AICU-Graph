@@ -6,6 +6,7 @@ import SessionSidebar from './components/SessionSidebar';
 import SharedWorkspacePanel from './components/SharedWorkspacePanel';
 import SessionWorkspaceDialog from './components/SessionWorkspaceDialog';
 import EventsDialog from './components/EventsDialog';
+import CandidateRolesDialog from './components/CandidateRolesDialog';
 import TerminalPanel from './components/TerminalPanel';
 import WorkbenchHeader from './components/WorkbenchHeader';
 import WorkbenchSettings from './components/WorkbenchSettings';
@@ -57,6 +58,7 @@ const App: React.FC = () => {
   const [terminalOpen, setTerminalOpen] = useState(false);
   const [workspaceSession, setWorkspaceSession] = useState<SessionSummary | null>(null);
   const [eventsOpen, setEventsOpen] = useState(false);
+  const [candidatePoolOpen, setCandidatePoolOpen] = useState(false);
   const [dialogBusy, setDialogBusy] = useState(false);
   const [linkCandidates, setLinkCandidates] = useState<LinkCandidate[]>([]);
   const [linkCandidateStatus, setLinkCandidateStatus] = useState<LinkCandidateLoadState>('idle');
@@ -215,6 +217,7 @@ const App: React.FC = () => {
               onRefresh={refreshSessions}
               terminalOpen={terminalOpen}
               onToggleTerminal={() => setTerminalOpen((value) => !value)}
+              onOpenCandidatePool={() => setCandidatePoolOpen(true)}
             />
             <div className="graph-workspace">
               <GraphCanvas />
@@ -247,6 +250,12 @@ const App: React.FC = () => {
       <WorkbenchSettings open={settingsOpen} onClose={() => setSettingsOpen(false)} onSaved={refreshSessions} />
       <SessionWorkspaceDialog open={Boolean(workspaceSession)} session={workspaceSession} onClose={() => setWorkspaceSession(null)} onSaved={refreshSessions} />
       <EventsDialog open={eventsOpen} sessionId={activeSessionId} onClose={() => setEventsOpen(false)} />
+      <CandidateRolesDialog
+        open={candidatePoolOpen}
+        sessionId={activeSessionId}
+        onClose={() => setCandidatePoolOpen(false)}
+        onSaved={refreshSessions}
+      />
       <ToastContainer />
     </div>
   );

@@ -144,6 +144,11 @@ export interface NodeConfig {
   skip_permissions?: boolean;
   num_ccs?: number;
   skills?: string[];
+  /**
+   * 会话候选角色池：绑定后该会话的 Manager 只看到池内角色的摘要（严格模式，面板 == 池）。
+   * 空数组/缺省 = 未绑定 → 看到全部角色。存的是角色 id 快照，不是池 id。
+   */
+  candidate_roles?: string[];
   audit_rounds?: number;
   max_iterations?: number;
   [key: string]: unknown;
@@ -246,6 +251,16 @@ export interface RoleInfo {
   defaults?: Record<string, unknown>;
   effective_config?: Record<string, unknown>;
   schema?: RoleSchema;
+}
+
+/**
+ * 候选角色池：若干个角色 id 的命名集合，供会话绑定。
+ * 会话绑定的是 roles 的快照（写进会话配置的 candidate_roles），因此改池/删池不影响已绑定的会话。
+ */
+export interface RolePool {
+  id: string;
+  name: string;
+  roles: string[];
 }
 
 export interface SkillInfo {

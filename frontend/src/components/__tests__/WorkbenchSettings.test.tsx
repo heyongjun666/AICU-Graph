@@ -8,15 +8,19 @@ import { RoleField } from '../../types';
 
 vi.mock('../../utils/api', () => ({
   createRole: vi.fn(),
+  createRolePool: vi.fn(),
   createSkill: vi.fn(),
+  deleteRolePool: vi.fn(),
   getGlobalConfig: vi.fn(),
   getRole: vi.fn(),
+  getRolePools: vi.fn(),
   getRoleSchema: vi.fn(),
   getRoles: vi.fn(),
   getSkill: vi.fn(),
   getSkills: vi.fn(),
   updateGlobalConfig: vi.fn(),
   updateRole: vi.fn(),
+  updateRolePool: vi.fn(),
   updateSkill: vi.fn(),
 }));
 
@@ -58,6 +62,7 @@ beforeEach(() => {
     defaults: {},
     fields,
   });
+  vi.mocked(api.getRolePools).mockResolvedValue([]);
 });
 
 afterEach(() => {

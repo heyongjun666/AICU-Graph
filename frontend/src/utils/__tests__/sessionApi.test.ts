@@ -1,11 +1,15 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   createDependency,
+  createRolePool,
   createSession,
+  deleteRolePool,
   getGraphSnapshot,
+  getRolePools,
   listSessions,
   listSessionShared,
   readSessionSharedFile,
+  updateRolePool,
 } from '../api';
 
 const response = (payload: unknown, status = 200) => Promise.resolve({
@@ -110,5 +114,53 @@ describe('session-scoped API', () => {
     expect(fetchMock).toHaveBeenCalledWith('/v1/sessions/s1/shared/file?path=backend%2Fapi.py', expect.anything());
     expect(file.previewable).toBe(true);
     expect(file.content).toBe('def main(): pass\n');
+  });
+});
+
+describe('role pool API', () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  it('lists pools from the collection wrapper', async () => {
+    const fetchMock = vi.fn(() => response({ pools: [{ id: 'p1', name: '博客开发', roles: ['code'] }] }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    const pools = await getRolePools();
+
+    expect(pools).toHaveLength(1);
+    expect(pools[0].name).toBe('博客开发');
+    expect(fetchMock).toHaveBeenCalledWith('/v1/role-pools', expect.anything());
+  });
+
+  it('creates a pool with name and roles', async () => {
+    const fetchMock = vi.fn(() => response({ id: 'p2', name: '纯编码', roles: ['code'] }, 201));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await createRolePool({ name: '纯编码', roles: ['code'] });
+
+    expect(fetchMock).toHaveBeenCalledWith('/v1/role-pools', expect.objectContaining({
+      method: 'POST',
+      body: JSON.stringify({ name: '纯编码', roles: ['code'] }),
+    }));
+  });
+
+  it('patches only the fields it is given', async () => {
+    const fetchMock = vi.fn(() => response({ id: 'p2', name: '纯编码', roles: ['test'] }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await updateRolePool('p2', { roles: ['test'] });
+
+    expect(fetchMock).toHaveBeenCalledWith('/v1/role-pools/p2', expect.objectContaining({
+      method: 'PATCH',
+      body: JSON.stringify({ roles: ['test'] }),
+    }));
+  });
+
+  it('deletes a pool by id', async () => {
+    const fetchMock = vi.fn(() => Promise.resolve({ ok: true, status: 204, json: () => Promise.resolve(null) } as Response));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await deleteRolePool('p2');
+
+    expect(fetchMock).toHaveBeenCalledWith('/v1/role-pools/p2', expect.objectContaining({ method: 'DELETE' }));
   });
 });

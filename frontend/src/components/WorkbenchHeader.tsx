@@ -8,6 +8,7 @@ import {
   ShieldAlert,
   Square,
   SquareTerminal,
+  Users,
   Wifi,
   WifiOff,
   X,
@@ -41,6 +42,7 @@ interface WorkbenchHeaderProps {
   onRefresh: () => void | Promise<void>;
   terminalOpen: boolean;
   onToggleTerminal: () => void;
+  onOpenCandidatePool: () => void;
 }
 
 const WorkbenchHeader: React.FC<WorkbenchHeaderProps> = ({
@@ -54,6 +56,7 @@ const WorkbenchHeader: React.FC<WorkbenchHeaderProps> = ({
   onRefresh,
   terminalOpen,
   onToggleTerminal,
+  onOpenCandidatePool,
 }) => {
   const { t } = useI18n();
   const [pendingAction, setPendingAction] = useState<SessionAction | null>(null);
@@ -240,6 +243,9 @@ const WorkbenchHeader: React.FC<WorkbenchHeaderProps> = ({
             </button>
           </span>
         )}
+        <button className="icon-button" onClick={onOpenCandidatePool} title={t('header.candidatePool')} aria-label={t('header.candidatePool')}>
+          <Users size={17} />
+        </button>
         <button className={`icon-button ${terminalOpen ? 'header-terminal-toggle is-active' : 'header-terminal-toggle'}`} onClick={onToggleTerminal} title={terminalOpen ? t('header.hideTerminal') : t('header.openTerminal')}>
           <SquareTerminal size={17} />
         </button>

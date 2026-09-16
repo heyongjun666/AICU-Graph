@@ -22,6 +22,7 @@ import {
   GlobalConfigResponse,
   RoleInfo,
   RoleSchema,
+  RolePool,
   SkillInfo,
   WorkspaceListing,
   WorkspaceFile,
@@ -644,6 +645,60 @@ export function updateRole(payload: {
 
 export function deleteRole(roleType: NonNullable<RoleInfo['type']>, roleId: string): Promise<void> {
   return sessionRequest(`roles/${roleType}/${roleId}`, { method: 'DELETE' });
+}
+
+// ============================================================================
+// 候选角色池 API
+//
+// 池只在设置页增删改；会话侧只能绑定（手选的角色写进会话配置的 candidate_roles，
+// 不落盘为池）。MOCK 分支内联在各函数里 —— MockProvider.tsx 只 mock 图数据，不 mock CRUD。
+// ============================================================================
+
+// MOCK 模式下的可变池列表：模块级，保证设置页在 mock 下也能增删改（否则只读不写）。
+let mockRolePools: RolePool[] = [
+  { id: 'pool-blog', name: '博客开发', roles: ['requirements', 'architecture', 'code', 'test', 'acceptance'] },
+  { id: 'pool-code', name: '纯编码', roles: ['code', 'test'] },
+];
+
+export async function getRolePools(): Promise<RolePool[]> {
+  if (MOCK_MODE) {
+    return mockRolePools.map((pool) => ({ ...pool }));
+  }
+  const payload = await sessionRequest<{ pools: RolePool[] }>('role-pools');
+  return payload.pools || [];
+}
+
+export function createRolePool(payload: { name: string; roles: string[] }): Promise<RolePool> {
+  if (MOCK_MODE) {
+    const pool: RolePool = { id: `pool-${Date.now()}`, ...payload };
+    mockRolePools = [...mockRolePools, pool];
+    return Promise.resolve({ ...pool });
+  }
+  return sessionRequest('role-pools', { method: 'POST', body: JSON.stringify(payload) });
+}
+
+export function updateRolePool(
+  poolId: string,
+  payload: { name?: string; roles?: string[] },
+): Promise<RolePool> {
+  if (MOCK_MODE) {
+    mockRolePools = mockRolePools.map((pool) =>
+      pool.id === poolId ? { ...pool, ...payload } : pool,
+    );
+    return Promise.resolve({ ...mockRolePools.find((pool) => pool.id === poolId)! });
+  }
+  return sessionRequest(`role-pools/${poolId}`, {
+    method: 'PATCH',
+    body: JSON.stringify(payload),
+  });
+}
+
+export function deleteRolePool(poolId: string): Promise<void> {
+  if (MOCK_MODE) {
+    mockRolePools = mockRolePools.filter((pool) => pool.id !== poolId);
+    return Promise.resolve();
+  }
+  return sessionRequest(`role-pools/${poolId}`, { method: 'DELETE' });
 }
 
 export async function getSkills(): Promise<SkillInfo[]> {

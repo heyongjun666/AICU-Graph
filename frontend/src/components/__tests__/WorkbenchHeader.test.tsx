@@ -54,7 +54,7 @@ afterEach(() => {
   useUIStateStore.getState().reset();
 });
 
-function renderHeader() {
+function renderHeader(onOpenCandidatePool: () => void = () => {}) {
   render(
     <I18nProvider>
       <WorkbenchHeader
@@ -68,6 +68,7 @@ function renderHeader() {
         onRefresh={async () => {}}
         terminalOpen={false}
         onToggleTerminal={() => {}}
+        onOpenCandidatePool={onOpenCandidatePool}
       />
     </I18nProvider>,
   );
@@ -110,5 +111,21 @@ describe('WorkbenchHeader 会话控制失败 header-error 提示生命周期（�
     // 到达自动关闭时限后消失，不再无限期挂起
     act(() => { vi.advanceTimersByTime(1); });
     expect(headerError()).toBeNull();
+  });
+});
+
+describe('WorkbenchHeader 候选角色池入口', () => {
+  it('点击候选角色池按钮触发回调，且按钮位于终端按钮之前', () => {
+    const onOpenCandidatePool = vi.fn();
+    renderHeader(onOpenCandidatePool);
+
+    const button = screen.getByTitle('Candidate role pool');
+    fireEvent.click(button);
+    expect(onOpenCandidatePool).toHaveBeenCalledTimes(1);
+
+    const terminal = screen.getByTitle('Open terminal');
+    expect(
+      button.compareDocumentPosition(terminal) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
   });
 });

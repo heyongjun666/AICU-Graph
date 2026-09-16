@@ -1,17 +1,21 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { ChevronDown, FolderTree, HelpCircle, Languages, Plus, Save, Server, Sparkles, Trash2, Upload, Users, X } from 'lucide-react';
 import { CliInfo, GlobalConfig, ProviderPreset, RoleField, RoleInfo, RoleSchema, SkillInfo } from '../types';
+import { CliInfo, EffectiveBaseUrlResponse, GlobalConfig, ProviderPreset, RoleField, RoleInfo, RolePool, RoleSchema, SkillInfo } from '../types';
 import { useI18n } from '../i18n';
 import { useUIStateStore } from '../stores/UIStateStore';
 import {
   createRole,
+  createRolePool,
   createSkill,
   deleteRole,
+  deleteRolePool,
   deleteSkill,
   getApiKey,
   getInternalUsername,
   getGlobalConfig,
   getRole,
+  getRolePools,
   getRoleSchema,
   getRoles,
   getSkill,
@@ -22,6 +26,7 @@ import {
   testConnection,
   updateGlobalConfig,
   updateRole,
+  updateRolePool,
   updateSkill,
 } from '../utils/api';
 

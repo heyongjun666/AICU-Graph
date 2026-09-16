@@ -6,7 +6,7 @@ import threading
 from pathlib import Path
 from typing import Callable, Optional, List
 
-from cli_adapters import detect_default, get_adapter
+from cli_adapters import detect_default, get_adapter, native_base_url, provider_slot_base_url
 from runtime.credentials import resolve_sk_for_model
 
 
@@ -91,8 +91,20 @@ class ClaudeCodeAgent:
             self.adapter = get_adapter(detect_cli())
         self.cli_name = self.adapter.id
 
-        # 第三方端点（api_base_url）需预写 CLI 的 provider 配置（codex/qwen），
-        # 使运行时 --model 能命中；部分 CLI 走环境变量，provision 为 no-op。
+        # 模型厂商与 CLI 原生协议不一致时（例如 claude CLI 选了 GLM），把 base_url
+        # 指向该厂商对应协议的原生端点。厂商自己就实现这套协议，不需要任何翻译。
+        # 放在 provision 之前是关键：provision 与 _build_process_env 都读
+        # self.api_base_url，改这一处即可同时覆盖两条下游路径。
+        configured_base_url = self.api_base_url
+        native_endpoint = native_base_url(self.cli_name, self.model, configured_base_url)
+        if native_endpoint:
+            self.api_base_url = native_endpoint
+
+        # 模型名交给 CLI 时的写法可能与 AICU 的模型名不同（opencode / pi 要求
+        # <provider>/<model>，前缀正是 AICU 注册第三方端点用的 provider id），
+        # 由 adapter 统一换算。必须在 native_base_url 之后算 —— 换不换算取决于
+        # 本次是否真的改道了。
+        self.cli_model_arg = self.adapter.model_arg(self.model, api_base_url=self.api_base_url)
         self.adapter.provision(
             api_base_url=self.api_base_url,
             api_key_env=self.api_key_env,
@@ -127,7 +139,7 @@ class ClaudeCodeAgent:
     def _build_base_command(self) -> List[str]:
         """构建基础的 CLI 命令参数（不包含 --cwd，工作目录由 subprocess.run(cwd=) 控制）"""
         return self.adapter.build_base_command(
-            model=self.model,
+            model=self.cli_model_arg,
             skip_permissions=self.skip_permissions,
             enable_project_skills=self.enable_project_skills,
         )
@@ -222,18 +234,24 @@ class ClaudeCodeAgent:
 
     def _build_process_env(self) -> dict[str, str]:
         """Build child-process configuration without exposing credential values."""
+        # 注入 sk 用的变量名按模型厂商解析（多厂商 CLI 一个模型一个变量名）。
+        # 这个名字同时交给 build_env：opencode 的 OPENCODE_CONFIG_CONTENT 与 pi 的
+        # models.json 都把它写进自己的 provider 配置作引用，两边必须逐字一致，
+        # 否则 CLI 拿不到 key（codex 的 env_key 踩过同一个坑）。
+        sk = None
+        key_env_name = None
+        if self.cli_name != "internal":  # Internal 使用 --username 认证
+            sk = resolve_sk_for_model(self.model)
+            key_env_name = self.adapter.api_key_env_for_model(self.model)
+
         env = self.adapter.build_env(
             os.environ.copy(),
             api_base_url=self.api_base_url,
-            api_key_env=self.api_key_env,
+            api_key_env=key_env_name or self.api_key_env,
+            model=self.model,
         )
-        # 非 Internal CLI 注入按模型厂商保存的 API Key；Internal 使用 --username 认证。
-        if self.cli_name != "internal":
-            sk = resolve_sk_for_model(self.model)
-            if sk:
-                env_name = self.adapter.api_key_env_for_model(self.model)
-                if env_name:
-                    env[env_name] = sk
+        if sk and key_env_name:
+            env[key_env_name] = sk
         return env
 
     def chat(self, prompt: str, max_turns: Optional[int] = None, timeout: int = 36000) -> str:

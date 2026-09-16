@@ -72,6 +72,158 @@ def list_provider_presets() -> list[dict]:
     return [item for item in presets if isinstance(item, dict) and item.get("id")]
 
 
+# ---- 跨厂商模型：直连厂商对应协议的原生端点 ------------------------------------
+#
+# 背景：每个 CLI 只认自己那一种协议（claude 只会说 Anthropic Messages，
+# codex 只会说 OpenAI Responses，kimi 只会说 OpenAI Chat），而多数厂商同时提供
+# 这三种协议的原生端点。于是「claude 用上 GLM」不需要任何协议翻译，
+# 只要把 base_url 指向该厂商的 Anthropic 端点即可。
+# 协议对应关系表本身是纯数据，维护在 cli_models.json 的 protocol_endpoints 里。
+
+# 键是 CLI id，值是 (原生厂商, 该 CLI 说的协议)。这是 CLI 的硬事实而非配置项 ——
+# CodexAdapter 里硬编码的 wire_api = "responses"（见 _provision_codex_config）即是佐证。
+#
+# 多厂商网关型 CLI（codebuddy / opencode / pi）自身是网关，没有「原生厂商」——
+# 任何厂商的模型都该按本 CLI 的协议改道。用 _MULTI_VENDOR 占位：vendor_of_model
+# 只会返回 None 或真实厂商名，所以这个值永远匹配不上，同族短路逻辑自然不生效。
+_MULTI_VENDOR = "__multi_vendor__"
+
+# AICU 在各 CLI 配置里注册第三方端点用的 provider id（codex 的 model_providers、
+# qwen 的 modelProviders、opencode / pi 的自定义 provider 都用它）。opencode 与 pi
+# 要求 --model 写成 ``<provider>/<model>``，这个 id 就是那个前缀。
+_CUSTOM_PROVIDER_ID = "aicu"
+
+# claude CLI 走第三方 Anthropic 兼容端点时用的认证变量名（Bearer 头）。
+# 只给 ANTHROPIC_API_KEY 会被 CLI 判成「未登录」，见 ClaudeCodeAdapter.api_key_env_for_model。
+_ANTHROPIC_AUTH_TOKEN_ENV = "ANTHROPIC_AUTH_TOKEN"
+
+_CLI_NATIVE: dict[str, tuple] = {
+    "claude": ("anthropic", "messages"),
+    "codex": ("openai", "responses"),
+    "kimi": ("moonshot", "chat"),
+    "qwen": ("aliyun", "chat"),
+    "codebuddy": (_MULTI_VENDOR, "chat"),
+    "opencode": (_MULTI_VENDOR, "chat"),
+    "pi": (_MULTI_VENDOR, "chat"),
+    # 下面三个统统领的是自家协议，跨厂商改道对它们没有意义，所以协议名取 "native"：
+    # 数据表里不存在这个协议键，于是既不会改道（protocol_endpoint 恒为 None），
+    # 又能在 known_models 里把异族模型滤掉（下拉不再列连不上的模型）。
+    #   gemini / antigravity：只说 Gemini 原生 generateContent，不是 OpenAI Chat，
+    #     指向别家端点没有任何意义；
+    #   grok：二进制在本机缺失、无头 flags 与认证方式均未实测，adapter 未接线。
+    "gemini": ("google", "native"),
+    "antigravity": ("google", "native"),
+    "grok": ("xai", "native"),
+}
+
+# 同族（模型厂商就是该 CLI 自己的原生厂商）、且用户没指定端点时，**撤掉 AICU 写过的槽**
+# 而不是照写自家端点的 CLI。没列在这里的托管槽 CLI（qwen）同族照样接管。
+#
+#   codex 在此列，依据是它自己的登录态：``codex login`` 拿到的 ChatGPT 订阅写在
+#   ~/.codex/auth.json（本机就是这种状态，tokens 非空），是 codex 的主用法。AICU 若照写
+#   ``requires_openai_auth = false`` + ``env_key = OPENAI_API_KEY``，订阅用户会被踢到
+#   API-key 路径上，报「Missing environment variable: OPENAI_API_KEY」。
+#   撤槽则让 codex 回到它自己的 provider 与认证，与「AICU 没插手」逐字节一致。
+#
+#   qwen 故意不在列：它没有可撤的退路。非交互模式强制要求显式 auth type，撤槽后
+#   ``--auth-type openai`` 会去要 OPENAI_API_KEY，不带该参数则直接报
+#   「No auth type is selected」—— 两条路都走不通（2026-09-16 本机实测，见
+#   /tmp/aicu_smoke/exp_qwen_samevendor.py 的 A/B 失败、C 通过）。所以同族也只能由
+#   AICU 供端点。
+_SAME_VENDOR_RELEASE_CLIS = ("codex",)
+
+
+def _load_protocol_endpoints() -> dict:
+    """从 cli_models.json 读取「厂商 → 协议 → base_url」；缺失/损坏时回退空 dict。
+
+    厂商键与 runtime.credentials.vendor_of_model 的返回值一致，所以拿到模型判出
+    厂商后可以直接查表。某个协议没有条目就是「该厂商不支持该协议」——
+    不写空串占位，查不到即不可用。
+
+    表格取值来自本机 curl 实测（每条都带伪造路径对照组，伪造 404 / 真实 401
+    才算「端点存在」）。两处例外，因为探测不可判（厂商鉴权先于路由，伪造路径
+    也返回 401），采信其官方文档 / 官方 helper 包：deepseek 的 messages 与
+    responses。
+
+    zhipu.responses 曾按官方 helper 包填了 https://open.bigmodel.cn/api/coding/paas/v4，
+    2026-09-16 用真实调用证伪：codex + glm-5.2 稳定 404，报
+    `.../api/coding/paas/v4/responses`；换成非 coding 基址 /api/paas/v4 同样 404。
+    即智谱没有实现 OpenAI Responses API，故删掉该键 —— 删键即「该组合不可用」，
+    codex 的模型下拉于是不再列出 glm。同批验过的 deepseek / moonshot / aliyun
+    三个 responses 端点都是真实可用的（各跑通一次 codex 调用）。
+
+    anthropic.chat 是个兼容垫片而非原生实现：Anthropic 官方说明它「primarily
+    intended to test and compare model capabilities, and is not considered a
+    long-term or production-ready solution」，工具调用可用但 `strict` 被忽略、
+    prompt caching 不支持。留着它是为了让 kimi CLI 也能选 Claude——
+    要撤掉只需删掉 cli_models.json 里这一个键。
+    """
+    try:
+        data = json.loads(_MODELS_FILE.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    endpoints = data.get("protocol_endpoints", {})
+    if not isinstance(endpoints, dict):
+        return {}
+    return {
+        str(vendor): {
+            str(protocol): str(url)
+            for protocol, url in protocols.items()
+            if isinstance(url, str) and url
+        }
+        for vendor, protocols in endpoints.items()
+        if isinstance(protocols, dict)
+    }
+
+
+PROTOCOL_ENDPOINTS = _load_protocol_endpoints()
+
+
+def protocol_endpoint(vendor: Optional[str], protocol: str) -> Optional[str]:
+    """厂商在某协议下的原生端点；该厂商不支持该协议时返回 None。"""
+    if not vendor:
+        return None
+    return PROTOCOL_ENDPOINTS.get(vendor, {}).get(protocol)
+
+
+def _preset_base_urls() -> set:
+    """provider preset 声明用过的 api_base_url —— 用来分辨「预设值」与「用户自定义端点」。"""
+    return {
+        str(preset["api_base_url"])
+        for preset in list_provider_presets()
+        if preset.get("api_base_url")
+    }
+
+
+def native_base_url(
+    cli_name: Optional[str], model: Optional[str], configured_base_url: Optional[str]
+) -> Optional[str]:
+    """该 (CLI, 模型) 组合应当直连的厂商原生端点；不需要改写时返回 None。
+
+    claude_code_agent 在构造 CLI 子进程前调用它，把返回值写回 api_base_url。
+
+    返回 None 的四种情形，都表示「保持现状、什么都不动」：
+      - CLI 不在 _CLI_NATIVE 里（opencode / pi / qwen / gemini / grok …）
+      - 模型判不出厂商（auto 等内部模型）
+      - 模型厂商就是该 CLI 的原生厂商 —— 同族直连，行为与改动前逐字节一致
+      - 该厂商没有本 CLI 所需协议的原生端点（如 Anthropic 没有 /responses）
+    另外，用户手填的非预设 api_base_url 一律尊重 —— 那种用户可能自己架了中转。
+    """
+    native = _CLI_NATIVE.get(cli_name or "")
+    if not native:
+        return None
+
+    if configured_base_url and str(configured_base_url) not in _preset_base_urls():
+        return None
+
+    native_vendor, protocol = native
+    vendor = vendor_of_model(model or "")
+    if not vendor or vendor == native_vendor:
+        return None
+
+    return protocol_endpoint(vendor, protocol)
+
+
 def _provision_codex_config(api_base_url: str, api_key_env: Optional[str], model: Optional[str]) -> None:
     """把第三方端点注册进 ``~/.codex/config.toml`` 的 ``model_providers``（幂等）。
 
@@ -167,6 +319,41 @@ def _provision_qwen_config(api_base_url: str, api_key_env: Optional[str], model:
     data["providerProtocol"] = protocols
     config_path.parent.mkdir(parents=True, exist_ok=True)
     config_path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+
+def _opencode_config_content(
+    api_base_url: str, models: list, api_key_env: Optional[str]
+) -> str:
+    """opencode 的 ``OPENCODE_CONFIG_CONTENT`` 取值 —— 内联配置，不落任何文件。
+
+    opencode 支持用该环境变量直接传配置 JSON（二进制里的 OPENCODE_CONFIG_CONTENT），
+    于是不需要像 codex / qwen 那样改写用户的 ``~/.config/opencode/opencode.json``，
+    也不会往 agent 的工作目录里塞文件。本机实测通过。
+
+    结构依据 opencode 官方配置格式：``provider.<id>`` 含 npm/name/options/models；
+    ``options.baseURL`` 已含 /v1，走 OpenAI Chat 协议；``{env:VAR}`` 是 opencode 自己的
+    环境变量插值语法（与 pi 的 ``$VAR`` 不同）。
+
+    ``models`` 必须把选择器里可能出现的模型都列上，否则 opencode 找不到该 id。
+    这里直接取 ``KNOWN_MODELS["all"]`` —— 与下拉候选同源，改一处两边同步。
+    """
+    options: dict = {"baseURL": api_base_url}
+    if api_key_env:
+        options["apiKey"] = "{env:" + api_key_env + "}"
+    return json.dumps(
+        {
+            "$schema": "https://opencode.ai/config.json",
+            "provider": {
+                _CUSTOM_PROVIDER_ID: {
+                    "npm": "@ai-sdk/openai-compatible",
+                    "name": "AICU",
+                    "options": options,
+                    "models": {model: {"name": model} for model in models},
+                }
+            },
+        },
+        ensure_ascii=False,
+    )
 
 
 def _coerce_errors(errors_value) -> list:
@@ -273,6 +460,18 @@ class CliAdapter:
 
     # ---- 命令构建 ----
 
+    def model_arg(self, model: Optional[str], *, api_base_url: Optional[str]) -> Optional[str]:
+        """交给 CLI 的 ``--model`` 取值（默认即 AICU 的模型名）。
+
+        有的 CLI 对模型名有自己的一套写法：opencode 与 pi 要求 ``<provider>/<model>``，
+        而第三方端点是由 AICU 以 ``aicu`` 这个 provider id 注册进去的，所以走改道时
+        必须补上前缀。取值为 None 表示不加 ``--model``。
+
+        ``api_base_url`` 非空 = 本次确实指向了第三方原生端点（见 native_base_url），
+        只有这时前缀才成立 —— 没改道时 ``aicu`` 这个 provider 根本不存在。
+        """
+        return model
+
     def build_base_command(
         self, *, model: Optional[str], skip_permissions: bool, enable_project_skills: bool
     ) -> list:
@@ -294,8 +493,19 @@ class CliAdapter:
     # ---- 环境变量 ----
 
     def build_env(
-        self, base_env: dict, *, api_base_url: Optional[str], api_key_env: Optional[str]
+        self,
+        base_env: dict,
+        *,
+        api_base_url: Optional[str],
+        api_key_env: Optional[str],
+        model: Optional[str] = None,
     ) -> dict:
+        """给子进程的环境变量（默认原样传下去）。
+
+        ``model`` 是本次运行的模型名：绝大多数 CLI 用命令行参数拿模型，不需要它；
+        但 kimi 只有一个环境变量通道（``KIMI_MODEL_NAME``），模型名必须和环境一起给
+        （见 KimiAdapter.build_env）。
+        """
         return base_env
 
     def api_key_env_for_model(self, model: Optional[str]) -> Optional[str]:
@@ -394,16 +604,44 @@ class ClaudeCodeAdapter(CliAdapter):
         return ([], True)
 
     def build_env(
-        self, base_env: dict, *, api_base_url: Optional[str], api_key_env: Optional[str]
+        self,
+        base_env: dict,
+        *,
+        api_base_url: Optional[str],
+        api_key_env: Optional[str],
+        model: Optional[str] = None,
     ) -> dict:
         env = dict(base_env)
         if api_base_url:
             env["ANTHROPIC_BASE_URL"] = api_base_url
-        if api_key_env:
-            api_key = os.environ.get(api_key_env)
-            if api_key:
-                env["ANTHROPIC_API_KEY"] = api_key
+        # 认证值由 _build_process_env 按 api_key_env 注入（sk 不在这一层）。
+        # 这里只负责一件事：改道到第三方端点时清掉父环境里可能残留的 Anthropic key ——
+        # 留着它会被 CLI 一起读走，等于把一个 Anthropic 的 key 发到别家端点。
+        if api_base_url and api_key_env == _ANTHROPIC_AUTH_TOKEN_ENV:
+            env.pop("ANTHROPIC_API_KEY", None)
         return env
+
+    def api_key_env_for_model(self, model: Optional[str]) -> Optional[str]:
+        """claude CLI 的认证变量名：同族用 ``ANTHROPIC_API_KEY``，跨厂商改道改用
+        ``ANTHROPIC_AUTH_TOKEN``。
+
+        实测（deepseek 的 /anthropic 端点）：只给 ``ANTHROPIC_API_KEY`` 时 claude CLI
+        直接判成「Not logged in · Please run /login」并以 rc=1 退出，连请求都没发；
+        换成 ``ANTHROPIC_AUTH_TOKEN`` 即通。这与 deepseek / 智谱 / 阿里云文档里一律
+        配 ``ANTHROPIC_AUTH_TOKEN`` 一致 —— 第三方端点认的是 Authorization: Bearer。
+
+        同族（Anthropic 自己的模型）保持原变量名，本机既有登录态行为不变。
+
+        只对 claude 本身生效：CodeBuddyAdapter 继承了本类，但它有自己的认证体系
+        （CODEBUDDY_API_KEY，实测可直连第三方端点），internal 走 --username，
+        两者都不做这个 Bearer 替换。
+        """
+        if self.id != "claude":
+            return self.api_key_env
+        vendor = vendor_of_model(model or "")
+        if not vendor or vendor == _CLI_NATIVE["claude"][0]:
+            return self.api_key_env
+        return _ANTHROPIC_AUTH_TOKEN_ENV
 
     def format_stream_event(self, line: str) -> str:
         try:
@@ -476,10 +714,19 @@ class CodeBuddyAdapter(ClaudeCodeAdapter):
         super().__init__("codebuddy", "CodeBuddy Code", "codebuddy")
 
     def build_env(
-        self, base_env: dict, *, api_base_url: Optional[str], api_key_env: Optional[str]
+        self,
+        base_env: dict,
+        *,
+        api_base_url: Optional[str],
+        api_key_env: Optional[str],
+        model: Optional[str] = None,
     ) -> dict:
         env = dict(base_env)
-        # CodeBuddy 的 base URL env 官方文档未列出，暂不覆盖（默认直连官方）
+        # 官方文档未列出 base URL env，但二进制里读 CODEBUDDY_BASE_URL 且原样使用
+        # （不额外拼 /v2）；本机实测：指向 https://api.deepseek.com/v1 并配
+        # CODEBUDDY_API_KEY 可正常出结果。
+        if api_base_url:
+            env["CODEBUDDY_BASE_URL"] = api_base_url
         key_env = api_key_env or self.api_key_env
         if key_env:
             api_key = os.environ.get(key_env)
@@ -548,7 +795,12 @@ class CodexAdapter(CliAdapter):
         return ([], True)
 
     def build_env(
-        self, base_env: dict, *, api_base_url: Optional[str], api_key_env: Optional[str]
+        self,
+        base_env: dict,
+        *,
+        api_base_url: Optional[str],
+        api_key_env: Optional[str],
+        model: Optional[str] = None,
     ) -> dict:
         env = dict(base_env)
         if api_base_url:
@@ -636,17 +888,65 @@ class KimiAdapter(CliAdapter):
 
     依据当前 Kimi Code CLI 帮助：
       - 无头模式：--prompt/-p <prompt>
-      - 模型：--model/-m
       - 输出：--output-format text|stream-json（prompt 模式）
-      - 续接：--session/-S <session_id>
-      - 环境变量：KIMI_API_KEY / KIMI_BASE_URL / KIMI_MODEL_NAME
+      - 续接：--session/-S <session_id>；无 --max-turns
     stream-json 为 OpenAI 风格 JSONL（{"role":"assistant","content":...}）。
+
+    **模型与凭据走 ``KIMI_MODEL_*`` 这一族环境变量**（0.43.1 实测）：
+
+      - 老文档里的 ``KIMI_BASE_URL`` / ``KIMI_API_KEY`` 作为 shell 变量**是死的** ——
+        凭据只从 config.toml 的 ``[providers.*]`` 读（官方 docs/en/configuration/
+        env-vars.md）。只给这两个变量的实测结果是「Model "X" is not configured in
+        config.toml」，所以本 adapter 不再写它们。
+      - ``KIMI_MODEL_NAME`` 是这一族的开关：连同 ``KIMI_MODEL_API_KEY`` /
+        ``KIMI_MODEL_BASE_URL`` / ``KIMI_MODEL_PROVIDER_TYPE``，kimi 在**内存里**合成一个
+        临时 provider，不写回配置文件 —— 因此 kimi 属于「没有托管槽」的一类
+        （managed_slot = False），盘上不留痕迹，也就没有「上次运行留下的旧值」。
+      - 代价是 ``-m <alias>`` 的优先级高于这一族：它只认 config.toml 里的别名，
+        所以走环境通道时绝不能传 ``--model``（见 model_arg）。
+      - 这一族两版都吃：本机 PATH 上的 0.38.0 与 ``~/.kimi-code/bin/kimi`` 的 0.43.1
+        都能被它驱动。差别只在 ``--model`` —— 0.38.0 在 prompt 模式下带 ``--model``
+        会直接 Node 崩溃（栈底是 AgentActivityView.dispose），0.43.1 只是干净地报
+        「Model "X" is not configured in config.toml」。改道时不传 ``--model``
+        正好绕开 0.38.0 那个崩溃（2026-09-16 两份二进制各跑一次实测）。
     """
 
     id = "kimi"
     display_name = "Kimi Code"
     command = "kimi"
+    # 用户在设置页给 kimi 填的 key 对应的变量名（对外展示用）；真正注入子进程的那个
+    # 名字由 api_key_env_for_model 决定 —— kimi 读的是 KIMI_MODEL_API_KEY。
     api_key_env = "KIMI_API_KEY"
+
+    # kimi 把「上下文窗口」当 max_tokens 发给厂商：拦包实测
+    # ``max_tokens = min(KIMI_MODEL_MAX_CONTEXT_SIZE, 131072)``（默认 262144 → 发 131072）。
+    # 厂商对输出 token 有硬上限，超了直接 400，所以这里记实测撞过的天花板；没记的厂商
+    # 用 kimi 自己的 131072。键名与 runtime.credentials.vendor_of_model 的返回值逐字一致。
+    #
+    # 上限是**按模型**的（阿里云实测：qwen3.8-max 收 131072，qwen3-coder-plus 卡 65536），
+    # 而 AICU 的模型清单只有名字、没有 token 元数据，所以这里只能取「该厂商各模型都收得下
+    # 的下限」—— 保守但不报错，代价是大窗口模型在 kimi 眼里只剩这么多上下文。
+    #   2026-09-16 实测：aliyun 65536 是实测到的下限（qwen3-coder-plus 报
+    #   「Range of max_tokens should be [1, 65536]」）；deepseek / zhipu / moonshot
+    #   收 131072 都是 200，故没有它们的行。
+    _CONTEXT_LIMIT_BY_VENDOR = {"aliyun": 65536}
+
+    def model_arg(self, model: Optional[str], *, api_base_url: Optional[str]) -> Optional[str]:
+        """改道时恒为 None —— 模型由 ``KIMI_MODEL_NAME`` 承担，命令行上不能出现 ``--model``。
+
+        没改道（同族模型、用户自己配过 config.toml）则照旧传 ``--model``，与改动前一致。
+        这个条件必须与 build_env 里「开不开 KIMI_MODEL_*」的条件严格一致，否则会出现
+        「模型名两边都没给」或「--model 盖掉 KIMI_MODEL_NAME」（有测试守着这条不变式）。
+        """
+        return None if api_base_url else model
+
+    def api_key_env_for_model(self, model: Optional[str]) -> Optional[str]:
+        """kimi 读 key 的变量名是 ``KIMI_MODEL_API_KEY``（同族、异族都一样）。
+
+        ``_build_process_env`` 会把 sk 写进这个名字，名字必须与 kimi 期望的逐字一致，
+        写错等于没给 —— 与 codex 的 ``env_key`` 是同一个坑。
+        """
+        return "KIMI_MODEL_API_KEY"
 
     def build_base_command(
         self, *, model: Optional[str], skip_permissions: bool, enable_project_skills: bool
@@ -674,15 +974,37 @@ class KimiAdapter(CliAdapter):
         return (["--prompt", prompt], False)
 
     def build_env(
-        self, base_env: dict, *, api_base_url: Optional[str], api_key_env: Optional[str]
+        self,
+        base_env: dict,
+        *,
+        api_base_url: Optional[str],
+        api_key_env: Optional[str],
+        model: Optional[str] = None,
     ) -> dict:
+        """开 ``KIMI_MODEL_*`` 环境通道；没有确切端点时什么都不做。
+
+        开了这族变量就等于把「用哪个模型、去哪、怎么认证」整个交给它（因为 model_arg
+        同时不传 ``--model`` 了）。所以只在 AICU 拿得出端点（``api_base_url`` 非空）时开：
+        同族模型、或判不出厂商的自定义模型名都不开，让 kimi 走它自己的 config.toml 与
+        登录态 —— 别把用户自己配好的 kimi 顶掉（与 codex 的同族撤槽同源）。
+
+        这里不写 key：``_build_process_env`` 会在本方法返回后把 sk 写进
+        ``api_key_env_for_model`` 指定的 ``KIMI_MODEL_API_KEY``。那条注入只看模型
+        厂商、不看有没有端点，所以通道没开时也会带上一个光秃秃的 ``KIMI_MODEL_API_KEY``
+        —— 实测无害（开关是 ``KIMI_MODEL_NAME``，没有它这族变量一律不看：0.43.1 在这种
+        环境下照样报「Model "X" is not configured in config.toml」）。
+        """
         env = dict(base_env)
-        if api_base_url:
-            env["KIMI_BASE_URL"] = api_base_url
-        if api_key_env:
-            api_key = os.environ.get(api_key_env)
-            if api_key:
-                env["KIMI_API_KEY"] = api_key
+        if not model or not api_base_url:
+            return env
+        env["KIMI_MODEL_NAME"] = model
+        env["KIMI_MODEL_BASE_URL"] = api_base_url
+        # provider type 只有 kimi / anthropic / openai 三种，而 _CLI_NATIVE 里 kimi
+        # 的协议是 chat —— AICU 给的端点一律是 OpenAI Chat 形状的。
+        env["KIMI_MODEL_PROVIDER_TYPE"] = "openai"
+        limit = self._CONTEXT_LIMIT_BY_VENDOR.get(vendor_of_model(model) or "")
+        if limit:
+            env["KIMI_MODEL_MAX_CONTEXT_SIZE"] = str(limit)
         return env
 
     def format_stream_event(self, line: str) -> str:
@@ -743,7 +1065,8 @@ class QwenAdapter(CliAdapter):
       - 认证 env：BAILIAN_API_KEY（按量付费）/ BAILIAN_TOKEN_PLAN_API_KEY /
         BAILIAN_CODING_PLAN_API_KEY（默认按量付费 BAILIAN_API_KEY）
       - base URL 由 settings.json 的 modelProviders 决定，CLI 不通过 env 覆盖
-    未在本环境实测。
+    本机实测：settings.json 里注册 aicu provider（baseUrl 指 deepseek + envKey）后，
+    --model <id> 可正常出结果。
     """
 
     id = "qwen"
@@ -779,8 +1102,25 @@ class QwenAdapter(CliAdapter):
         # headless：-p/--prompt 或 stdin；用 -p 明确语义
         return (["-p", prompt], False)
 
+    def api_key_env_for_model(self, model: Optional[str]) -> Optional[str]:
+        """注入 sk 用的变量名 —— 必须与 provision 写进 settings.json 的 envKey 逐字一致。
+
+        Qwen Code 从 ``envKey`` 指定的环境变量读 key，而 sk 是 _build_process_env
+        按本函数的返回值注入的，两边一旦不一致，CLI 就取不到 key。同族（阿里云）
+        沿用 Qwen Code 原生的 BAILIAN_API_KEY，异族用该厂商的标准名。
+        """
+        vendor = vendor_of_model(model or "")
+        if not vendor or vendor == _CLI_NATIVE["qwen"][0]:
+            return self.api_key_env
+        return api_key_env_for_vendor(vendor) or self.api_key_env
+
     def build_env(
-        self, base_env: dict, *, api_base_url: Optional[str], api_key_env: Optional[str]
+        self,
+        base_env: dict,
+        *,
+        api_base_url: Optional[str],
+        api_key_env: Optional[str],
+        model: Optional[str] = None,
     ) -> dict:
         env = dict(base_env)
         # qwen 的 base URL 由 settings.json 的 modelProviders 决定，CLI 不通过 env 覆盖
@@ -925,7 +1265,12 @@ class GenericExecAdapter(CliAdapter):
         return ([prompt], False)
 
     def build_env(
-        self, base_env: dict, *, api_base_url: Optional[str], api_key_env: Optional[str]
+        self,
+        base_env: dict,
+        *,
+        api_base_url: Optional[str],
+        api_key_env: Optional[str],
+        model: Optional[str] = None,
     ) -> dict:
         env = dict(base_env)
         if api_base_url and self.base_url_env:
@@ -993,6 +1338,26 @@ class OpenCodeAdapter(CliAdapter):
 
     def api_key_env_for_model(self, model: Optional[str]) -> Optional[str]:
         return api_key_env_for_vendor(vendor_of_model(model))
+
+    def model_arg(self, model: Optional[str], *, api_base_url: Optional[str]) -> Optional[str]:
+        # opencode 的 -m 要求 provider/model；第三方端点是以 aicu 这个 provider id
+        # 通过 OPENCODE_CONFIG_CONTENT 注册的，所以改道时必须补前缀。
+        return f"{_CUSTOM_PROVIDER_ID}/{model}" if api_base_url and model else model
+
+    def build_env(
+        self,
+        base_env: dict,
+        *,
+        api_base_url: Optional[str],
+        api_key_env: Optional[str],
+        model: Optional[str] = None,
+    ) -> dict:
+        env = dict(base_env)
+        if api_base_url:
+            env["OPENCODE_CONFIG_CONTENT"] = _opencode_config_content(
+                api_base_url, KNOWN_MODELS.get("all", []), api_key_env
+            )
+        return env
 
     def build_base_command(
         self, *, model: Optional[str], skip_permissions: bool, enable_project_skills: bool
@@ -1097,6 +1462,11 @@ class PiAdapter(CliAdapter):
 
     def api_key_env_for_model(self, model: Optional[str]) -> Optional[str]:
         return api_key_env_for_vendor(vendor_of_model(model))
+
+    def model_arg(self, model: Optional[str], *, api_base_url: Optional[str]) -> Optional[str]:
+        # pi 的 --model 支持 provider/id；（--provider 是等价的另一种写法，
+        # 用 id 前缀可以让模型名自解释，也少一个 flag）
+        return f"{_CUSTOM_PROVIDER_ID}/{model}" if api_base_url and model else model
 
     def build_base_command(
         self, *, model: Optional[str], skip_permissions: bool, enable_project_skills: bool
@@ -1231,7 +1601,12 @@ class GeminiAdapter(CliAdapter):
         return (["--prompt", prompt], False)
 
     def build_env(
-        self, base_env: dict, *, api_base_url: Optional[str], api_key_env: Optional[str]
+        self,
+        base_env: dict,
+        *,
+        api_base_url: Optional[str],
+        api_key_env: Optional[str],
+        model: Optional[str] = None,
     ) -> dict:
         env = dict(base_env)
         # Gemini API / Vertex 各有独立 endpoint，无统一 base URL env；api_base_url 未接线（直连官方）

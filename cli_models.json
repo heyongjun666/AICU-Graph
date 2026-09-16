@@ -21,6 +21,48 @@
     "MiniMax-M3",
     "qwen3.8-max", "qwen3-coder-plus", "qwen3.7-plus"
   ],
+  "protocol_endpoints": {
+    "anthropic": {
+      "messages": "https://api.anthropic.com",
+      "chat": "https://api.anthropic.com/v1"
+    },
+    "openai": {
+      "responses": "https://api.openai.com/v1",
+      "chat": "https://api.openai.com/v1"
+    },
+    "deepseek": {
+      "messages": "https://api.deepseek.com/anthropic",
+      "responses": "https://api.deepseek.com/v1",
+      "chat": "https://api.deepseek.com/v1"
+    },
+    "moonshot": {
+      "messages": "https://api.moonshot.cn/anthropic",
+      "responses": "https://api.moonshot.cn/v1",
+      "chat": "https://api.moonshot.cn/v1"
+    },
+    "zhipu": {
+      "messages": "https://open.bigmodel.cn/api/anthropic",
+      "chat": "https://open.bigmodel.cn/api/paas/v4"
+    },
+    "aliyun": {
+      "messages": "https://dashscope.aliyuncs.com/apps/anthropic",
+      "responses": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+      "chat": "https://dashscope.aliyuncs.com/compatible-mode/v1"
+    },
+    "minimax": {
+      "messages": "https://api.minimaxi.com/anthropic",
+      "responses": "https://api.minimaxi.com/v1",
+      "chat": "https://api.minimaxi.com/v1"
+    },
+    "xai": {
+      "messages": "https://api.x.ai",
+      "responses": "https://api.x.ai/v1",
+      "chat": "https://api.x.ai/v1"
+    },
+    "google": {
+      "chat": "https://generativelanguage.googleapis.com/v1beta/openai"
+    }
+  },
   "provider_presets": [
     {
       "id": "openai",
@@ -63,11 +105,11 @@
       "cli_name": "kimi",
       "model": "kimi-k2.6",
       "models": ["kimi-k2.6", "kimi-k2.5", "kimi-k3"],
-      "api_base_url": "https://api.moonshot.cn",
+      "api_base_url": "https://api.moonshot.cn/v1",
       "api_key_env": "KIMI_API_KEY",
       "wire_api": "chat",
       "available": true,
-      "note": "使用 Kimi 原生 CLI"
+      "note": "使用 Kimi 原生 CLI；端点经 KIMI_MODEL_BASE_URL 下发（需含 /v1，CLI 只会再拼 /chat/completions）"
     },
     {
       "id": "aliyun",
@@ -103,7 +145,31 @@
       "api_key_env": "XAI_API_KEY",
       "wire_api": "chat",
       "available": false,
-      "note": "当前 grok adapter 的无头参数和认证方式未经实测，暂不启用"
+      "note": "当前 grok adapter 的无头参数和认证方式未经实测，暂不启用；注意这只挡 grok CLI 本身，grok-* 模型仍可被 claude / codex 选用"
+    },
+    {
+      "id": "zhipu",
+      "display_name": "智谱 GLM · 走 Claude Code",
+      "cli_name": "claude",
+      "model": "glm-5.2",
+      "models": ["glm-5.2", "glm-5-turbo"],
+      "api_base_url": "https://open.bigmodel.cn/api/anthropic",
+      "api_key_env": "ANTHROPIC_API_KEY",
+      "wire_api": "messages",
+      "available": true,
+      "note": "智谱官方提供 Anthropic 兼容端点，用 Claude Code 接入"
+    },
+    {
+      "id": "minimax",
+      "display_name": "MiniMax · 走 Claude Code",
+      "cli_name": "claude",
+      "model": "MiniMax-M3",
+      "models": ["MiniMax-M3"],
+      "api_base_url": "https://api.minimaxi.com/anthropic",
+      "api_key_env": "ANTHROPIC_API_KEY",
+      "wire_api": "messages",
+      "available": true,
+      "note": "MiniMax 提供 Anthropic 兼容端点，用 Claude Code 接入"
     }
   ]
 }

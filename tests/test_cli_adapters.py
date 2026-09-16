@@ -22,7 +22,7 @@ from cli_adapters import (
     get_adapter,
 )
 from claude_code_agent import ClaudeCodeAgent
-from runtime.credentials import CredentialStore, set_credential_store
+from runtime.credentials import CredentialStore, set_credential_store, vendor_of_model
 
 
 class TestRegistry:
@@ -178,6 +178,38 @@ class TestClaudeAdapter:
         out = adapter.parse_result(raw)
         assert out["subtype"] == "error_during_execution"
         assert out["errors"] == ["boom"]
+
+    def test_cross_vendor_model_authenticates_with_auth_token(self):
+        """claude CLI 走第三方 Anthropic 端点时只认 ANTHROPIC_AUTH_TOKEN。
+
+        实测：改道到 deepseek 的 /anthropic 端点后，只注入 ANTHROPIC_API_KEY 时
+        CLI 直接判成「Not logged in · Please run /login」并 rc=1（连请求都没发）；
+        换成 ANTHROPIC_AUTH_TOKEN 才通。get_adapter("claude") 是 internal 之外的实例，
+        这里断言同族/跨族两条路径。
+        """
+        adapter = get_adapter("claude")
+        # 同族：Anthropic 自己的模型，认证方式不变
+        assert adapter.api_key_env_for_model("claude-sonnet-4-6") == "ANTHROPIC_API_KEY"
+        assert adapter.api_key_env_for_model("auto") == "ANTHROPIC_API_KEY"
+        # 跨厂商：改用 Bearer 令牌变量
+        assert adapter.api_key_env_for_model("deepseek-v4-pro") == "ANTHROPIC_AUTH_TOKEN"
+        assert adapter.api_key_env_for_model("glm-5.2") == "ANTHROPIC_AUTH_TOKEN"
+
+    def test_build_env_drops_stale_anthropic_key_when_rerouted(self):
+        """改道时清掉父环境残留的 ANTHROPIC_API_KEY，免得把 Anthropic 的 key 发到别家。"""
+        adapter = get_adapter("claude")
+        base_env = {"ANTHROPIC_API_KEY": "sk-ant-parent", "PATH": "/usr/bin"}
+        rerouted = adapter.build_env(
+            base_env, api_base_url="https://api.deepseek.com/anthropic",
+            api_key_env="ANTHROPIC_AUTH_TOKEN",
+        )
+        assert rerouted["ANTHROPIC_BASE_URL"] == "https://api.deepseek.com/anthropic"
+        assert "ANTHROPIC_API_KEY" not in rerouted
+        # 同族（未改道）不动既有认证变量
+        native = adapter.build_env(
+            base_env, api_base_url=None, api_key_env="ANTHROPIC_API_KEY"
+        )
+        assert native["ANTHROPIC_API_KEY"] == "sk-ant-parent"
 
     def test_format_stream_event_still_passes_existing_assertion(self):
         event = json.dumps({
@@ -436,6 +468,18 @@ class TestCodeBuddyAdapter:
         env = adapter.build_env({}, api_base_url=None, api_key_env="CODEBUDDY_API_KEY")
         assert env["CODEBUDDY_API_KEY"] == "secret"
         assert "ANTHROPIC_API_KEY" not in env
+
+    def test_cross_vendor_keeps_codebuddy_api_key(self):
+        """codebuddy 继承 ClaudeCodeAdapter，但认证变量是自己的，不做 Bearer 替换。
+
+        踩过的坑：给 claude 加「跨厂商改用 ANTHROPIC_AUTH_TOKEN」时没限 id，
+        codebuddy 被一并改掉 —— sk 注进了 ANTHROPIC_AUTH_TOKEN，而 CLI 读的是
+        CODEBUDDY_API_KEY，于是不报错、直接返回空回复。
+        """
+        adapter = get_adapter("codebuddy")
+        assert adapter.api_key_env_for_model("deepseek-v4-pro") == "CODEBUDDY_API_KEY"
+        assert adapter.api_key_env_for_model("claude-sonnet-4-6") == "CODEBUDDY_API_KEY"
+        assert adapter.api_key_env_for_model("gpt-5.6") == "CODEBUDDY_API_KEY"
 
     def test_base_command_uses_codebuddy_protocol(self):
         adapter = get_adapter("codebuddy")
@@ -722,3 +766,417 @@ class TestProvision:
         get_adapter("kimi").provision(api_base_url="https://x/v1", api_key_env="K", model="m")
         assert not (tmp_path / ".codex" / "config.toml").exists()
         assert not (tmp_path / ".qwen" / "settings.json").exists()
+class TestMultiVendorCliWiring:
+    """qwen / codebuddy / opencode / pi 各自接管第三方端点的方式。
+
+    四者机制都经本机真实调用核实（deepseek-v4-pro，rc=0 且拿到模型回复）：
+      - qwen：~/.qwen/settings.json 的 modelProviders.aicu（provision 写文件）
+      - codebuddy：CODEBUDDY_BASE_URL 环境变量
+      - opencode：OPENCODE_CONFIG_CONTENT 内联配置（不落盘），--model 要带 provider 前缀
+      - pi：~/.pi/agent/models.json 的 providers.aicu，--model 要带 provider 前缀
+    """
+
+    def test_codebuddy_injects_base_url(self):
+        env = get_adapter("codebuddy").build_env(
+            {}, api_base_url="https://api.deepseek.com/v1", api_key_env="CODEBUDDY_API_KEY"
+        )
+        assert env["CODEBUDDY_BASE_URL"] == "https://api.deepseek.com/v1"
+
+    def test_codebuddy_leaves_base_url_alone_when_unset(self):
+        env = get_adapter("codebuddy").build_env(
+            {}, api_base_url=None, api_key_env="CODEBUDDY_API_KEY"
+        )
+        assert "CODEBUDDY_BASE_URL" not in env
+
+    def test_opencode_writes_config_content_env(self):
+        env = get_adapter("opencode").build_env(
+            {}, api_base_url="https://api.deepseek.com/v1", api_key_env="DEEPSEEK_API_KEY"
+        )
+        config = json.loads(env["OPENCODE_CONFIG_CONTENT"])
+        provider = config["provider"]["aicu"]
+        assert provider["npm"] == "@ai-sdk/openai-compatible"
+        assert provider["options"]["baseURL"] == "https://api.deepseek.com/v1"
+        # {env:VAR} 是 opencode 自己的插值语法；变量名取自 api_key_env
+        assert provider["options"]["apiKey"] == "{env:DEEPSEEK_API_KEY}"
+        # 选择器里可能出现的模型都要列上，否则 opencode 找不到该 id
+        assert set(provider["models"]) == set(cli_adapters.KNOWN_MODELS["all"])
+
+    def test_opencode_leaves_env_alone_when_unset(self):
+        env = get_adapter("opencode").build_env(
+            {}, api_base_url=None, api_key_env="DEEPSEEK_API_KEY"
+        )
+        assert "OPENCODE_CONFIG_CONTENT" not in env
+
+    @pytest.mark.parametrize("cli", ["opencode", "pi"])
+    def test_gateway_clis_prefix_model_with_provider_id(self, cli):
+        """opencode / pi 要求 <provider>/<model>，前缀就是注册第三方端点用的 id。"""
+        adapter = get_adapter(cli)
+        assert adapter.model_arg("deepseek-v4-pro", api_base_url="https://x/v1") == (
+            "aicu/deepseek-v4-pro"
+        )
+        # 没改道时 aicu 这个 provider 根本不存在，不能加前缀
+        assert adapter.model_arg("deepseek-v4-pro", api_base_url=None) == "deepseek-v4-pro"
+
+    @pytest.mark.parametrize("cli", ["claude", "codex", "qwen", "codebuddy"])
+    def test_other_clis_keep_plain_model_name(self, cli):
+        adapter = get_adapter(cli)
+        assert adapter.model_arg("deepseek-v4-pro", api_base_url="https://x/v1") == "deepseek-v4-pro"
+
+    def test_qwen_env_key_matches_injected_variable(self, monkeypatch, tmp_path):
+        """qwen 的 envKey 与注入 sk 的变量名同源，跨厂商时不能仍写 BAILIAN_API_KEY。"""
+        monkeypatch.setattr(cli_adapters.Path, "home", lambda: tmp_path)
+        adapter = get_adapter("qwen")
+        adapter.provision(api_base_url="https://api.deepseek.com/v1", api_key_env=None,
+                          model="deepseek-v4-pro")
+        data = json.loads((tmp_path / ".qwen" / "settings.json").read_text(encoding="utf-8"))
+        assert data["modelProviders"]["aicu"][0]["envKey"] == "DEEPSEEK_API_KEY"
+
+    def test_qwen_native_models_keep_bailian_env(self):
+        """同族（阿里云）不改写既有行为：仍是 Qwen Code 原生的 BAILIAN_API_KEY。"""
+        adapter = get_adapter("qwen")
+        assert adapter.api_key_env_for_model("qwen3-coder-plus") == "BAILIAN_API_KEY"
+        assert adapter.api_key_env_for_model("deepseek-v4-pro") == "DEEPSEEK_API_KEY"
+
+    def test_agent_passes_provider_prefixed_model_to_cli(self, monkeypatch, tmp_path):
+        """端到端接线：ClaudeCodeAgent 交给 --model 的是换算后的名字。"""
+        adapter = get_adapter("opencode")
+        assert adapter.build_base_command(
+            model=adapter.model_arg("deepseek-v4-pro", api_base_url="https://api.deepseek.com/v1"),
+            skip_permissions=False,
+            enable_project_skills=False,
+        ) == ["opencode", "run", "--model", "aicu/deepseek-v4-pro"]
+
+
+class TestKimiEnvChannel:
+    """kimi 的模型与凭据只走 ``KIMI_MODEL_*`` 这一族环境变量（0.43.1 实测）。
+
+    与 claude / codebuddy 的 ``*_BASE_URL`` 不同，这一族还捎带模型名：
+    ``KIMI_MODEL_NAME`` 是开关，kimi 据此在内存里合成临时 provider（不落盘），
+    而 ``-m`` 的优先级高于它、且只认 config.toml 里的别名。所以「开通道」与
+    「不传 --model」必须同时成立 —— test_channel_and_model_arg_agree 守着这条。
+    """
+
+    def test_env_channel_carries_model_endpoint_and_provider_type(self):
+        env = get_adapter("kimi").build_env(
+            {}, api_base_url="https://open.bigmodel.cn/api/paas/v4",
+            api_key_env="KIMI_MODEL_API_KEY", model="glm-5.2",
+        )
+        assert env["KIMI_MODEL_NAME"] == "glm-5.2"
+        assert env["KIMI_MODEL_BASE_URL"] == "https://open.bigmodel.cn/api/paas/v4"
+        assert env["KIMI_MODEL_PROVIDER_TYPE"] == "openai"
+        # 老文档里那两个 shell 变量对 0.43.1 是死的（凭据只从 config.toml 读），
+        # 留着只会让后人以为端点是它们带进去的
+        assert "KIMI_BASE_URL" not in env
+        assert "KIMI_API_KEY" not in env
+
+    def test_env_channel_off_without_endpoint(self):
+        """没有端点就不碰环境：同族模型交给 kimi 自己的 config.toml 与登录态。"""
+        adapter = get_adapter("kimi")
+        env = adapter.build_env(
+            {}, api_base_url=None, api_key_env="KIMI_MODEL_API_KEY", model="kimi-k2.6"
+        )
+        assert not [k for k in env if k.startswith("KIMI_MODEL")]
+
+    @pytest.mark.parametrize(
+        "model,api_base_url",
+        [
+            ("glm-5.2", "https://open.bigmodel.cn/api/paas/v4"),
+            ("deepseek-v4-flash", "https://api.deepseek.com/v1"),
+            ("qwen3-coder-plus", "https://dashscope.aliyuncs.com/compatible-mode/v1"),
+            ("kimi-k2.6", None),
+            ("自定义模型名", None),
+        ],
+    )
+    def test_channel_and_model_arg_agree(self, model, api_base_url):
+        """开环境通道 ⇔ 不传 --model —— 两边都缺模型名、或两处都给了模型名都是 bug。"""
+        adapter = get_adapter("kimi")
+        env = adapter.build_env(
+            {}, api_base_url=api_base_url, api_key_env="KIMI_MODEL_API_KEY", model=model
+        )
+        channel_on = "KIMI_MODEL_NAME" in env
+        assert channel_on is (adapter.model_arg(model, api_base_url=api_base_url) is None)
+        if channel_on:
+            assert env["KIMI_MODEL_NAME"] == model
+
+    def test_context_limit_only_for_vendors_that_measured_it(self):
+        """kimi 把上下文窗口当 max_tokens 发给厂商，超了厂商直接 400。
+
+        aliyun 的上限是实测撞出来的（131072 → 400，65536 → 通过）；没撞过的厂商
+        不能凭空写字面量，留给 kimi 自己的 131072。
+        """
+        adapter = get_adapter("kimi")
+
+        def ctx(model):
+            return adapter.build_env(
+                {}, api_base_url="https://x/v1", api_key_env="K", model=model
+            ).get("KIMI_MODEL_MAX_CONTEXT_SIZE")
+
+        assert ctx("qwen3-coder-plus") == "65536"
+        for model in ("glm-5.2", "deepseek-v4-flash", "kimi-k3", "自定义模型名"):
+            assert ctx(model) is None, model
+
+    def test_key_injected_into_kimi_model_api_key(self, tmp_path):
+        """接线：sk 落到 kimi 真正读的那个变量上，而不是类声明里的 KIMI_API_KEY。"""
+        store = CredentialStore(str(tmp_path / "api_keys.json"))
+        store.set("zhipu", "sk-secret")
+        set_credential_store(store)
+        try:
+            agent = object.__new__(ClaudeCodeAgent)
+            agent.adapter = get_adapter("kimi")
+            agent.cli_name = "kimi"
+            agent.model = "glm-5.2"
+            agent.api_base_url = cli_adapters.protocol_endpoint("zhipu", "chat")
+            agent.api_key_env = "KIMI_API_KEY"
+            env = agent._build_process_env()
+        finally:
+            set_credential_store(None)
+        assert env["KIMI_MODEL_API_KEY"] == "sk-secret"
+        assert env["KIMI_MODEL_NAME"] == "glm-5.2"
+        assert env["KIMI_MODEL_PROVIDER_TYPE"] == "openai"
+
+    def test_agent_never_passes_model_flag_when_rerouted(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(KimiAdapter, "is_installed", lambda self: True)
+        agent = ClaudeCodeAgent(
+            workspace_path=str(tmp_path), model="deepseek-v4-flash", cli_name="kimi",
+            skip_permissions=False,
+        )
+        assert agent.api_base_url == cli_adapters.protocol_endpoint("deepseek", "chat")
+        assert agent.cli_model_arg is None
+        cmd = agent._build_base_command()
+        assert "--model" not in cmd and "-m" not in cmd
+
+
+class TestBuildEnvSignature:
+    def test_every_adapter_accepts_model(self):
+        """build_env 的 model 参数是 kimi 需要的；将来加 CLI 时这条会拦住漏接的签名。"""
+        for adapter in cli_adapters._ADAPTERS:
+            env = adapter.build_env(
+                {}, api_base_url=None, api_key_env=None, model="deepseek-v4-flash"
+            )
+            assert isinstance(env, dict), adapter.id
+
+class TestCrossVendorEndpoint:
+    """跨厂商模型：把 base_url 指向厂商对应协议的原生端点，不做任何协议翻译。
+
+    端点事实全部来自本机 curl 实测（每条都带伪造路径对照组：伪造 404 / 真实 401
+    才算「存在」），少数 vendor 鉴权先于路由、探测不可判的，采信其官方文档。
+    """
+
+    # 每家一个代表模型（都在 cli_models.json 的 all 列表里）
+    VENDOR_MODELS = {
+        "anthropic": "claude-opus-5",
+        "openai": "gpt-5.6",
+        "moonshot": "kimi-k3",
+        "xai": "grok-4.6",
+        "google": "gemini-3.7-flash",
+        "deepseek": "deepseek-v4-pro",
+        "zhipu": "glm-5.2",
+        "minimax": "MiniMax-M3",
+        "aliyun": "qwen3.8-max",
+    }
+
+    @pytest.mark.parametrize(
+        "cli,model,expected",
+        [
+            # claude 说 Anthropic Messages
+            ("claude", "glm-5.2", "https://open.bigmodel.cn/api/anthropic"),
+            ("claude", "kimi-k3", "https://api.moonshot.cn/anthropic"),
+            ("claude", "deepseek-v4-pro", "https://api.deepseek.com/anthropic"),
+            ("claude", "MiniMax-M3", "https://api.minimaxi.com/anthropic"),
+            ("claude", "qwen3.8-max", "https://dashscope.aliyuncs.com/apps/anthropic"),
+            ("claude", "grok-4.6", "https://api.x.ai"),
+            ("claude", "gpt-5.6", None),  # OpenAI 无 /v1/messages（实测 404）
+            ("claude", "gemini-3", None),  # Google 两种协议都无（实测 404）
+            # codex 说 OpenAI Responses
+            ("codex", "deepseek-v4-pro", "https://api.deepseek.com/v1"),
+            ("codex", "kimi-k3", "https://api.moonshot.cn/v1"),
+            # 智谱没有 Responses 端点（真实调用 404），codex + glm 无路可走
+            ("codex", "glm-5.2", None),
+            ("codex", "grok-4.6", "https://api.x.ai/v1"),
+            ("codex", "MiniMax-M3", "https://api.minimaxi.com/v1"),
+            ("codex", "claude-opus-5", None),  # Anthropic 无 /v1/responses（实测 404）
+            ("codex", "gemini-3", None),
+            # kimi 说 OpenAI Chat
+            ("kimi", "glm-5.2", "https://open.bigmodel.cn/api/paas/v4"),
+            ("kimi", "gpt-5.6", "https://api.openai.com/v1"),
+            ("kimi", "gemini-3", "https://generativelanguage.googleapis.com/v1beta/openai"),
+            # Anthropic 的 OpenAI 兼容垫片（官方标注非生产就绪，撤掉只需删表里那个键）
+            ("kimi", "claude-opus-5", "https://api.anthropic.com/v1"),
+            # qwen 说 OpenAI Chat，且自家（阿里云）就是原生厂商
+            ("qwen", "deepseek-v4-pro", "https://api.deepseek.com/v1"),
+            ("qwen", "qwen3.8-max", None),  # 同族直连，不改写
+            # codebuddy / opencode / pi 是多厂商网关，没有「原生厂商」，一律按 chat 改道
+            ("codebuddy", "glm-5.2", "https://open.bigmodel.cn/api/paas/v4"),
+            ("codebuddy", "deepseek-v4-pro", "https://api.deepseek.com/v1"),
+            ("opencode", "glm-5.2", "https://open.bigmodel.cn/api/paas/v4"),
+            ("pi", "deepseek-v4-pro", "https://api.deepseek.com/v1"),
+            ("pi", "gemini-3", "https://generativelanguage.googleapis.com/v1beta/openai"),
+            # 锁死自家协议的 CLI：任何异族都不改道（"native" 不在数据表里）
+            ("gemini", "glm-5.2", None),
+            ("antigravity", "glm-5.2", None),
+            ("grok", "glm-5.2", None),
+            # cursor 未纳入路由，行为不变
+            ("cursor", "glm-5.2", None),
+        ],
+    )
+    def test_matrix(self, cli, model, expected):
+        assert cli_adapters.native_base_url(cli, model, "") == expected
+
+    @pytest.mark.parametrize(
+        "cli,model",
+        [
+            ("claude", "claude-opus-5"),
+            ("codex", "gpt-5.6"),
+            ("kimi", "kimi-k3"),
+            ("qwen", "qwen3.8-max"),
+        ],
+    )
+    def test_native_family_is_untouched(self, cli, model):
+        """同族直连：返回 None 表示一个字节都不改，保证今天的行为不变。"""
+        assert cli_adapters.native_base_url(cli, model, "") is None
+        assert cli_adapters.native_base_url(cli, model, "https://api.anthropic.com") is None
+
+    @pytest.mark.parametrize("cli", ["gemini", "antigravity", "grok", "cursor"])
+    def test_protocol_locked_clis_are_untouched(self, cli):
+        """只说自家协议的 CLI（gemini / antigravity / grok）与未接线的 cursor 都不改道。"""
+        assert cli_adapters.native_base_url(cli, "glm-5.2", "") is None
+
+    @pytest.mark.parametrize(
+        "cli,model,configured",
+        [
+            ("claude", "auto", ""),  # 内部模型，判不出厂商
+            ("claude", "", ""),
+            ("claude", None, None),
+            (None, "glm-5.2", None),
+        ],
+    )
+    def test_undecidable_cases_are_untouched(self, cli, model, configured):
+        assert cli_adapters.native_base_url(cli, model, configured) is None
+
+    def test_custom_endpoint_is_respected(self):
+        """用户自己架了中转的，不能被劫持。"""
+        assert (
+            cli_adapters.native_base_url("claude", "glm-5.2", "https://my-proxy.example.com/v1")
+            is None
+        )
+
+    def test_known_preset_endpoint_is_still_rerouted(self):
+        """预设端点不算自定义端点 —— claude 选 deepseek 时要把 chat 端点换成 anthropic 端点。"""
+        assert (
+            cli_adapters.native_base_url(
+                "claude", "deepseek-v4-pro", "https://api.deepseek.com/v1"
+            )
+            == "https://api.deepseek.com/anthropic"
+        )
+
+    def test_presets_agree_with_protocol_table(self):
+        """预设端点必须与协议表对同一厂商的说法逐字一致。
+
+        preset 的值会被原样喂给 CLI（同族时 native_base_url 返回 None，不改写），
+        所以它是「该 CLI 期望的完整 base」；而表里的值也是同一个东西。两者分叉
+        就是 bug —— 例如 moonshot preset 曾经只写裸 host，kimi 会拼成
+        /chat/completions（实测 404），而 kimi 要的是 host + /v1 + /chat/completions。
+        """
+        checked = 0
+        for preset in cli_adapters.list_provider_presets():
+            native = cli_adapters._CLI_NATIVE.get(preset.get("cli_name", ""))
+            url = preset.get("api_base_url")
+            if not native or not url or native[1] not in {"messages", "responses", "chat"}:
+                # "native" 协议的 CLI（gemini / antigravity / grok）另有约定：
+                # preset 里的 api_base_url 眼下还没有任何 adapter 会去读它。
+                continue
+            vendor = vendor_of_model(preset["model"])
+            expected = cli_adapters.protocol_endpoint(vendor, native[1])
+            assert expected == url, f"{preset['id']}: preset 写 {url}，协议表写 {expected}"
+            checked += 1
+        assert checked >= 7, f"只校验到 {checked} 条预设，覆盖不足"
+
+    def test_every_preset_targets_a_visible_cli(self):
+        """预设的 cli_name 必须是一个真实出现在 CLI 下拉里的 id。
+
+        google 预设曾经指向 ``cli_name: "gemini"``，而 gemini 在 ``_HIDDEN_CLI_IDS``
+        里、``list_clis()`` 根本不下发它。前端 ``selectedCli`` 于是解析不到，模型候选
+        退化成「全部 CLI 模型的并集」—— GPT / Claude / Grok 全被带回来，正是「只显示
+        能用的模型」要防的那件事。
+
+        上面那条 preset↔协议表一致性用例抓不到它：protocol 为 ``"native"`` 的预设
+        （gemini / antigravity / grok）在那里被 ``continue`` 跳过了。
+        """
+        visible = {cli["id"] for cli in cli_adapters.list_clis()}
+        for preset in cli_adapters.list_provider_presets():
+            assert preset.get("cli_name") in visible, (
+                f"{preset['id']} 预设指向 CLI {preset.get('cli_name')!r}，它不在 CLI 下拉里"
+                f"（可见的有 {sorted(visible)}）"
+            )
+
+    def test_vendor_models_are_all_in_catalog(self):
+        """VENDOR_MODELS 里的代表模型必须真的在 cli_models.json 的 all 列表里。
+
+        否则这些用例测的是一个用户根本选不到的模型名，会随目录变化悄悄失真
+        （``"google": "gemini-3"`` 就是这么烂掉的 —— 该 id 后来因线上退役被删）。
+        """
+        catalog = set(cli_adapters.KNOWN_MODELS.get("all", []))
+        stale = {v: m for v, m in self.VENDOR_MODELS.items() if m not in catalog}
+        assert not stale, f"这些代表模型已不在 cli_models.json 的 all 里：{stale}"
+
+    def test_catalog_gemini_ids_resolve_to_google(self):
+        """目录里的 gemini 系 id 必须判得出厂商 google，且 chat 类 CLI 能用。
+
+        ``model_supported_by_cli`` 对「判不出厂商」的模型一律返回 True（保守放行），
+        所以一个判不出厂商的坏 id 会绕过所有过滤直接进下拉。
+        """
+        gemini_ids = [
+            m for m in cli_adapters.KNOWN_MODELS.get("all", []) if m.startswith("gemini")
+        ]
+        assert gemini_ids, "目录里一个 gemini 模型都没有？"
+        for model in gemini_ids:
+            assert vendor_of_model(model) == "google", f"{model} 判不出是 google"
+            assert cli_adapters.model_supported_by_cli("kimi", model), (
+                f"{model} 在 chat 协议下应当可用（google 有 /v1beta/openai 端点）"
+            )
+
+    def test_retired_gemini_ids_are_not_in_catalog(self):
+        """已从线上退役的 gemini id 不能留在目录里 —— 选中只会撞 404。
+
+        本机用真实 key 逐个调 ``generateContent`` 实测（2026-09-16）：
+          gemini-3          404 NOT_FOUND（无对应新名，只能删）
+          gemini-3.1-pro    404 NOT_FOUND → 真名 gemini-3.1-pro-preview
+          gemini-3.5        404 NOT_FOUND → 真名 gemini-3.5-flash
+          gemini-2.5-pro    404 "no longer available to new users"
+          gemini-2.5-flash  404 "no longer available to new users"（官方指向 gemini-3.6-flash）
+        """
+        catalog = set(cli_adapters.KNOWN_MODELS.get("all", []))
+        for dead in (
+            "gemini-3", "gemini-3.1-pro", "gemini-3.5", "gemini-2.5-pro", "gemini-2.5-flash",
+        ):
+            assert dead not in catalog, f"{dead} 已在线上退役，不该还留在目录里"
+        for live in ("gemini-3.1-pro-preview", "gemini-3.5-flash", "gemini-3.6-flash"):
+            assert live in catalog, f"{live} 实测可用，应当在目录里"
+
+    # ------------------------------------------------------------ 数据表自洽
+
+    def test_table_covers_exactly_every_known_vendor(self):
+        """表里的厂商键必须与 vendor_of_model 的取值一一对应，不多不少。"""
+        assert set(cli_adapters.PROTOCOL_ENDPOINTS) == set(self.VENDOR_MODELS)
+        for vendor, model in self.VENDOR_MODELS.items():
+            assert vendor_of_model(model) == vendor, f"{model} 应当判为 {vendor}"
+
+    def test_every_endpoint_is_a_real_https_url(self):
+        for vendor, protocols in cli_adapters.PROTOCOL_ENDPOINTS.items():
+            assert protocols, f"{vendor} 一个协议端点都没有"
+            for protocol, url in protocols.items():
+                assert protocol in {"messages", "responses", "chat"}, f"{vendor}/{protocol} 协议名不认识"
+                assert url.startswith("https://"), f"{vendor}/{protocol} 不是 https"
+                assert url == url.strip() and url, f"{vendor}/{protocol} 是空串或有空白"
+
+    def test_protocol_endpoint_lookup(self):
+        assert cli_adapters.protocol_endpoint("zhipu", "messages") == "https://open.bigmodel.cn/api/anthropic"
+        # 智谱没有实现 OpenAI Responses API：真实调用（codex + glm-5.2）稳定 404，
+        # coding 与非 coding 两个基址都试过。删键即「该组合不可用」。
+        assert cli_adapters.protocol_endpoint("zhipu", "responses") is None
+        assert cli_adapters.protocol_endpoint("anthropic", "responses") is None
+        assert cli_adapters.protocol_endpoint("google", "messages") is None
+        assert cli_adapters.protocol_endpoint(None, "chat") is None
+        assert cli_adapters.protocol_endpoint("不存在的厂商", "chat") is None
+
+    # ------------------------------------------------------------ 下拉过滤

@@ -155,6 +155,13 @@ export const zh: Dict = {
   'settings.roleIdRequired': '请填写角色 ID',
   'settings.roleType': '角色类型',
   'settings.newRole': '新建角色',
+  // 悬浮卡片里对角色 YAML 字段的标题，与设置页的表单小节名保持同一套说法。
+  'hover.suitableFor': '适合',
+  'hover.notFor': '不适合',
+  'hover.numCcs': '并行 CC',
+  'hover.auditRounds': '审查轮次',
+  'hover.skills': '技能',
+  'hover.persona': '角色人格（role_md）',
   'settings.customRoles': '{count} 个自定义角色',
   'settings.roleSaved': '角色已保存',
   'settings.saveRole': '保存角色',

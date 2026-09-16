@@ -4,6 +4,7 @@ import { CliInfo, GlobalConfig, ProviderPreset, RoleField, RoleInfo, RoleSchema,
 import { CliInfo, EffectiveBaseUrlResponse, GlobalConfig, ProviderPreset, RoleField, RoleInfo, RolePool, RoleSchema, SkillInfo } from '../types';
 import { useI18n } from '../i18n';
 import { useUIStateStore } from '../stores/UIStateStore';
+import SearchCheckboxPicker from './SearchCheckboxPicker';
 import {
   createRole,
   createRolePool,
@@ -29,6 +30,7 @@ import {
   updateRolePool,
   updateSkill,
 } from '../utils/api';
+import { clearRoleHoverDetailCache, loadRoleHoverDetail } from '../utils/roleHoverDetail';
 
 type SettingsTab = 'connection' | 'workspace' | 'roles' | 'skills' | 'language';
 type RoleType = NonNullable<RoleInfo['type']>;
@@ -528,6 +530,8 @@ const WorkbenchSettings: React.FC<WorkbenchSettingsProps> = ({ open, onClose, on
     try {
       const payload = { role_id: roleId.trim(), role_type: roleType, config: roleConfig };
       if (selectedRole) await updateRole(payload); else await createRole(payload);
+      // 角色内容变了，悬停卡片里缓存的旧人格要丢掉，否则池编辑处悬停还看到改之前的。
+      clearRoleHoverDetailCache();
       setRoles(await getRoles()); setSelectedRole(`${roleType}:${payload.role_id}`);
       const message = t('settings.roleSaved');
       setNotice(message); addToast({ type: 'success', message });
@@ -584,6 +588,7 @@ const WorkbenchSettings: React.FC<WorkbenchSettingsProps> = ({ open, onClose, on
     setBusy(true); setError(''); setNotice('');
     try {
       await deleteRole(roleType, roleId);
+      clearRoleHoverDetailCache();
       const nextRoles = await getRoles();
       setRoles(nextRoles);
       setNotice(t('settings.roleDeleted'));

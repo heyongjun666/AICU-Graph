@@ -376,10 +376,48 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .picker-status { margin-bottom: 6px; color: #7b858d; font-size: 11px; }
 .picker-status.is-error { color: #a44139; }
 .dependency-picker { max-height: 150px; overflow: auto; padding: 8px; display: flex; flex-direction: column; gap: 7px; border: 1px solid #e1e5e7; border-radius: 6px; background: #fafbfb; }
-.dependency-picker label { display: flex; align-items: center; gap: 7px; min-width: 0; color: #4f5961; font-size: 11px; }
+/* flex-direction 与 font-weight 必须显式写死：上方的 .workbench-dialog label 设了 column 与
+   650，而 CSS 是按属性级联而不是按规则覆盖 —— 这里漏写，勾选框就会被排到文字上面、文字变粗。
+   在 .workbench-dialog 内的两个消费方（候选角色池面板、新建节点对话框）最容易踩到。 */
+.dependency-picker label { display: flex; flex-direction: row; align-items: center; gap: 7px; min-width: 0; color: #4f5961; font-size: 11px; font-weight: 400; }
+/* 相邻兄弟选择器画分隔线，省掉 :last-child 特判，也不会在最后一项多出一条线。色值与 .resource-list-items li 一致。 */
+.dependency-picker label + label { padding-top: 7px; border-top: 1px solid #eef1f2; }
 .dependency-picker input { width: auto; flex: 0 0 auto; }
 .dependency-picker .picker-item-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .dependency-picker small { min-width: 0; margin-left: auto; overflow: hidden; color: #8a9499; font: 10px ui-monospace, SFMono-Regular, Menlo, monospace; text-overflow: ellipsis; white-space: nowrap; }
+/* 悬浮完整信息卡片。portal 到 body 后固定在视口坐标，避免被 .dependency-picker 与
+   .workbench-dialog 两层 overflow 裁掉。
+   白底 + #e4e9eb 描边，和 .config-section / .workbench-dialog 同一套面板观感 ——
+   不要挪用 .help-tip-pop 的深色气泡：那是个带小箭头的短提示，只借配色会变成浮在空中的黑块。
+   高度也封顶：角色的 role_md 有几十行，不封顶卡片会从视口上下一路探出去。 */
+.item-hover-card { position: fixed; z-index: 200; display: flex; flex-direction: column; width: 320px; max-width: calc(100vw - 24px); max-height: calc(100vh - 20px); box-sizing: border-box; padding: 10px 12px; border: 1px solid #e4e9eb; border-radius: 7px; background: #fff; color: #505b62; font-size: 11px; line-height: 1.6; box-shadow: 0 10px 28px rgba(23, 44, 38, .16); pointer-events: auto; }
+.item-hover-card-title { display: flex; align-items: baseline; gap: 7px; color: #252a2d; font-size: 12px; font-weight: 700; overflow-wrap: anywhere; }
+/* 短标签用 pill，与 .resource-list-type 同观感。 */
+.item-hover-card-title small { margin-left: auto; flex: 0 0 auto; padding: 1px 6px; border-radius: 8px; background: #eef1f2; color: #6a767c; font-size: 10px; font-weight: 700; text-transform: uppercase; }
+.item-hover-card-id { margin-top: 4px; color: #8a9499; font: 10px ui-monospace, SFMono-Regular, Menlo, monospace; overflow-wrap: anywhere; }
+.item-hover-card-summary { margin-top: 7px; color: #3f4a51; }
+.item-hover-card-group { margin-top: 7px; }
+.item-hover-card-group-label { margin-bottom: 2px; color: #6a767c; font-size: 10px; font-weight: 700; }
+/* 正负两组各给一个色相：适合 = 绿，不适合 = 红，与 .form-error 的警示色同一支。 */
+.item-hover-card-group.is-positive .item-hover-card-group-label { color: #2f7d5f; }
+.item-hover-card-group.is-negative .item-hover-card-group-label { color: #a8503f; }
+.item-hover-card-group ul { margin: 0; padding: 0; list-style: none; }
+/* 用 ::before 画圆点而不是 list-style：list-style-position 在换行时缩进对不齐。 */
+.item-hover-card-group li { position: relative; padding-left: 11px; }
+.item-hover-card-group.is-positive li::before,
+.item-hover-card-group.is-negative li::before { position: absolute; left: 2px; content: '·'; font-weight: 700; }
+.item-hover-card-group.is-positive li::before { color: #7fb39c; }
+.item-hover-card-group.is-negative li::before { color: #c99a90; }
+.item-hover-card-facts { display: flex; flex-wrap: wrap; gap: 4px 10px; margin-top: 7px; padding-top: 7px; border-top: 1px solid #eef1f2; color: #6a767c; }
+.item-hover-card-facts b { margin-right: 4px; color: #8a9499; font-weight: 600; }
+/* 正文（角色人格原文）限高滚动：role_md 常有三四十行，全展开会把卡片撑到视口外。
+   flex: 1 1 auto + min-height: 0 是为了在卡片自己被视口高度卡住时正文能跟着缩，
+   而不是顶着 max-height 从卡片底部溢出。max-height: 220px 是常态下的封顶。
+   overscroll-behavior 防止滚到底后连带把背后的对话框一起滚走。 */
+.item-hover-card-body { display: flex; flex: 1 1 auto; flex-direction: column; min-height: 0; margin-top: 7px; padding-top: 7px; border-top: 1px solid #eef1f2; }
+.item-hover-card-body-label { margin-bottom: 3px; color: #8a9499; font-size: 10px; font-weight: 700; }
+.item-hover-card-body-text { flex: 1 1 auto; min-height: 0; max-height: 220px; overflow: auto; overscroll-behavior: contain; white-space: pre-wrap; overflow-wrap: anywhere; }
+
 
 
 /* ---- SharedWorkspacePanel（会话级「共享 workspace」停靠面板） ---- */

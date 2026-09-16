@@ -155,6 +155,13 @@ export const en: Dict = {
   'settings.roleIdRequired': 'Role ID is required',
   'settings.roleType': 'Role type',
   'settings.newRole': 'New role',
+  // 悬浮卡片里对角色 YAML 字段的标题，与设置页的表单小节名保持同一套说法。
+  'hover.suitableFor': 'Suitable for',
+  'hover.notFor': 'Not for',
+  'hover.numCcs': 'Parallel CCs',
+  'hover.auditRounds': 'Audit rounds',
+  'hover.skills': 'Skills',
+  'hover.persona': 'Persona (role_md)',
   'settings.customRoles': '{count} custom roles',
   'settings.roleSaved': 'Role saved',
   'settings.saveRole': 'Save role',

@@ -4,6 +4,7 @@ import { GraphNode, LinkCandidate, NodeConfig, RoleInfo, SessionSummary, SkillIn
 import { getRoles, getSkills } from '../utils/api';
 import { useAvailableClis } from '../hooks/useAvailableClis';
 import { useI18n, translate } from '../i18n';
+import SearchCheckboxPicker from './SearchCheckboxPicker';
 
 interface NewSessionDialogProps {
   open: boolean;
@@ -53,69 +54,6 @@ export const NewSessionDialog: React.FC<NewSessionDialogProps> = ({ open, busy, 
 };
 
 export type LinkCandidateLoadState = 'idle' | 'loading' | 'ready' | 'empty' | 'error';
-
-interface SearchCheckboxPickerProps {
-  items: Array<{ id: string; label: string; detail?: string }>;
-  selected: string[];
-  onToggle: (id: string, checked: boolean) => void;
-  query: string;
-  onQueryChange: (query: string) => void;
-  searchPlaceholder: string;
-  emptyLabel: string;
-  selectedLabel: string;
-  disabled?: boolean;
-  className?: string;
-}
-
-const SearchCheckboxPicker: React.FC<SearchCheckboxPickerProps> = ({
-  items,
-  selected,
-  onToggle,
-  query,
-  onQueryChange,
-  searchPlaceholder,
-  emptyLabel,
-  selectedLabel,
-  disabled = false,
-  className = '',
-}) => {
-  const normalizedQuery = query.trim().toLowerCase();
-  const filtered = items.filter((item) =>
-    !normalizedQuery
-    || item.label.toLowerCase().includes(normalizedQuery)
-    || item.id.toLowerCase().includes(normalizedQuery)
-    || item.detail?.toLowerCase().includes(normalizedQuery),
-  );
-  return (
-    <div className={`search-checkbox-picker ${className}`}>
-      <div className="picker-toolbar">
-        <input
-          type="search"
-          value={query}
-          onChange={(event) => onQueryChange(event.target.value)}
-          placeholder={searchPlaceholder}
-          disabled={disabled}
-          aria-label={searchPlaceholder}
-        />
-        <span className="picker-count">{selectedLabel.replace('{count}', String(selected.length))}</span>
-      </div>
-      <div className="dependency-picker">
-        {filtered.length ? filtered.map((item) => (
-          <label key={item.id}>
-            <input
-              type="checkbox"
-              checked={selected.includes(item.id)}
-              onChange={(event) => onToggle(item.id, event.target.checked)}
-              disabled={disabled}
-            />
-            <span className="picker-item-label">{item.label}</span>
-            {item.detail && <small>{item.detail}</small>}
-          </label>
-        )) : <span className="detail-empty">{emptyLabel}</span>}
-      </div>
-    </div>
-  );
-};
 
 interface NodeDialogProps {
   open: boolean;
@@ -308,7 +246,7 @@ export const NewNodeDialog: React.FC<NodeDialogProps> = ({
         </div>
         <label>{t('dialog.task')}<textarea autoFocus value={task} onChange={(event) => setTask(event.target.value)} rows={5} placeholder={t('dialog.taskPlaceholder')} /></label>
         <div className="node-dialog-section"><div className="node-dialog-section-title">{t('dialog.dependencies')}</div>{candidateStatus === 'loading' && <div className="picker-status">{t('dialog.loadingCandidates')}</div>}{candidateStatus === 'error' && <div className="picker-status is-error">{candidateError || t('dialog.candidatesLoadFailed')}</div>}<SearchCheckboxPicker
-          items={dependencyCandidates.map((candidate) => ({ id: candidate.id, label: candidate.label, detail: candidate.task }))}
+          items={dependencyCandidates.map((candidate) => ({ id: candidate.id, label: candidate.label, detail: candidate.task, description: candidate.task }))}
           selected={dependencies}
           onToggle={toggleDependency}
           query={dependencyQuery}
@@ -319,7 +257,7 @@ export const NewNodeDialog: React.FC<NodeDialogProps> = ({
           disabled={relationDisabled}
         /></div>
         {skills.length > 0 && <div className="node-dialog-section"><div className="node-dialog-section-title">{t('dialog.skills')}</div><SearchCheckboxPicker
-          items={skills.map((skill) => ({ id: skill.id, label: skill.name || skill.id, detail: skill.name !== skill.id ? skill.id : undefined }))}
+          items={skills.map((skill) => ({ id: skill.id, label: skill.name || skill.id, detail: skill.name !== skill.id ? skill.id : undefined, description: skill.description }))}
           selected={selectedSkills}
           onToggle={toggleSkill}
           query={skillQuery}

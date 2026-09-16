@@ -19,6 +19,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from runtime.models import LogLevel
+from runtime.role_pools_manager import RolePoolsManager
 from runtime.roles_manager import RolesManager
 from runtime.server import _sse_stream
 from runtime.session_manager import SessionHandle, SessionManager
@@ -85,6 +86,17 @@ class SkillRequest(BaseModel):
     content: str = Field(min_length=1, max_length=200000)
 
 
+class RolePoolRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=60)
+    roles: list[str] = Field(default_factory=list)
+
+
+class UpdateRolePoolRequest(BaseModel):
+    # 缺省（未发送）= 不修改；池 id 不可变。
+    name: Optional[str] = Field(default=None, min_length=1, max_length=60)
+    roles: Optional[list[str]] = None
+
+
 class CreateNodeRequest(BaseModel):
     task: str = Field(min_length=1, max_length=100000)
     role: str = Field(default="default", min_length=1, max_length=80)
@@ -115,6 +127,7 @@ def create_session_app(
     session_manager: SessionManager,
     roles_manager: Optional[RolesManager] = None,
     skills_manager: Optional[SkillsManager] = None,
+    role_pools_manager: Optional[RolePoolsManager] = None,
 ) -> FastAPI:
     app = FastAPI(title="Execution Graph Workbench API", version="2.0")
     app.add_middleware(LanguageMiddleware)
@@ -123,6 +136,10 @@ def create_session_app(
     skills_manager = skills_manager or SkillsManager(
         os.path.join(project_root, "skills"),
         extra_dirs=[os.path.expanduser("~/.claude/skills")],
+    )
+    # 候选角色池存于会话根目录（与 sessions.json / config.json 同级）。
+    role_pools_manager = role_pools_manager or RolePoolsManager(
+        os.path.join(session_manager.root_dir, "role_pools.json"), roles_manager
     )
 
     def resolve(session_id: str) -> SessionHandle:
@@ -185,6 +202,35 @@ def create_session_app(
             raise HTTPException(status_code=404, detail=localized_detail(error)) from error
         except ValueError as error:
             raise HTTPException(status_code=400, detail=localized_detail(error)) from error
+
+    @app.get("/v1/role-pools")
+    def list_role_pools():
+        return {"pools": role_pools_manager.list_pools()}
+
+    @app.post("/v1/role-pools", status_code=201)
+    def create_role_pool(body: RolePoolRequest):
+        try:
+            return role_pools_manager.create_pool(body.name, body.roles)
+        except ValueError as error:
+            status_code = 409 if "already exists" in str(error) else 400
+            raise HTTPException(status_code=status_code, detail=localized_detail(error)) from error
+
+    @app.patch("/v1/role-pools/{pool_id}")
+    def update_role_pool(pool_id: str, body: UpdateRolePoolRequest):
+        try:
+            return role_pools_manager.update_pool(pool_id, body.name, body.roles)
+        except KeyError as error:
+            raise HTTPException(status_code=404, detail=localized_detail(error)) from error
+        except ValueError as error:
+            status_code = 409 if "already exists" in str(error) else 400
+            raise HTTPException(status_code=status_code, detail=localized_detail(error)) from error
+
+    @app.delete("/v1/role-pools/{pool_id}", status_code=204)
+    def delete_role_pool(pool_id: str):
+        try:
+            role_pools_manager.delete_pool(pool_id)
+        except KeyError as error:
+            raise HTTPException(status_code=404, detail=localized_detail(error)) from error
 
     @app.get("/v1/skills")
     def list_skills():

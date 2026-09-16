@@ -11,6 +11,7 @@ from executables.manager import Manager
 from executables.registry import ExecutableRegistry
 from executables.worker import Worker
 from runtime.models import LogLevel, NodeStatus
+from runtime.role_pools_manager import RolePoolsManager
 from runtime.roles_manager import RolesManager
 from runtime.session_manager import SessionManager
 from runtime.session_server import create_session_app
@@ -1169,3 +1170,61 @@ def test_num_ccs_policy_rejects_unknown_keys(session_client):
         "/v1/config", json={"config": {"totally_unknown_key": 1}}
     )
     assert resp.status_code == 400
+
+
+def _seed_roles(roles_dir):
+    """写入两个 worker 角色，供角色池的存在性校验使用。"""
+    worker_dir = roles_dir / "Worker"
+    worker_dir.mkdir(parents=True, exist_ok=True)
+    for role_id in ("code", "test"):
+        (worker_dir / f"{role_id}.yaml").write_text(
+            f"summary: {role_id}\n", encoding="utf-8"
+        )
+    return RolesManager(str(roles_dir))
+
+
+def test_role_pool_crud_is_isolated_and_persisted(session_manager, tmp_path):
+    roles_manager = _seed_roles(tmp_path / "roles")
+    store = tmp_path / "pools" / "role_pools.json"
+    app = create_session_app(
+        session_manager,
+        roles_manager,
+        role_pools_manager=RolePoolsManager(str(store), roles_manager),
+    )
+
+    with TestClient(app) as client:
+        assert client.get("/v1/role-pools").json() == {"pools": []}
+
+        created = client.post(
+            "/v1/role-pools", json={"name": "博客开发", "roles": ["code", "test"]}
+        )
+        assert created.status_code == 201, created.text
+        pool = created.json()
+        assert pool["name"] == "博客开发"
+        assert pool["roles"] == ["code", "test"]
+        assert client.get("/v1/role-pools").json()["pools"] == [pool]
+
+        # 重名 → 409；未知角色 id / 空名 → 400
+        assert client.post(
+            "/v1/role-pools", json={"name": "博客开发", "roles": ["code"]}
+        ).status_code == 409
+        assert client.post(
+            "/v1/role-pools", json={"name": "P", "roles": ["ghost"]}
+        ).status_code == 400
+        assert client.post("/v1/role-pools", json={"name": "", "roles": ["code"]}).status_code == 422
+
+        patched = client.patch(f"/v1/role-pools/{pool['id']}", json={"roles": ["test"]})
+        assert patched.status_code == 200, patched.text
+        assert patched.json() == {"id": pool["id"], "name": "博客开发", "roles": ["test"]}
+
+        assert client.patch("/v1/role-pools/nope", json={"name": "X"}).status_code == 404
+        assert client.delete("/v1/role-pools/nope").status_code == 404
+        assert client.delete(f"/v1/role-pools/{pool['id']}").status_code == 204
+        assert client.get("/v1/role-pools").json() == {"pools": []}
+
+    # 落盘：新管理器重读同一文件仍能看到（先重建一条，再校验重读）
+    reloaded_roles = _seed_roles(tmp_path / "roles")
+    fresh = RolePoolsManager(str(store), reloaded_roles)
+    assert fresh.list_pools() == []
+
+

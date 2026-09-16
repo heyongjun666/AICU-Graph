@@ -23,6 +23,21 @@ from cli_adapters import (
 )
 from claude_code_agent import ClaudeCodeAgent
 from runtime.credentials import CredentialStore, set_credential_store, vendor_of_model
+from runtime.mcp_client import McpServer, load_registry, resolve_servers
+
+
+def _mcp_servers(*names, **kwargs) -> list:
+    """按名字造一批 McpServer。
+
+    下发到 adapter 的货币是 **server 对象**而不是名字字符串：三家 CLI 要的配置形态
+    不同（CC 族 argv JSON / codex 的 -c 键值 / opencode 的环境变量 JSON），名字字符串
+    在这些形状里放不下 command、args。测试跟着用真实类型，别用字符串凑 ——
+    字符串会让 `server.name` 这种属性访问直接炸，而真实调用路径上它永远不是字符串。
+    """
+    return [
+        McpServer(name=name, command="python3", args=["/tmp/echo.py"], **kwargs)
+        for name in names
+    ]
 
 
 class TestRegistry:
@@ -129,10 +144,81 @@ class TestInternalAdapter:
             agent.model = "DeepSeek-V4-Flash"
             agent.api_base_url = None
             agent.api_key_env = None
+            agent.mcp_servers = []
             env = agent._build_process_env()
             assert env.get("DEEPSEEK_API_KEY") != "sk-secret"
         finally:
             set_credential_store(None)
+
+
+class TestMcpAllowlist:
+    """MCP 工具必须并进 --allowedTools 白名单。
+
+    实测（internal / claude 系）：--allowedTools 是**白名单**不是「先问再放行」，dontAsk
+    下不在名单里的工具直接拒绝，且没有任何通配写法（`mcp__*` 实测无效）。所以声明了
+    MCP 却不放行，表现是 permission_denials 里出现 mcp__<server>__<tool>、agent 拿不到
+    结果后绕路或报一个与 MCP 无关的错 —— 正是预检要消除的那类失败。
+    """
+
+    @pytest.mark.parametrize("cli", ["claude", "internal", "codebuddy"])
+    def test_mcp_server_added_to_allowlist(self, cli):
+        cmd = get_adapter(cli).build_base_command(
+            model=None,
+            skip_permissions=True,
+            enable_project_skills=False,
+            mcp_servers=_mcp_servers("echo-probe"),
+        )
+        allowed = cmd[cmd.index("--allowedTools") + 1]
+        assert "mcp__echo-probe" in allowed.split()
+        assert set("Read Write Edit Bash".split()) <= set(allowed.split())
+
+    def test_multiple_servers_all_added(self):
+        cmd = get_adapter("claude").build_base_command(
+            model=None,
+            skip_permissions=True,
+            enable_project_skills=False,
+            mcp_servers=_mcp_servers("a", "b"),
+        )
+        allowed = cmd[cmd.index("--allowedTools") + 1].split()
+        assert "mcp__a" in allowed and "mcp__b" in allowed
+
+    def test_no_mcp_keeps_allowlist_byte_identical(self):
+        """没声明 MCP 时命令与改动前逐字相同 —— 这是既有节点的行为基线。"""
+        cmd = get_adapter("claude").build_base_command(
+            model=None, skip_permissions=False, enable_project_skills=False, mcp_servers=None
+        )
+        assert cmd == ["claude"]
+
+        cmd = get_adapter("claude").build_base_command(
+            model=None, skip_permissions=True, enable_project_skills=False, mcp_servers=[]
+        )
+        assert cmd[cmd.index("--allowedTools") + 1] == "Read Write Edit Bash"
+
+    def test_allowlist_sourced_from_same_list_sent_to_cli(self):
+        """白名单名与 --mcp-config 里的 mcpServers 必须同源。
+
+        agent 只收一份 server 列表，白名单和下发配置各自从它上面取 —— 同一个来源才
+        不可能出现「配了 A 却放行 B」。这里把两条路径的产物都拿出来对账。
+        """
+        servers = resolve_servers(["echo-probe"], load_registry())
+        agent = object.__new__(ClaudeCodeAgent)
+        agent.adapter = get_adapter("claude")
+        agent.cli_name = "claude"
+        agent.cli_model_arg = None
+        agent.skip_permissions = True
+        agent.enable_project_skills = False
+        agent.mcp_servers = servers
+
+        cmd = agent._build_base_command()
+        allowed = cmd[cmd.index("--allowedTools") + 1].split()
+
+        # mcp_flags 由 chat() 在 build_base_command 之后追加，两条路径吃的是同一份列表
+        cmd.extend(agent.adapter.mcp_flags(agent.mcp_servers))
+        config_arg = next(a for a in cmd if a.startswith("--mcp-config="))
+        sent = json.loads(config_arg.split("=", 1)[1])["mcpServers"]
+        assert set(sent) == {"echo-probe"}
+        for name in sent:
+            assert f"mcp__{name}" in allowed
 
 
 class TestClaudeAdapter:
@@ -332,6 +418,62 @@ class TestCodexAdapter:
         assert adapter.format_stream_event(command) == ""
 
 
+class TestCodexMcp:
+    """codex 的 MCP 注入是 `-c mcp_servers.<name>.*`，且**必须排在 `exec` 之前**。
+
+    codex 的 CLI 是 ``codex [全局 flag] exec [子命令 flag]``：``exec`` 是子命令，
+    它后面的东西归子命令解析。AICU 通用口子 ``mcp_flags`` 是在 build_base_command
+    之后追加的，用在这里会把 ``-c`` 甩到 ``exec`` 后面 —— 位置错，codex 要么报
+    unknown option 要么静默忽略。所以 codex 走 build_base_command 自己插。
+    """
+
+    def test_mcp_flags_injected_before_exec(self):
+        cmd = get_adapter("codex").build_base_command(
+            model=None,
+            skip_permissions=False,
+            enable_project_skills=False,
+            mcp_servers=_mcp_servers("echo-probe"),
+        )
+        assert cmd[0] == "codex"
+        assert cmd.index("exec") > 1
+        # 每一条 -c 都在 exec 之前
+        assert all(i < cmd.index("exec") for i, a in enumerate(cmd) if a == "-c")
+
+    def test_mcp_encoded_as_repeated_c_flags(self):
+        """形态是重复的 `-c key=value`，值用 JSON 引号 —— 实测这样才被正确解析。"""
+        cmd = get_adapter("codex").build_base_command(
+            model=None,
+            skip_permissions=False,
+            enable_project_skills=False,
+            mcp_servers=_mcp_servers("echo-probe", env={"K": "v"}),
+        )
+        pairs = [cmd[i + 1] for i, a in enumerate(cmd) if a == "-c"]
+        assert 'mcp_servers.echo-probe.command="python3"' in pairs
+        # args 是 JSON 数组：path 带空格时也只有这一种写法不会散架
+        assert 'mcp_servers.echo-probe.args=["/tmp/echo.py"]' in pairs
+        assert 'mcp_servers.echo-probe.env.K="v"' in pairs
+
+    def test_no_mcp_keeps_command_byte_identical(self):
+        """没声明 MCP 时命令与改动前逐字相同 —— codex 节点是既有行为基线。"""
+        cmd = get_adapter("codex").build_base_command(
+            model=None, skip_permissions=True, enable_project_skills=False, mcp_servers=None
+        )
+        assert cmd == ["codex", "exec", "--dangerously-bypass-approvals-and-sandbox"]
+
+    def test_args_omitted_when_empty(self):
+        """args 为空就不发这条 -c：发一个空数组与不发等价，少一条少一处出错面。"""
+        server = McpServer(name="x", command="python3", args=[])
+        cmd = get_adapter("codex").build_base_command(
+            model=None, skip_permissions=False, enable_project_skills=False, mcp_servers=[server]
+        )
+        pairs = [cmd[i + 1] for i, a in enumerate(cmd) if a == "-c"]
+        assert pairs == ['mcp_servers.x.command="python3"']
+
+    def test_mcp_flags_hook_stays_empty(self):
+        """codex 不用通用口子，mcp_flags 必须返回空 —— 否则同一份配置会被注入两次。"""
+        assert get_adapter("codex").mcp_flags(_mcp_servers("echo-probe")) == []
+
+
 class TestQwenAdapter:
     def test_base_command_model_and_yolo(self):
         adapter = get_adapter("qwen")
@@ -486,6 +628,167 @@ class TestOpenCodeAdapter:
         out = adapter.parse_result("plain answer")
         assert out["result"] == "plain answer"
         assert out["session_id"] is None
+
+
+class TestOpenCodeMcp:
+    """opencode 的 MCP 走环境变量 OPENCODE_CONFIG_CONTENT，与 provider 配置**同一个 JSON**。
+
+    两个坑：
+      1. 那个变量原来只在 ``api_base_url`` 非空时才设（角色没配自定义端点就没有它），
+         MCP 会没地方放 —— 条件必须放宽成「有端点或有 server」。
+      2. 同一个变量设两次是覆盖不是合并，所以 mcp 段必须与 provider 段拼进同一份 JSON。
+    """
+
+    def _config(self, env: dict) -> dict:
+        return json.loads(env["OPENCODE_CONFIG_CONTENT"])
+
+    def test_mcp_present_without_custom_endpoint(self):
+        """没配自定义端点时，这个变量本来根本不存在 —— 这条守住条件放宽。"""
+        env = get_adapter("opencode").build_env(
+            {}, api_base_url=None, api_key_env=None, mcp_servers=_mcp_servers("echo-probe")
+        )
+        assert "OPENCODE_CONFIG_CONTENT" in env
+        assert "echo-probe" in self._config(env)["mcp"]
+
+    def test_command_is_an_array_not_string_plus_args(self):
+        """opencode 要 ``command: [程序, ...参数]``，与 CC 族的 command + args 不是一回事。
+
+        照抄 CC 族那份 serializer 的话，这里会写成一个字符串 + 一个多余的 args 键，
+        opencode 直接起不来 server。
+        """
+        env = get_adapter("opencode").build_env(
+            {},
+            api_base_url=None,
+            api_key_env=None,
+            mcp_servers=_mcp_servers("echo-probe"),
+        )
+        entry = self._config(env)["mcp"]["echo-probe"]
+        assert entry == {
+            "type": "local",
+            "command": ["python3", "/tmp/echo.py"],
+            "enabled": True,
+        }
+
+    def test_environment_key_only_when_present(self):
+        adapter = get_adapter("opencode")
+        plain = adapter.build_env(
+            {}, api_base_url=None, api_key_env=None, mcp_servers=_mcp_servers("a")
+        )
+        assert "environment" not in self._config(plain)["mcp"]["a"]
+        with_env = adapter.build_env(
+            {},
+            api_base_url=None,
+            api_key_env=None,
+            mcp_servers=_mcp_servers("a", env={"K": "v"}),
+        )
+        assert self._config(with_env)["mcp"]["a"]["environment"] == {"K": "v"}
+
+    def test_mcp_and_provider_share_one_json(self):
+        """端点与 MCP 必须落在同一份 JSON 里 —— 设两次变量是覆盖，先设的那份会丢。"""
+        env = get_adapter("opencode").build_env(
+            {},
+            api_base_url="https://x.example/v1",
+            api_key_env="DEEPSEEK_API_KEY",
+            mcp_servers=_mcp_servers("echo-probe"),
+        )
+        config = self._config(env)
+        assert "echo-probe" in config["mcp"]
+        assert config["provider"]  # provider 段没被 mcp 段挤掉
+
+    def test_no_mcp_no_endpoint_leaves_env_untouched(self):
+        """两者都没有时不该凭空造这个变量 —— 设了它会覆盖用户自己的 opencode 配置。"""
+        env = get_adapter("opencode").build_env(
+            {}, api_base_url=None, api_key_env=None, mcp_servers=None
+        )
+        assert env == {}
+
+
+class TestQwenMcp:
+    """qwen 的 MCP 注入点与前几家都不同：只能写 cwd 下的**项目级配置文件**。
+
+    没有 argv 口子、没有 env 口子（``qwen --help`` 已核实），所以配置必须落盘，
+    再由调用方在进程结束后删掉 —— 落盘与删除这两件事分别由 adapter 和
+    claude_code_agent 负责，本类只测 adapter 那一半（另一半见 TestTransientMcpFiles）。
+    """
+
+    def _write(self, adapter, workspace, servers):
+        """跑一次注入，返回 (返回的路径列表, 解析后的 JSON)。"""
+        paths = adapter.mcp_workspace_files(workspace, servers)
+        if not paths:
+            return paths, None
+        return paths, json.loads(paths[0].read_text(encoding="utf-8"))
+
+    def test_settings_written_into_the_workspace_it_was_given(self, tmp_path):
+        """必须落在**本次 CC 的 cwd**里 —— qwen 的项目级配置是相对 cwd 解析的。"""
+        ws = tmp_path / "cc_0"
+        paths, data = self._write(get_adapter("qwen"), ws, _mcp_servers("echo-probe"))
+        assert paths == [ws / ".qwen" / "settings.json"]
+        assert "echo-probe" in data["mcpServers"]
+
+    def test_shape_matches_what_qwen_mcp_add_writes(self, tmp_path):
+        """形状与本机 ``qwen mcp add -s project`` 写出来的文件逐字对齐（已实测比对）。
+
+        自己编一套形状的风险是「看着对、qwen 不认」，而这种失败在无头模式下不会报错，
+        只会表现为工具不存在。
+        """
+        _, data = self._write(get_adapter("qwen"), tmp_path, _mcp_servers("echo-probe"))
+        assert data == {
+            "mcpServers": {
+                "echo-probe": {
+                    "command": "python3",
+                    "args": ["/tmp/echo.py"],
+                    "trust": True,
+                }
+            }
+        }
+
+    def test_trust_is_set_because_headless_has_nobody_to_approve(self, tmp_path):
+        """``trust`` 不是装饰：项目级 server 默认是 "Pending approval"（实测）。
+
+        AICU 跑无头模式，没有人在旁边点批准，少了这个键等于下发一个永远批不下来的
+        工具 —— 而且是静默的。这条单独拉出来测，是因为它最容易被当成可选字段删掉。
+        """
+        _, data = self._write(get_adapter("qwen"), tmp_path, _mcp_servers("a", "b"))
+        assert all(entry["trust"] is True for entry in data["mcpServers"].values())
+
+    def test_args_stay_a_separate_array(self, tmp_path):
+        """qwen 要 ``command`` 字符串 + ``args`` 数组，与 opencode 的数组合一形式相反。
+
+        两边共用一个序列化器就会有一边错，所以这条守着别把 qwen 也「顺手统一」掉。
+        """
+        _, data = self._write(get_adapter("qwen"), tmp_path, _mcp_servers("a"))
+        entry = data["mcpServers"]["a"]
+        assert entry["command"] == "python3"
+        assert entry["args"] == ["/tmp/echo.py"]
+
+    def test_env_passed_through_when_present(self, tmp_path):
+        _, data = self._write(
+            get_adapter("qwen"), tmp_path, _mcp_servers("a", env={"K": "v"})
+        )
+        assert data["mcpServers"]["a"]["env"] == {"K": "v"}
+
+    def test_no_declaration_writes_nothing_at_all(self, tmp_path):
+        """没配 mcp 时连 ``.qwen/`` 目录都不该建 —— 免得在产物目录里留空壳。"""
+        assert self._write(get_adapter("qwen"), tmp_path, None)[0] == []
+        assert self._write(get_adapter("qwen"), tmp_path, [])[0] == []
+        assert not (tmp_path / ".qwen").exists()
+
+    def test_targets_project_scope_not_the_users_global_config(self, tmp_path, monkeypatch):
+        """绝不能写用户级的 ``~/.qwen/settings.json``。
+
+        那是全局文件：并发节点会互相覆盖，还会污染用户自己的环境；而且它正是
+        ``_provision_qwen_config`` 放 ``modelProviders.aicu`` 的地方，混着写容易把
+        模型路由搞坏。这里把 HOME 指到 tmp 来证明实现没碰它。
+        """
+        fake_home = tmp_path / "home"
+        (fake_home / ".qwen").mkdir(parents=True)
+        global_file = fake_home / ".qwen" / "settings.json"
+        global_file.write_text('{"modelProviders": {"aicu": []}}', encoding="utf-8")
+        monkeypatch.setattr(cli_adapters.Path, "home", lambda: fake_home)
+
+        self._write(get_adapter("qwen"), tmp_path / "cc_0", _mcp_servers("echo-probe"))
+
+        assert global_file.read_text(encoding="utf-8") == '{"modelProviders": {"aicu": []}}'
 
 
 class TestPiAdapter:
@@ -769,6 +1072,22 @@ class TestKnownModels:
         for cli_id in ["claude", "codex", "kimi", "antigravity", "grok"]:
             assert by_id[cli_id]["models"], f"{cli_id} 模型清单为空"
 
+    def test_list_clis_exposes_supports_mcp(self):
+        """前端下拉靠这个字段标注「MCP 未接入」，缺了就只能在前端硬编码一份名单。
+
+        硬编码的代价是同一份事实维护两遍：将来接一个新 CLI，后端接了、前端没改，
+        用户看到的就是一句和实际不符的标注。
+        """
+        by_id = {item["id"]: item for item in cli_adapters.list_clis()}
+        assert all("supports_mcp" in item for item in cli_adapters.list_clis())
+        for cli_id in ("internal", "claude", "codebuddy", "codex", "opencode", "qwen"):
+            assert by_id[cli_id]["supports_mcp"] is True, cli_id
+        # antigravity 在这一列不是「CLI 没有 MCP」，而是「AICU 注入不了」：agy 只认全局
+        # 的 ~/.gemini/config/mcp_config.json，没有项目级作用域，写下去并发节点会互相
+        # 覆盖、还会污染用户自己的环境。其余几个是 CLI 自身没有 MCP。
+        for cli_id in ("kimi", "pi", "grok", "antigravity"):
+            assert by_id[cli_id]["supports_mcp"] is False, cli_id
+
     def test_hidden_clis_absent_from_list_but_adapters_kept(self):
         """摘出下拉的 CLI：列表里没有，但 adapter 必须保留。
 
@@ -967,6 +1286,115 @@ class TestProvision:
         data = json.loads((pi_dir / "models.json").read_text(encoding="utf-8"))
         assert data["providers"]["mine"]["baseUrl"] == "https://mine.example"
         assert data["providers"]["aicu"]["baseUrl"] == "https://x.example/v1"
+
+
+class TestMcpSupportFlag:
+    """``supports_mcp`` 的不变量：**声明了就必须真的注入得进去**。
+
+    这个标志同时驱动两件事：建 CC 时放行（声明了却不注入＝静默丢失，最坏的那种失败），
+    以及前端下拉标注「MCP 未接入」。所以它不能只是一个转给用户看的字符串开关 ——
+    必须有测试逼着它和实现对上，否则接下一个 CLI 时漏写一半也没人发现。
+    （``managed_slot`` 早就有这么一条守护，见 TestManagedSlot，这条是补上缺的那个。）
+    """
+
+    def test_declared_support_actually_injects(self, tmp_path):
+        def injected(adapter, tmp_path) -> bool:
+            servers = _mcp_servers("guard-probe")
+            base = dict(model=None, skip_permissions=False, enable_project_skills=False)
+            if adapter.mcp_flags(servers):
+                return True
+            if adapter.build_env(
+                {}, api_base_url=None, api_key_env=None, mcp_servers=servers
+            ) != adapter.build_env({}, api_base_url=None, api_key_env=None):
+                return True
+            if adapter.mcp_workspace_files(tmp_path, servers):
+                return True
+            return (
+                adapter.build_base_command(**base, mcp_servers=servers)
+                != adapter.build_base_command(**base)
+            )
+
+        for adapter in cli_adapters._ADAPTERS:
+            if adapter.supports_mcp:
+                assert injected(adapter, tmp_path), (
+                    f"{adapter.id} 声明了 supports_mcp=True，但四种注入口子都不产出任何东西"
+                    f" —— 角色配了 mcp 会静默失效"
+                )
+
+    def test_undeclared_support_never_injects(self, tmp_path):
+        """反过来也要守：没声明的 CLI 不得偷偷注入（否则前端标了「未接入」却在用）。"""
+        for adapter in cli_adapters._ADAPTERS:
+            if adapter.supports_mcp:
+                continue
+            assert adapter.mcp_flags(_mcp_servers("guard-probe")) == [], adapter.id
+            assert adapter.mcp_workspace_files(tmp_path, _mcp_servers("guard-probe")) == [], adapter.id
+
+    def test_hidden_clis_are_not_claimed_as_wired(self):
+        """下拉看不见的 CLI 若被算进「已接入」名单，报错文案会推荐一个用户选不到的项。"""
+        assert not set(cli_adapters.mcp_enabled_clis()) & set(cli_adapters._HIDDEN_CLI_IDS)
+
+    def test_wired_list_is_derived_from_adapters(self):
+        assert set(cli_adapters.mcp_enabled_clis()) == {
+            a.id for a in cli_adapters._ADAPTERS if a.supports_mcp
+        }
+
+
+class TestMcpWiringGuard:
+    """角色配了 mcp、落到 AICU 还没接线的 CLI 上时，必须在建 CC 这一步就报错。
+
+    静默忽略是最坏的失败形态：任务照跑、看起来正常，工具却从来不存在，用户以为配好了。
+    """
+
+    def _build(self, tmp_path, cli_id, servers):
+        return ClaudeCodeAgent(
+            workspace_path=str(tmp_path / "ws"),
+            cli_name=cli_id,
+            mcp_servers=servers,
+        )
+
+    @pytest.fixture(autouse=True)
+    def _pretend_installed(self, monkeypatch):
+        """本类只关心「声明了 mcp 但 CLI 没接线」这一条，别被本机装没装挡住。"""
+        for adapter_cls in (KimiAdapter, PiAdapter, OpenCodeAdapter):
+            monkeypatch.setattr(adapter_cls, "is_installed", lambda self: True)
+
+    def test_unwired_cli_raises(self, tmp_path):
+        with pytest.raises(RuntimeError) as excinfo:
+            self._build(tmp_path, "kimi", _mcp_servers("echo-probe"))
+        assert "kimi" in str(excinfo.value)
+
+    def test_message_says_not_wired_not_unsupported(self, tmp_path):
+        """文案不许说「该 CLI 不支持 MCP」。
+
+        agy 自己就有 MCP，只是它只认全局配置文件、AICU 注入不了。说成「不支持」是关于
+        CLI 的假陈述 —— 用户会跑去除错或换 CLI，而不是来问我们能不能接。
+        """
+        with pytest.raises(RuntimeError) as excinfo:
+            self._build(tmp_path, "kimi", _mcp_servers("echo-probe"))
+        message = str(excinfo.value)
+        assert "尚未接入" in message
+        assert "不支持 MCP" not in message
+
+    def test_message_recommends_a_cli_that_actually_works(self, tmp_path):
+        """推荐的替代品必须真的在已接线名单里，且从 adapter 派生而非写死。"""
+        with pytest.raises(RuntimeError) as excinfo:
+            self._build(tmp_path, "kimi", _mcp_servers("echo-probe"))
+        message = str(excinfo.value)
+        wired = cli_adapters.mcp_enabled_clis()
+        assert wired, "接入名单为空，文案会推荐一个空集合"
+        for cli_id in wired:
+            assert cli_id in message
+
+    def test_no_mcp_declaration_does_not_raise(self, tmp_path):
+        """没声明 mcp 时一切照旧 —— 这是既有节点的行为基线。"""
+        agent = self._build(tmp_path, "kimi", None)
+        assert agent.mcp_servers == []
+
+    def test_wired_cli_accepts_the_same_declaration(self, tmp_path):
+        """同一声明落到已接线的 CLI 上不该报错（两条分支的对照）。"""
+        agent = self._build(tmp_path, "opencode", _mcp_servers("echo-probe"))
+        assert agent.cli_name == "opencode"
+        assert [s.name for s in agent.mcp_servers] == ["echo-probe"]
 
 
 class TestManagedSlot:
@@ -1330,6 +1758,7 @@ class TestKimiEnvChannel:
             agent.model = "glm-5.2"
             agent.api_base_url = cli_adapters.protocol_endpoint("zhipu", "chat")
             agent.api_key_env = "KIMI_API_KEY"
+            agent.mcp_servers = []
             env = agent._build_process_env()
         finally:
             set_credential_store(None)

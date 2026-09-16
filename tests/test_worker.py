@@ -125,6 +125,76 @@ def _make_context(node: Optional[Node] = None,
     )
 
 
+
+# ============================================================================
+# AICU 构造期失败的回填（_fail_startup）
+# ============================================================================
+
+class TestStartupFailure:
+    """构造 AICU 失败必须落到节点上，而不是穿到 scheduler。
+
+    `_create_real_aicu` 在 `Worker.run()` 的 try 之外调用。改动前它一旦抛异常，
+    异常会直接上抛、被 scheduler 的 wrapper 收成一行服务端 stdout 日志，节点上只剩
+    「Failed / 日志空 / error 空」—— 而 MCP 预检连不上、skills_dir 不存在、角色 yaml
+    非法这些恰恰都要用户去改环境才能修，看不见原因就等于修不了。
+    """
+
+    def _explode(self, monkeypatch, exc: Exception):
+        def _boom(_ctx):
+            raise exc
+
+        monkeypatch.setattr(worker_module, "_create_real_aicu", _boom)
+
+    def test_returns_failed_instead_of_raising(self, monkeypatch):
+        runtime = MockRuntimeGateway()
+        ctx = _make_context(runtime=runtime)
+        self._explode(monkeypatch, RuntimeError("MCP server 'x' 预检失败"))
+
+        assert Worker(ctx).run(ctx) == NodeStatus.FAILED
+
+    def test_log_carries_the_reason(self, monkeypatch):
+        """日志里必须有原始异常文本 —— 这是用户唯一能看到的诊断信息。"""
+        runtime = MockRuntimeGateway()
+        ctx = _make_context(runtime=runtime)
+        self._explode(
+            monkeypatch,
+            RuntimeError("MCP server 'echo-probe' 启动后立刻退出（命令: /nope）"),
+        )
+
+        assert Worker(ctx).run(ctx) == NodeStatus.FAILED
+
+        node_id, status, updates = runtime.status_updates[-1]
+        assert node_id == ctx.node.id
+        assert status == NodeStatus.FAILED
+        assert updates["error"] is not None
+        assert len(updates["log"]) == 1
+        entry = updates["log"][0]
+        assert entry.level == LogLevel.ERROR
+        assert "Worker startup failed" in entry.message
+        assert "启动后立刻退出" in entry.message
+
+    def test_exception_supplied_error_is_kept(self, monkeypatch):
+        """异常自带 ErrorObject 时沿用，与执行期失败的兜底形状保持一致。"""
+        runtime = MockRuntimeGateway()
+        ctx = _make_context(runtime=runtime)
+        exc = RuntimeError("boom")
+        exc.error = ErrorObject.create_worker_execution_error()
+        self._explode(monkeypatch, exc)
+
+        assert Worker(ctx).run(ctx) == NodeStatus.FAILED
+        assert runtime.status_updates[-1][2]["error"] is exc.error
+
+    def test_backfill_failure_still_returns_failed(self, monkeypatch):
+        """回填本身抛异常也不能再往上冒，否则又退回「日志为空、原因不可见」。"""
+        class _BrokenGateway(MockRuntimeGateway):
+            def update_node_status(self, *args, **kwargs):
+                raise RuntimeError("runtime 已断开")
+
+        ctx = _make_context(runtime=_BrokenGateway())
+        self._explode(monkeypatch, RuntimeError("原始构造失败"))
+
+        assert Worker(ctx).run(ctx) == NodeStatus.FAILED
+
 # ============================================================================
 # Stream output formatting
 # ============================================================================

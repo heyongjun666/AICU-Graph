@@ -120,6 +120,8 @@ export const en: Dict = {
   'settings.cli': 'CLI',
   'settings.autoDetect': 'Auto-detect',
   'settings.notInstalled': ' (not installed)',
+  // 措辞刻意是「未接入」而不是「不支持」：这些 CLI 自己都有 MCP，只是 AICU 还没接线。
+  'settings.mcpNotWired': ' (MCP not wired)',
   'settings.model': 'Model',
   'settings.selectOrTypeModel': 'Select or type a model',
   'settings.apiBaseUrl': 'API base URL',

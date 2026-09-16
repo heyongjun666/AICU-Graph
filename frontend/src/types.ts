@@ -168,6 +168,12 @@ export interface CliInfo {
   priority: number;
   /** 该 CLI 已知支持的模型名清单（来自 cli_models.json；未配置的 CLI 为空数组）。 */
   models: string[];
+  /**
+   * AICU 是否已为这个 CLI 接入 MCP 下发。**不代表该 CLI 自身支不支持 MCP** ——
+   * codex / qwen 这些自己都有，只是注入方式不同、AICU 还没接线。下拉据此标注
+   * 「MCP 未接入」，所以措辞不能写成「不支持」。
+   */
+  supports_mcp: boolean;
 }
 
 /** 公开 provider 预置参数，不包含 API Key。 */

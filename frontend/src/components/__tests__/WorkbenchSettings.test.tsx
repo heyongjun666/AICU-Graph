@@ -593,9 +593,9 @@ describe('WorkbenchSettings role pools', () => {
 describe('WorkbenchSettings 模型候选按 CLI 过滤', () => {
   const CLIS: CliInfo[] = [
     { id: 'claude', display_name: 'Claude Code', installed: true, priority: 0,
-      models: ['claude-opus-5', 'grok-4.6'] },
+      models: ['claude-opus-5', 'grok-4.6'], supports_mcp: true },
     { id: 'codex', display_name: 'OpenAI Codex CLI', installed: true, priority: 1,
-      models: ['gpt-5.6', 'grok-4.6'] },
+      models: ['gpt-5.6', 'grok-4.6'], supports_mcp: true },
   ];
 
   // gpt-5.6-mini 刻意不在任何 CLI 的 models 里，只能从预置并进来 —— 它的出现与否
@@ -676,14 +676,79 @@ describe('WorkbenchSettings 模型候选按 CLI 过滤', () => {
   });
 });
 
+describe('WorkbenchSettings CLI 下拉的 MCP 标注', () => {
+  // 标注必须从后端下发的 supports_mcp 派生。若改回在前端硬编码名单，将来后端接一个
+  // 新 CLI 就会出现「实际已接入、界面却说未接入」的假象 —— 这条测试就是拦这个的。
+  const CLIS: CliInfo[] = [
+    { id: 'internal', display_name: 'Internal', installed: true, priority: 0,
+      models: ['DeepSeek-V4-Flash'], supports_mcp: true },
+    { id: 'codex', display_name: 'OpenAI Codex CLI', installed: true, priority: 1,
+      models: ['gpt-5.6'], supports_mcp: true },
+    // 未接线 + 未安装：两个标注都要出，且互不覆盖
+    { id: 'kimi', display_name: 'Kimi CLI', installed: false, priority: 2,
+      models: [], supports_mcp: false },
+    // 未接线但已装：只该出 MCP 这一条
+    { id: 'pi', display_name: 'Pi CLI', installed: true, priority: 3,
+      models: [], supports_mcp: false },
+  ];
+
+  const renderSettings = async () => {
+    vi.mocked(api.getGlobalConfig).mockResolvedValue({
+      config: {
+        workspace_root: null, cli_name: null, model: null,
+        api_base_url: null, api_key_env: null,
+      },
+      clis: CLIS,
+      provider_presets: [],
+      default_cli: 'internal',
+    });
+    render(<WorkbenchSettings open onClose={() => {}} onSaved={() => {}} />);
+    await waitFor(() => expect(api.getGlobalConfig).toHaveBeenCalled());
+  };
+
+  const optionLabels = () =>
+    Object.fromEntries(
+      Array.from(document.querySelectorAll<HTMLOptionElement>('#cli-select option'))
+        .filter((option) => option.value)
+        .map((option) => [option.value, option.textContent ?? '']),
+    );
+
+  it('已接入 MCP 的 CLI 不带任何标注', async () => {
+    await renderSettings();
+    const labels = optionLabels();
+    expect(labels.internal).toBe('Internal');
+    expect(labels.codex).toBe('OpenAI Codex CLI');
+  });
+
+  it('未接入 MCP 的 CLI 标注「MCP 未接入」', async () => {
+    await renderSettings();
+    const labels = optionLabels();
+    expect(labels.pi).toBe('Pi CLI（MCP 未接入）');
+  });
+
+  it('未安装与未接入两个标注同时成立且互不覆盖', async () => {
+    await renderSettings();
+    expect(optionLabels().kimi).toBe('Kimi CLI（未安装）（MCP 未接入）');
+  });
+
+  it('标注措辞是「未接入」而不是「不支持」', async () => {
+    // codex / qwen / agy 这些 CLI 自己都有 MCP，只是 AICU 还没接线。写「不支持」
+    // 是关于 CLI 的假陈述，用户会跑去换 CLI 而不是来问我们能不能接。
+    await renderSettings();
+    const joined = Object.values(optionLabels()).join('');
+    expect(joined).toContain('未接入');
+    expect(joined).not.toContain('不支持');
+  });
+});
+
 describe('WorkbenchSettings Provider 下拉与模型形态', () => {
   const CLIS: CliInfo[] = [
     { id: 'claude', display_name: 'Claude Code', installed: true, priority: 0,
-      models: ['claude-opus-5'] },
+      models: ['claude-opus-5'], supports_mcp: true },
     // deepseek-v4-pro 是「同协议可达但不属于 openai 预置」的模型：预置模式下切到它，
     // 生效地址应当跟着模型厂商走（真实规则在后端，见 TestEffectiveBaseUrl）。
     { id: 'codex', display_name: 'OpenAI Codex CLI', installed: true, priority: 1,
-      models: ['gpt-5.6', 'deepseek-v4-pro'] },
+      models: ['gpt-5.6', 'deepseek-v4-pro'], supports_mcp: true },
   ];
   const PRESETS: ProviderPreset[] = [
     { id: 'openai', display_name: 'OpenAI 官方 API', cli_name: 'codex', model: 'gpt-5.6',

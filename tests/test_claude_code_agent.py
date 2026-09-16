@@ -17,7 +17,123 @@ from claude_code_agent import (
     is_model_image_input_error,
     ClaudeCodeAgent,
 )
+from runtime.mcp_client import McpServer
 from aicu import AICU
+import cli_adapters
+
+
+def _mcp_servers(*names) -> list:
+    return [
+        McpServer(name=name, command="python3", args=["/tmp/echo.py"]) for name in names
+    ]
+
+
+class _FakeProc:
+    """够 chat() 走完正常路径的假进程：记录 argv/cwd，communicate 返回合法 JSON。"""
+
+    def __init__(self, argv, **kwargs):
+        self.argv = argv
+        self.cwd = kwargs.get("cwd")
+        self.pid = 4242
+        self.returncode = 0
+
+    def communicate(self, input=None, timeout=None):
+        return ('{"result": "ok", "session_id": "s1"}', "")
+
+
+# ---- 随 CLI 进程起落的临时 MCP 配置文件 ----
+#
+# qwen 只能从 cwd 下的项目级文件读 MCP（见 QwenAdapter.mcp_workspace_files），
+# 落盘与删除分属两处（adapter 写、agent 删），所以只测 adapter 那一半证明不了文件
+# 会被清掉。这里从 chat() 这一层验证生命周期。
+#
+# 为什么删不干净是**缺陷**而不只是「脏」：产物收集按 rglob 扫 workspace，而 .qwen
+# 不在 NONCODE_DIRS 里、.json 也不在 NONCODE_EXTENSIONS 里，于是这个文件会被当成
+# CC 写的代码文件复制进最优方案目录、并出现在 _INDEX.md 的文件清单里。
+
+
+class TestTransientMcpFiles:
+    def _agent(self, tmp_path, servers) -> ClaudeCodeAgent:
+        return ClaudeCodeAgent(
+            workspace_path=str(tmp_path / "ws"),
+            cli_name="qwen",
+            mcp_servers=servers,
+        )
+
+    @pytest.fixture(autouse=True)
+    def _no_credentials(self, monkeypatch):
+        """本类只关心文件生命周期，别被凭据解析挡在 chat() 门外。"""
+        monkeypatch.setattr(ClaudeCodeAgent, "_build_process_env", lambda self: {})
+
+    @pytest.fixture(autouse=True)
+    def _isolated_home(self, monkeypatch, tmp_path):
+        """把 ``Path.home()`` 指到临时目录 —— 否则本类会改用户真实的 qwen 配置。
+
+        qwen 是托管槽 CLI：``ClaudeCodeAgent.__init__`` 会调 ``adapter.provision()``
+        （claude_code_agent.py），而本类建的 agent 没有自定义端点，于是走到
+        ``_release_qwen_config()`` —— 它会去 ``~/.qwen/settings.json`` 里删掉
+        ``modelProviders.aicu`` / ``providerProtocol.aicu``。
+
+        这不是假想：本类最初没加这道隔离，跑一次测试就把开发机真实的 qwen 托管槽
+        条目清掉了（用户自己的 ``hooks`` 等其它键不受影响，但 AICU 上次写的模型
+        路由没了，且用户无从察觉）。任何构造托管槽 CLI agent 的测试都要隔着 HOME 跑 ——
+        ``cli_adapters.Path`` 就是 ``pathlib.Path`` 本身，所以这一 patch 对整个进程
+        生效，测试结束由 monkeypatch 撤销。
+        """
+        monkeypatch.setattr(cli_adapters.Path, "home", lambda: tmp_path / "home")
+
+    def test_config_exists_while_the_cli_runs_then_is_gone(self, tmp_path, monkeypatch):
+        """文件必须在 Popen 之前就位（CLI 启动时读），且 chat() 返回后不留在盘上。"""
+        seen = {}
+
+        def fake_popen(argv, **kwargs):
+            config = tmp_path / "ws" / ".qwen" / "settings.json"
+            seen["during"] = config.exists()
+            return _FakeProc(argv, **kwargs)
+
+        monkeypatch.setattr("claude_code_agent.subprocess.Popen", fake_popen)
+        agent = self._agent(tmp_path, _mcp_servers("echo-probe"))
+        agent.chat("hi")
+
+        assert seen["during"], "Popen 时配置还没写 —— CLI 根本读不到"
+        assert not (tmp_path / "ws" / ".qwen" / "settings.json").exists()
+        assert not (tmp_path / "ws" / ".qwen").exists(), "空目录也不该留下"
+
+    def test_cleaned_up_when_the_process_itself_fails_to_start(self, tmp_path, monkeypatch):
+        """Popen 抛异常时也要清 —— 这条路径最容易漏，而漏了同样是交付物污染。"""
+        def fake_popen(argv, **kwargs):
+            raise FileNotFoundError("qwen 没装")
+
+        monkeypatch.setattr("claude_code_agent.subprocess.Popen", fake_popen)
+        agent = self._agent(tmp_path, _mcp_servers("echo-probe"))
+        with pytest.raises(FileNotFoundError):
+            agent.chat("hi")
+
+        assert not (tmp_path / "ws" / ".qwen").exists()
+
+    def test_no_mcp_declaration_never_creates_the_dir(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(
+            "claude_code_agent.subprocess.Popen",
+            lambda argv, **kwargs: _FakeProc(argv, **kwargs),
+        )
+        self._agent(tmp_path, None).chat("hi")
+
+        assert not (tmp_path / "ws" / ".qwen").exists()
+
+    def test_keeps_a_pre_existing_dir_that_is_not_ours(self, tmp_path, monkeypatch):
+        """目录里还有别的东西时只删自己那个文件，不许把整个目录端掉。"""
+        monkeypatch.setattr(
+            "claude_code_agent.subprocess.Popen",
+            lambda argv, **kwargs: _FakeProc(argv, **kwargs),
+        )
+        qwen_dir = tmp_path / "ws" / ".qwen"
+        qwen_dir.mkdir(parents=True)
+        (qwen_dir / "user-notes.txt").write_text("别删我", encoding="utf-8")
+
+        self._agent(tmp_path, _mcp_servers("echo-probe")).chat("hi")
+
+        assert (qwen_dir / "user-notes.txt").read_text(encoding="utf-8") == "别删我"
+        assert not (qwen_dir / "settings.json").exists()
 
 
 # ---- is_model_image_input_error ----

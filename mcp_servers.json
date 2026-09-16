@@ -1,0 +1,23 @@
+{
+  "_comment": [
+    "AICU 的 MCP server 注册表。角色 yaml 里只写 server 名字（mcp: [echo-probe]），",
+    "command/args 集中在这里 —— 与 skills/ 目录同一思路（角色只引用名字，实现在别处）。",
+    "这样做的原因：MCP server 定义本质是「一段可执行命令 + 参数」，而角色 yaml 是可以在",
+    "设置页上编辑的，内联进去等于在页面上放一个「编辑一段将被执行的命令」的输入框。",
+    "servers 下的每个条目：",
+    "  command  必填，可执行文件（走 PATH 查找）",
+    "  args     可选，参数列表；其中相对路径按仓库根解析（与 skills_dir 同规则）",
+    "  env      可选，附加环境变量（在继承的进程环境之上叠加）",
+    "  description 可选，给人和前端看的说明",
+    "  required 可选，默认 true。true = 预检连不上就让节点启动失败；",
+    "           false = 连不上只记一条告警，照常启动（工具本来就是可选的场景）"
+  ],
+  "servers": {
+    "echo-probe": {
+      "description": "AICU 自带的 MCP 通道探针：一个回显工具，用于验证 MCP 链路是否打通。",
+      "command": "python3",
+      "args": ["tests/mcp_echo_server.py"],
+      "required": true
+    }
+  }
+}

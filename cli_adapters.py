@@ -547,7 +547,10 @@ def _release_pi_config() -> None:
 
 
 def _opencode_config_content(
-    api_base_url: str, models: list, api_key_env: Optional[str]
+    api_base_url: Optional[str],
+    models: list,
+    api_key_env: Optional[str],
+    servers: Optional[list] = None,
 ) -> str:
     """opencode 的 ``OPENCODE_CONFIG_CONTENT`` 取值 —— 内联配置，不落任何文件。
 
@@ -561,24 +564,41 @@ def _opencode_config_content(
 
     ``models`` 必须把选择器里可能出现的模型都列上，否则 opencode 找不到该 id。
     这里直接取 ``KNOWN_MODELS["all"]`` —— 与下拉候选同源，改一处两边同步。
+
+    **provider 与 mcp 必须拼在同一个 JSON 里**，因为两者共用同一个环境变量：分两次
+    设置只会让后写的把先写的整个盖掉。这也是 MCP 的注入点必须落在这个函数里、
+    而不是另开一个 mcp 专用 env 的原因。
+
+    ``api_base_url`` 为空表示本次不改道（只可能出现在「有 mcp、无自定义端点」时）：
+    那时不加 ``provider`` 段，只下发 ``mcp``。
     """
-    options: dict = {"baseURL": api_base_url}
-    if api_key_env:
-        options["apiKey"] = "{env:" + api_key_env + "}"
-    return json.dumps(
-        {
-            "$schema": "https://opencode.ai/config.json",
-            "provider": {
-                _CUSTOM_PROVIDER_ID: {
-                    "npm": "@ai-sdk/openai-compatible",
-                    "name": "AICU",
-                    "options": options,
-                    "models": {model: {"name": model} for model in models},
-                }
-            },
-        },
-        ensure_ascii=False,
-    )
+    config: dict = {"$schema": "https://opencode.ai/config.json"}
+    if api_base_url:
+        options: dict = {"baseURL": api_base_url}
+        if api_key_env:
+            options["apiKey"] = "{env:" + api_key_env + "}"
+        config["provider"] = {
+            _CUSTOM_PROVIDER_ID: {
+                "npm": "@ai-sdk/openai-compatible",
+                "name": "AICU",
+                "options": options,
+                "models": {model: {"name": model} for model in models},
+            }
+        }
+    if servers:
+        # opencode 的 server 条目：`command` 是**数组**（程序 + 参数一起放），
+        # 与 claude 系的 `command` 字符串 + `args` 数组不是一回事，所以不能复用
+        # _cc_mcp_json。`type` 与 `enabled` 都是必填/推荐项。
+        config["mcp"] = {
+            server.name: {
+                "type": "local",
+                "command": [server.command, *server.args],
+                "enabled": True,
+                **({"environment": dict(server.env)} if server.env else {}),
+            }
+            for server in servers
+        }
+    return json.dumps(config, ensure_ascii=False)
 
 
 def _result_events(raw: str) -> list:
@@ -779,7 +799,12 @@ class CliAdapter:
         return model
 
     def build_base_command(
-        self, *, model: Optional[str], skip_permissions: bool, enable_project_skills: bool
+        self,
+        *,
+        model: Optional[str],
+        skip_permissions: bool,
+        enable_project_skills: bool,
+        mcp_servers: Optional[list] = None,
     ) -> list:
         raise NotImplementedError
 
@@ -796,6 +821,50 @@ class CliAdapter:
         """返回 (追加到 cmd 的 prompt 参数, 是否仍需通过 stdin 传 prompt)。默认位置参数。"""
         return ([prompt], False)
 
+    # ---- MCP ----
+
+    # 本 CLI 能不能接收 AICU 下发的 MCP server 配置。
+    #   False（默认）—— **AICU 还没为这个 CLI 接入 MCP**。注意这不等于「该 CLI 不支持
+    #     MCP」：agy 自己就有 MCP，只是它只认全局配置文件、注入不了、尚未接线。
+    #     两者混为一谈会让用户在界面和报错里读到一句关于 CLI 的假话，然后跑去换 CLI。
+    #     角色如果声明了 mcp 而落到这类 CLI 上，AICU 会直接报错而不是静默忽略 ——
+    #     skill 就吃过这个亏：软链对所有 CLI 照建，非 claude 系 CLI 上那是死文件，
+    #     建了但永远不生效。
+    supports_mcp = False
+
+    def mcp_flags(self, mcp_servers: list) -> list:
+        """argv 形式的 MCP 注入，追加在命令末尾（默认不注入，返回空）。
+
+        传的是**已解析好的 McpServer 列表**而不是配置串：每个节点各拼一份内联传给
+        自己的 CLI 子进程，不落盘、不入库，天然按节点隔离，也不会覆盖用户自己的
+        MCP 配置。序列化由各 adapter 自己做 —— 三家的线上形态根本不一样
+        （claude 系是 ``--mcp-config=<json>``，opencode 走环境变量，codex 是重复的 ``-c``）。
+
+        位置有讲究：这里返回的参数会被追加到 ``build_base_command`` + ``print_flags``
+        之后。claude 系全是 flag，放末尾无所谓；codex 的 ``-c`` 是全局 flag、必须排在
+        ``exec`` 子命令**之前**，所以它不用这个钩子，改在 ``build_base_command`` 里注入。
+        """
+        return []
+
+    def mcp_workspace_files(self, workspace, mcp_servers: Optional[list]) -> list:
+        """把 MCP 配置写成「工作目录下的项目级文件」，返回落盘的文件路径（默认不落盘）。
+
+        前两个钩子（``mcp_flags`` 走 argv、``build_env`` 走环境变量）都能做到不碰盘，
+        但有的 CLI 两样都不吃：qwen 只认 ``<cwd>/.qwen/settings.json`` 这个项目级配置
+        文件，没有任何 argv/env 口子。这条路避不开落盘。
+
+        落盘的代价要用生命周期补回来：**返回的路径由调用方在 CLI 进程结束后删除**。
+        留着会被 AICU 的产物收集当成交付物 —— ``.qwen`` 不在 ``NONCODE_DIRS`` 里，
+        ``.json`` 也不在 ``NONCODE_EXTENSIONS`` 里，会被当成 CC 写的代码文件复制进
+        最优方案目录、并出现在 ``_INDEX.md`` 的文件清单里。文件名与内容是 adapter 的
+        事，何时写、何时删是调用方的事（见 claude_code_agent.py 的 ``_drop_transient``）。
+
+        之所以能按节点隔离：每个 CC 有独立 workspace（``workspace/cc_<i>``），而 CLI
+        子进程的 cwd 就是它，所以项目级文件天然一 CC 一份，不会互相覆盖，也不碰用户
+        自己的全局配置。
+        """
+        return []
+
     # ---- 环境变量 ----
 
     def build_env(
@@ -805,12 +874,18 @@ class CliAdapter:
         api_base_url: Optional[str],
         api_key_env: Optional[str],
         model: Optional[str] = None,
+        mcp_servers: Optional[list] = None,
     ) -> dict:
         """给子进程的环境变量（默认原样传下去）。
 
         ``model`` 是本次运行的模型名：绝大多数 CLI 用命令行参数拿模型，不需要它；
         但 kimi 只有一个环境变量通道（``KIMI_MODEL_NAME``），模型名必须和环境一起给
         （见 KimiAdapter.build_env）。
+
+        ``mcp_servers`` 是本次运行要下发的 MCP server（``list[McpServer]``，已解析）。
+        只有走环境变量传配置的 CLI 需要它 —— 目前是 opencode，它把 provider 与 mcp
+        放在**同一个** ``OPENCODE_CONFIG_CONTENT`` JSON 里，所以两者必须在同一处拼
+        （见 OpenCodeAdapter.build_env）。
         """
         return base_env
 
@@ -855,6 +930,49 @@ class CliAdapter:
         return None
 
 
+def _cc_mcp_json(servers: list) -> str:
+    """Claude Code 协议族的 ``mcpServers`` 配置串。
+
+    形状是 ``{"mcpServers": {<name>: {command, args, env?}}}`` —— ``command`` 是
+    字符串、参数单独放 ``args``。注意这**不是**通用形状：opencode 要的是
+    ``command: [程序, ...参数]`` 的数组形式，所以那边另写一份（见
+    ``_opencode_config_content``）。共用一个序列化器只会让两边都错。
+    """
+    entries: dict = {}
+    for server in servers:
+        entry: dict = {"command": server.command, "args": list(server.args)}
+        if server.env:
+            entry["env"] = dict(server.env)
+        entries[server.name] = entry
+    return json.dumps({"mcpServers": entries}, ensure_ascii=False)
+
+
+def _mcp_servers_settings_json(servers: list) -> str:
+    """qwen 项目级 ``.qwen/settings.json`` 里的 ``mcpServers`` 段。
+
+    与 ``_cc_mcp_json`` 只差一个 ``trust``：这里同样是 ``command`` 字符串 +
+    ``args`` 数组（**不是** opencode 那种数组合一形式），但必须带 ``trust: true``。
+
+    ``trust`` 不是可选项。qwen 把项目级 server 默认置为 "Pending approval" 状态
+    （``qwen mcp list`` 实测），而 AICU 跑的是无头模式 —— 没有人在旁边点批准，
+    不写 trust 等于下发了一个永远批不下来的工具。``trust`` 的语义是「在受信任的
+    工作区里跳过该 server 的工具调用确认」，与 ``--yolo`` 是两回事。
+
+    形状按 qwen 自己 ``mcp add -s project`` 写出来的文件对齐（已实测比对）。
+    """
+    entries: dict = {}
+    for server in servers:
+        entry: dict = {
+            "command": server.command,
+            "args": list(server.args),
+            "trust": True,
+        }
+        if server.env:
+            entry["env"] = dict(server.env)
+        entries[server.name] = entry
+    return json.dumps({"mcpServers": entries}, ensure_ascii=False, indent=2) + "\n"
+
+
 class ClaudeCodeAdapter(CliAdapter):
     """Claude Code CLI 协议适配器。"""
 
@@ -880,7 +998,8 @@ class ClaudeCodeAdapter(CliAdapter):
         return model
 
     def build_base_command(
-        self, *, model: Optional[str], skip_permissions: bool, enable_project_skills: bool
+        self, *, model: Optional[str], skip_permissions: bool, enable_project_skills: bool,
+        mcp_servers: Optional[list] = None,
     ) -> list:
         cmd = [self.command]
         if model:
@@ -897,8 +1016,17 @@ class ClaudeCodeAdapter(CliAdapter):
         if skip_permissions:
             # root 用户下 --dangerously-skip-permissions 被禁止，
             # 用 --allowedTools 只开放必要的文件操作工具
+            allowed_tools = ["Read", "Write", "Edit", "Bash"]
+            # 声明了 MCP server 时必须把它的工具一并写进白名单。--allowedTools 是
+            # 白名单而非「先问再放行」：dontAsk 模式下不在名单里的工具一律直接拒绝。
+            # 实测漏掉这一步的表现是 permission_denials 里出现 mcp__<server>__<tool>、
+            # agent 拿不到结果后绕路或报一个与 MCP 毫无关系的错 —— 正是预检要消除的那类
+            # 失败（见 runtime/mcp_client.py 的模块说明）。
+            # `mcp__<server>` 是 server 级通配，一条即放行该 server 的全部工具，不必逐工具枚举。
+            # 名字取自同一个 server 列表（与 mcp_flags 下发的配置同源），不可能对不上。
+            allowed_tools.extend(f"mcp__{server.name}" for server in (mcp_servers or []))
             cmd.extend([
-                "--allowedTools", "Read Write Edit Bash",
+                "--allowedTools", " ".join(allowed_tools),
                 "--permission-mode", "dontAsk",
             ])
         if enable_project_skills:
@@ -921,6 +1049,21 @@ class ClaudeCodeAdapter(CliAdapter):
         # 通过 stdin 传 prompt，避免深层递归上下文快照超过 ARG_MAX
         return ([], True)
 
+    supports_mcp = True
+
+    def mcp_flags(self, mcp_servers: list) -> list:
+        if not mcp_servers:
+            return []
+        # 必须用 `--flag=<json>` 的等号形式：`--mcp-config` 声明为可变参数
+        # (`<configs...>`)，用空格形式会把后面追加的 `--resume` / prompt 一起吞掉，
+        # 当成配置文件路径去读（实测报 "MCP config file not found: .../mcp"）。
+        # 等号形式只取一个值，不消费后续 argv，因此放在命令的哪个位置都安全。
+        #
+        # --strict-mcp-config：只认这份内联配置，忽略用户自己的 MCP 设置。节点声明的
+        # mcp 列表就是它该看到的那一份，结果可预期 —— 与 skill 用 --setting-sources
+        # project 把用户级 skill 挡在外面是同一个取舍。
+        return [f"--mcp-config={_cc_mcp_json(mcp_servers)}", "--strict-mcp-config"]
+
     def build_env(
         self,
         base_env: dict,
@@ -928,6 +1071,7 @@ class ClaudeCodeAdapter(CliAdapter):
         api_base_url: Optional[str],
         api_key_env: Optional[str],
         model: Optional[str] = None,
+        mcp_servers: Optional[list] = None,
     ) -> dict:
         env = dict(base_env)
         if api_base_url:
@@ -1011,6 +1155,7 @@ class CodeBuddyAdapter(ClaudeCodeAdapter):
         api_base_url: Optional[str],
         api_key_env: Optional[str],
         model: Optional[str] = None,
+        mcp_servers: Optional[list] = None,
     ) -> dict:
         env = dict(base_env)
         # 官方文档未列出 base URL env，但二进制里读 CODEBUDDY_BASE_URL 且原样使用
@@ -1050,6 +1195,31 @@ def _codex_item_text(event: dict) -> str:
     return ""
 
 
+def _codex_mcp_args(servers: Optional[list]) -> list:
+    """把 MCP server 转成 codex 的重复 ``-c key=value`` 参数。
+
+    codex 没有 ``--mcp-config`` 这类「整份配置」的 flag，但有一个通用的配置覆盖通道
+    ``-c <key=value>``，键路径用点号（与 ``~/.codex/config.toml`` 的节名一一对应）。
+    这样注入的是**本次进程的命令行参数**，不写 config.toml、不碰用户自己的 MCP 配置、
+    并发节点之间也不会互相覆盖 —— 与 claude 系内联 ``--mcp-config`` 是同一个取舍。
+
+    值统一用 ``json.dumps`` 序列化：TOML 的字符串与数组字面量和 JSON 恰好同形
+    （``"x"`` / ``["a","b"]``），而手写引号极易在含空格或引号的路径上翻车。
+    本机实测 ``-c 'mcp_servers.x.args=["-c","pass"]'`` 被正确解析成两个 argv。
+    """
+    if not servers:
+        return []
+    args: list = []
+    for server in servers:
+        prefix = f"mcp_servers.{server.name}"
+        args.extend(["-c", f"{prefix}.command={json.dumps(server.command)}"])
+        if server.args:
+            args.extend(["-c", f"{prefix}.args={json.dumps(list(server.args))}"])
+        for key, value in server.env.items():
+            args.extend(["-c", f"{prefix}.env.{key}={json.dumps(value)}"])
+    return args
+
+
 class CodexAdapter(CliAdapter):
     """OpenAI Codex CLI（``codex exec``）。
 
@@ -1078,10 +1248,17 @@ class CodexAdapter(CliAdapter):
     # 不含 unrelated-tool 才是 OpenAI Codex。
     install_probe = (["--help"], ["exec"], ["unrelated-tool"])
 
+    supports_mcp = True
+
     def build_base_command(
-        self, *, model: Optional[str], skip_permissions: bool, enable_project_skills: bool
+        self, *, model: Optional[str], skip_permissions: bool, enable_project_skills: bool,
+        mcp_servers: Optional[list] = None,
     ) -> list:
-        cmd = [self.command, "exec"]
+        # -c 是**全局** flag，必须排在 exec 子命令之前（`codex -c ... exec ...`）。
+        # 这正是 codex 不用 mcp_flags 钩子的原因：那个钩子产出的是追加在命令末尾的
+        # 参数，会落到 exec 之后 —— 位置不对，codex 不会认。
+        cmd = [self.command, *_codex_mcp_args(mcp_servers)]
+        cmd.append("exec")
         if model:
             cmd.extend(["--model", model])
         if skip_permissions:
@@ -1116,6 +1293,7 @@ class CodexAdapter(CliAdapter):
         api_base_url: Optional[str],
         api_key_env: Optional[str],
         model: Optional[str] = None,
+        mcp_servers: Optional[list] = None,
     ) -> dict:
         env = dict(base_env)
         if api_base_url:
@@ -1288,7 +1466,8 @@ class KimiAdapter(CliAdapter):
         return "KIMI_MODEL_API_KEY"
 
     def build_base_command(
-        self, *, model: Optional[str], skip_permissions: bool, enable_project_skills: bool
+        self, *, model: Optional[str], skip_permissions: bool, enable_project_skills: bool,
+        mcp_servers: Optional[list] = None,
     ) -> list:
         cmd = [self.command]
         if model:
@@ -1319,6 +1498,7 @@ class KimiAdapter(CliAdapter):
         api_base_url: Optional[str],
         api_key_env: Optional[str],
         model: Optional[str] = None,
+        mcp_servers: Optional[list] = None,
     ) -> dict:
         """开 ``KIMI_MODEL_*`` 环境通道；没有确切端点时什么都不做。
 
@@ -1413,8 +1593,35 @@ class QwenAdapter(CliAdapter):
     command = "qwen"
     api_key_env = "BAILIAN_API_KEY"
 
+    supports_mcp = True
+
+    def mcp_workspace_files(self, workspace, mcp_servers: Optional[list]) -> list:
+        """写 ``<workspace>/.qwen/settings.json``（qwen 的**项目级**配置）。
+
+        为什么是文件而不是 argv/env：qwen 没有 ``--mcp-config`` 这类 flag，也没有
+        ``OPENCODE_CONFIG_CONTENT`` 那种收整份配置的环境变量，``-p`` 那一堆选项里
+        没有任何 MCP 口子（``qwen --help`` 已核实）。它唯一认的注入点是项目级配置
+        文件 —— ``qwen mcp add -s project`` 写的就是这个路径。
+
+        **不能写用户级的 ``~/.qwen/settings.json``**：那是全局配置，并发节点会互相
+        覆盖，还会污染用户自己的环境；而且它正是 ``_provision_qwen_config`` 放
+        ``modelProviders.aicu`` 的地方，混在一起写容易把模型路由搞坏。项目级文件按
+        cwd 生效，cwd 就是本 CC 独占的 workspace，天然隔离。
+
+        项目级文件与用户级文件**不冲突、是叠加的**：实测在同一目录下，用户级的 server
+        与项目级的 server 会同时出现在 ``qwen mcp list`` 里，用户自己配的 server 不会
+        被这里写的覆盖掉。
+        """
+        if not mcp_servers:
+            return []
+        path = Path(workspace) / ".qwen" / "settings.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(_mcp_servers_settings_json(mcp_servers), encoding="utf-8")
+        return [path]
+
     def build_base_command(
-        self, *, model: Optional[str], skip_permissions: bool, enable_project_skills: bool
+        self, *, model: Optional[str], skip_permissions: bool, enable_project_skills: bool,
+        mcp_servers: Optional[list] = None,
     ) -> list:
         cmd = [self.command]
         if model:
@@ -1460,6 +1667,7 @@ class QwenAdapter(CliAdapter):
         api_base_url: Optional[str],
         api_key_env: Optional[str],
         model: Optional[str] = None,
+        mcp_servers: Optional[list] = None,
     ) -> dict:
         env = dict(base_env)
         # qwen 的 base URL 由 settings.json 的 modelProviders 决定，CLI 不通过 env 覆盖
@@ -1613,7 +1821,8 @@ class GenericExecAdapter(CliAdapter):
         self.result_fields = result_fields
 
     def build_base_command(
-        self, *, model: Optional[str], skip_permissions: bool, enable_project_skills: bool
+        self, *, model: Optional[str], skip_permissions: bool, enable_project_skills: bool,
+        mcp_servers: Optional[list] = None,
     ) -> list:
         cmd = [self.command]
         if model and self.model_flag:
@@ -1644,6 +1853,7 @@ class GenericExecAdapter(CliAdapter):
         api_base_url: Optional[str],
         api_key_env: Optional[str],
         model: Optional[str] = None,
+        mcp_servers: Optional[list] = None,
     ) -> dict:
         env = dict(base_env)
         if api_base_url and self.base_url_env:
@@ -1717,6 +1927,8 @@ class OpenCodeAdapter(CliAdapter):
         # 通过 OPENCODE_CONFIG_CONTENT 注册的，所以改道时必须补前缀。
         return f"{_CUSTOM_PROVIDER_ID}/{model}" if api_base_url and model else model
 
+    supports_mcp = True
+
     def build_env(
         self,
         base_env: dict,
@@ -1724,16 +1936,20 @@ class OpenCodeAdapter(CliAdapter):
         api_base_url: Optional[str],
         api_key_env: Optional[str],
         model: Optional[str] = None,
+        mcp_servers: Optional[list] = None,
     ) -> dict:
         env = dict(base_env)
-        if api_base_url:
+        # 条件不能只看 api_base_url：只声明了 mcp、不改道时（api_base_url 为空）同样
+        # 需要这个环境变量，否则 MCP 配置没有下发通道、静默丢失。
+        if api_base_url or mcp_servers:
             env["OPENCODE_CONFIG_CONTENT"] = _opencode_config_content(
-                api_base_url, KNOWN_MODELS.get("all", []), api_key_env
+                api_base_url, KNOWN_MODELS.get("all", []), api_key_env, mcp_servers
             )
         return env
 
     def build_base_command(
-        self, *, model: Optional[str], skip_permissions: bool, enable_project_skills: bool
+        self, *, model: Optional[str], skip_permissions: bool, enable_project_skills: bool,
+        mcp_servers: Optional[list] = None,
     ) -> list:
         cmd = [self.command, "run"]
         if model:
@@ -1857,7 +2073,8 @@ class PiAdapter(CliAdapter):
         _provision_pi_config(api_base_url, env_key, model)
 
     def build_base_command(
-        self, *, model: Optional[str], skip_permissions: bool, enable_project_skills: bool
+        self, *, model: Optional[str], skip_permissions: bool, enable_project_skills: bool,
+        mcp_servers: Optional[list] = None,
     ) -> list:
         cmd = [self.command]
         if model:
@@ -1976,7 +2193,8 @@ class GeminiAdapter(CliAdapter):
     api_key_env = "GEMINI_API_KEY"
 
     def build_base_command(
-        self, *, model: Optional[str], skip_permissions: bool, enable_project_skills: bool
+        self, *, model: Optional[str], skip_permissions: bool, enable_project_skills: bool,
+        mcp_servers: Optional[list] = None,
     ) -> list:
         cmd = [self.command]
         if model:
@@ -2012,6 +2230,7 @@ class GeminiAdapter(CliAdapter):
         api_base_url: Optional[str],
         api_key_env: Optional[str],
         model: Optional[str] = None,
+        mcp_servers: Optional[list] = None,
     ) -> dict:
         env = dict(base_env)
         # Gemini API / Vertex 各有独立 endpoint，无统一 base URL env；api_base_url 未接线（直连官方）
@@ -2075,7 +2294,8 @@ class CursorAdapter(CliAdapter):
     install_probe = (["--help"], ["cursor"], [])
 
     def build_base_command(
-        self, *, model: Optional[str], skip_permissions: bool, enable_project_skills: bool
+        self, *, model: Optional[str], skip_permissions: bool, enable_project_skills: bool,
+        mcp_servers: Optional[list] = None,
     ) -> list:
         cmd = [self.command]
         if model:
@@ -2164,6 +2384,15 @@ def detect_installed() -> list[str]:
     return [adapter.id for adapter in _ADAPTERS if adapter.is_installed()]
 
 
+def mcp_enabled_clis() -> list[str]:
+    """已接入 MCP 下发的 CLI id（按注册顺序）。
+
+    报错文案要用它告诉用户「换成哪个 CLI 才行」。**必须从 adapter 派生**：写死一份
+    名单就等于把同一份事实维护两遍，接一个新 CLI 时漏改的那一处会变成一句假话。
+    """
+    return [adapter.id for adapter in _ADAPTERS if adapter.supports_mcp]
+
+
 def detect_default() -> str:
     """按优先级返回第一个已安装的 CLI id，找不到抛异常。"""
     for adapter in _ADAPTERS:
@@ -2178,11 +2407,14 @@ def detect_default() -> str:
 def list_clis() -> list[dict]:
     """返回全部已注册 CLI 的描述（含安装状态），供前端工具切换下拉使用。
 
-    每项: {id, display_name, installed, priority, models}，按优先级顺序排列。
+    每项: {id, display_name, installed, priority, models, supports_mcp}，按优先级顺序排列。
     _HIDDEN_CLI_IDS 里的 CLI 不出现在结果中（adapter 本身仍可用 get_adapter 取到）。
 
     注意 priority 取 _ADAPTERS 里的下标而非结果下标：隐藏项不影响其余 CLI 的
     相对优先级，将来放回时也不用重排。
+
+    ``supports_mcp`` 直接取自 adapter，前端据此在选项上标注「MCP 未接入」。**刻意不在
+    前端硬编码名单** —— 那等于把同一份事实维护两遍，将来接一个新 CLI 就必然漏改一处。
     """
     result = []
     for index, adapter in enumerate(_ADAPTERS):
@@ -2194,5 +2426,6 @@ def list_clis() -> list[dict]:
             "installed": adapter.is_installed(),
             "priority": index,
             "models": list(adapter.known_models),
+            "supports_mcp": adapter.supports_mcp,
         })
     return result

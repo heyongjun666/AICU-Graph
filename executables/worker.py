@@ -270,6 +270,9 @@ def _create_real_aicu(ctx: ExecutableContext) -> Any:
     # skills_dir 默认（~/.claude/skills）。此前这里兜底到仓库根 skills/
     # 目录，与角色配置不一致且该目录往往不存在，导致带 skill 的节点失败。
     skills_dir = node.config.get("skills_dir")
+    # MCP server 名字列表；同样以 None 表示「未配置」，由 AICU 回退到角色 yaml 的 mcp。
+    # 解析与连通性预检都由 AICU 做（见 runtime/mcp_client.py），这里只透传名字。
+    selected_mcp = node.config.get("mcp")
 
     # ---- V3-2.1 shared_target：Worker 有共享工作区 → CC 直写分区 ----
     # 共享分区 = CC 产物唯一权威（不再产生 nodes/{id}/output 副本）。
@@ -298,6 +301,7 @@ def _create_real_aicu(ctx: ExecutableContext) -> Any:
         api_key_env=node.config.get("api_key_env"),
         skills=selected_skills,
         skills_dir=skills_dir,
+        mcp=selected_mcp,
         skip_permissions=node.config.get("skip_permissions", True),
         shared_target=shared_target,
         # 只喂边界声明，不影响产物归属判定（那是 shared_target 的职责）。
@@ -309,6 +313,36 @@ def _create_real_aicu(ctx: ExecutableContext) -> Any:
     with Worker._aicu_cache_lock:
         Worker._aicu_cache[node.id] = aicu
     return aicu
+
+
+def _fail_startup(ctx: ExecutableContext, exc: Exception) -> NodeStatus:
+    """AICU 构造期失败 → 节点 FAILED + 可读日志。
+
+    ``_create_real_aicu`` 是在 Worker.run() 的 try 之外调用的：异常若直接上抛，会被
+    scheduler 的 wrapper 收成一行服务端 stdout 日志，节点上只留下「Failed、日志为空、
+    error 为空」。而这一类失败（MCP 预检连不上、skills_dir 不存在、角色 yaml 非法）
+    恰恰都要用户去改环境或配置才能修，看不见原因就等于修不了。
+
+    刻意复用下方执行期失败的回填形状（同一个 error 兜底 + 一条 ERROR 日志），
+    让两种失败在 UI 上是同一种东西。
+    """
+    error = getattr(exc, "error", None) or ErrorObject.create_worker_execution_error()
+    try:
+        ctx.runtime.update_node_status(
+            ctx.node.id,
+            NodeStatus.FAILED,
+            error=error,
+            log=[
+                LogEntry(
+                    ts=datetime.now(),
+                    level=LogLevel.ERROR,
+                    message=f"Worker startup failed: {exc}",
+                )
+            ],
+        )
+    except Exception:  # noqa: BLE001  回填本身不能再抛出，否则又退回「日志为空」
+        logger.exception("Failed to backfill startup failure for node '%s'", ctx.node.id)
+    return NodeStatus.FAILED
 
 
 # ========== 生产侧通用验收原则（领域无关，Worker 专属注入） ==========
@@ -939,7 +973,12 @@ class Worker(Executable):
         # 真实 AICU；测试替身只能通过 aicu_instance 显式注入。
         aicu = self._aicu
         if aicu is None:
-            aicu = _create_real_aicu(ctx)
+            try:
+                aicu = _create_real_aicu(ctx)
+            except Exception as exc:  # noqa: BLE001
+                # 构造期失败（MCP 预检、skills_dir、角色 yaml…）在此就地回填，
+                # 否则异常会绕过下方所有 FAILED 回填直接穿到 scheduler（见 _fail_startup）。
+                return _fail_startup(ctx, exc)
 
         # Update status to RUNNING
         ctx.runtime.update_node_status(ctx.node.id, NodeStatus.RUNNING)

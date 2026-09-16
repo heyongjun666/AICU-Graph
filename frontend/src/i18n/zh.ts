@@ -120,6 +120,9 @@ export const zh: Dict = {
   'settings.cli': 'CLI',
   'settings.autoDetect': '自动检测',
   'settings.notInstalled': '（未安装）',
+  // 措辞刻意是「未接入」而不是「不支持」：codex / qwen / agy 这些 CLI 自己都有 MCP，
+  // 只是 AICU 还没接线。写「不支持」是关于 CLI 的假话，用户会去换 CLI 而不是来问我们。
+  'settings.mcpNotWired': '（MCP 未接入）',
   'settings.model': '模型',
   'settings.selectOrTypeModel': '选择或输入模型',
   'settings.apiBaseUrl': 'API base URL',

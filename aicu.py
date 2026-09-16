@@ -11,6 +11,7 @@ from typing import Callable, Optional, Dict, List, Sequence, Set, Tuple
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from claude_code_agent import ClaudeCodeAgent, CCExecutionError, ModelImageInputError
+from runtime.mcp_client import probe_servers, resolve_servers
 
 
 # sentinel for "调用方未传此参数"，与 None（可能是有效值，如 output_file=null）区分
@@ -174,6 +175,18 @@ class AICU:
                       默认 ~/.claude/skills，角色 yaml 可覆盖以使用自定义 skill 库。
                       仅当 skills 非空时此字段才生效。
 
+        【mcp 配置】
+        - mcp: 该角色可用的 MCP server 名字列表（在仓库根 mcp_servers.json 中定义）。
+               空列表表示不启用。与 skill 同一思路：角色只引用名字，command/args 集中在
+               注册表里 —— 角色 yaml 是可以在设置页上编辑的，内联可执行命令等于在页面上
+               放一个「编辑一段将被执行的命令」的输入框。
+               非空时 AICU 在建 CC 之前逐个预检（initialize + tools/list），连不上就抛错，
+               节点随即 FAILED 并留下可读日志（MCP server 起不来时 CLI 只会打条 warning
+               继续跑，不预检的话日志里不会有任何 MCP 相关的话）。
+               配置按次注入、不碰用户的 CLI 配置文件，所以并发节点天然隔离。
+               能落到哪些 CLI 上取决于 AICU 有没有为它接线（见各 adapter 的
+               supports_mcp）：落到没接线的 CLI 上会在建 CC 时就报错，不会静默忽略。
+
     workspace 结构 (peer 模式):
       cc_N/
         {output_file}        # CC-N 生成的产出（CC 自己写入）
@@ -205,6 +218,7 @@ class AICU:
                  api_key_env: Optional[str] = None,
                  skills: Optional[List[str]] = None,
                  skills_dir: Optional[str] = None,
+                 mcp: Optional[List[str]] = None,
                  skip_permissions: bool = True,
                  shared_target: Optional[str] = None,
                  shared_root: Optional[str] = None,
@@ -399,6 +413,15 @@ class AICU:
             _user_skills_dir = (Path(__file__).parent / _user_skills_dir).resolve()
         self._user_skills_dir = _user_skills_dir
 
+        # ---- mcp 配置 ----
+        # mcp: 要启用的 MCP server 名字列表，在仓库根 mcp_servers.json 中定义。
+        # 这里只做「名字 → server 定义」的解析（名字写错立刻报错并列出可用的），
+        # 真正的连通性预检在建 CC 之前（见下方 mcp 预检）。
+        self.mcp: List[str] = list(
+            mcp if mcp is not None else self.role_config.get("mcp") or []
+        )
+        self._mcp_servers = resolve_servers(self.mcp)
+
         # 执行配置由节点/会话在边界传入；密钥只保存环境变量名，不读取或记录真实值。
         self.output_callback = output_callback
         self.api_base_url = api_base_url
@@ -447,6 +470,21 @@ class AICU:
                     f"可用 skill: {self._list_available_skills()}"
                 )
 
+        # ---- mcp 预检 ----
+        # 在建 CC 之前逐个连一次（initialize + tools/list）。位置与 skill 校验同理：
+        # 让「环境没准备好」在启动阶段就以一条明确错误暴露出来。MCP server 起不来时
+        # CLI 只会打一条 warning 继续跑，agent 发现工具不在会绕路或报一个与 MCP 无关的
+        # 错 —— 不预检的话，日志里不会有任何 MCP 相关的话可查。
+        # 失败时的路径和 skill 一样：AICU 构造抛异常 → Worker 捕获 → 节点 FAILED +
+        # 可读日志 → 用户把 server 起来 → Continue 原地重跑（那时会重新构造 AICU，
+        # 也就重新预检一次）。
+        if self._mcp_servers:
+            probe_servers(self._mcp_servers)
+            # 预检过了才往下发。下发的是 server 对象本身（不是预先拼好的 JSON 串）：
+            # 各 CLI 的配置形态不同，序列化是 adapter 的事（见 claude_code_agent.py 的
+            # mcp_servers 参数说明）。落到没接线的 CLI 上会在建 CC 时直接报错。
+            print(f"[AICU] mcp: {self.mcp} (预检通过，内联下发)")
+
         self.ccs: List[ClaudeCodeAgent] = []
         for i in range(num_ccs):
             cc_id = f"CC-{i}"
@@ -464,6 +502,7 @@ class AICU:
                 output_callback=cc_output,
                 api_base_url=self.api_base_url,
                 api_key_env=self.api_key_env,
+                mcp_servers=self._mcp_servers,
             )
             # 写入一次性的角色与长期决策上下文；输出格式由每轮生成请求显式携带。
             role_context = self.role_md_content

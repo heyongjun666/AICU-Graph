@@ -6,7 +6,13 @@ import threading
 from pathlib import Path
 from typing import Callable, Optional, List
 
-from cli_adapters import detect_default, get_adapter, native_base_url, provider_slot_base_url
+from cli_adapters import (
+    detect_default,
+    get_adapter,
+    mcp_enabled_clis,
+    native_base_url,
+    provider_slot_base_url,
+)
 from runtime.credentials import resolve_sk_for_model
 
 
@@ -38,6 +44,27 @@ def detect_cli() -> str:
     return detect_default()
 
 
+def _drop_transient(paths: list) -> None:
+    """删掉随 CLI 进程起落的临时配置文件（见 ``CliAdapter.mcp_workspace_files``）。
+
+    为什么非删不可：这类文件只对「本次 CLI 进程」有意义，留在 workspace 里会被
+    AICU 的产物收集当成交付物 —— ``.qwen`` 不在 ``NONCODE_DIRS`` 里，``.json`` 也不在
+    ``NONCODE_EXTENSIONS`` 里，于是会被当作 CC 写的代码文件复制进最优方案目录、
+    并出现在 ``_INDEX.md`` 的文件清单里。
+
+    顺手删空目录：``.qwen/`` 这种空壳虽然收文件时看不见（``is_file()`` 会挡掉），
+    但会在产物目录里留下没有解释的残迹。``rmdir`` 对非空目录抛 ``OSError``，正好
+    用来表达「里面还有别人的东西，别动」—— 所以两种失败都安静吞掉。
+    """
+    for path in paths or []:
+        try:
+            path = Path(path)
+            path.unlink(missing_ok=True)
+            path.parent.rmdir()
+        except OSError:
+            pass
+
+
 class ClaudeCodeAgent:
     """
     Claude Code 的编程式封装类，支持多轮对话 + 父子 Agent 编排
@@ -52,7 +79,8 @@ class ClaudeCodeAgent:
                  enable_project_skills: bool = False,
                  output_callback: Optional[Callable[[str, str], None]] = None,
                  api_base_url: Optional[str] = None,
-                 api_key_env: Optional[str] = None):
+                 api_key_env: Optional[str] = None,
+                 mcp_servers: Optional[list] = None):
         """
         初始化一个 CC 实例
 
@@ -66,6 +94,12 @@ class ClaudeCodeAgent:
             True 时命令追加 --setting-sources project，使 CC 只加载 workspace
             下 .claude/skills/ 中的 skill，不加载用户级 ~/.claude/skills/。
             调用方需自行在 workspace/.claude/skills/ 准备好 skill 软链接/拷贝。
+        :param mcp_servers: 要下发给 CLI 的 MCP server 列表（``list[McpServer]``），
+            由 AICU 侧完成注册表解析与预检（见 runtime/mcp_client.py）。
+            **这里刻意收对象而不是 JSON 串**：三家 CLI 的配置形态互不相同（CC 族是
+            argv 里的 mcpServers JSON、codex 是一串 -c 键值、opencode 是环境变量里的
+            另一份 JSON），序列化只有 adapter 知道该怎么做。早先传 JSON 串还得反解出
+            名字给权限白名单用，多接一家就撑不住了。
         """
         self.workspace = Path(workspace_path).resolve()
         self.model = model
@@ -74,6 +108,9 @@ class ClaudeCodeAgent:
         self.output_callback = output_callback
         self.api_base_url = api_base_url
         self.api_key_env = api_key_env
+        # 权限白名单（CC 族）必须与实际下发的 server 逐字对应，所以名字就在 adapter 里
+        # 从同一个列表上取，而不是在这里另算一份传下去 —— 同源才不可能对不上。
+        self.mcp_servers = list(mcp_servers or [])
         self.conversation_id: Optional[str] = None
         self._last_process_pid: Optional[int] = None
         # pause/resume 时设为 True，阻止 chat() 重置 conversation_id
@@ -90,6 +127,20 @@ class ClaudeCodeAgent:
         else:
             self.adapter = get_adapter(detect_cli())
         self.cli_name = self.adapter.id
+
+        # 角色声明了 MCP 但落到一个 AICU 还没接线的 CLI 上时，直接报错而不是静默忽略。
+        # 静默忽略的后果是最坏的：任务跑完了、看起来正常，但工具从来不存在 ——
+        # 用户以为配好了。skill 在非 claude 系 CLI 上就是这个问题（软链照建，永不生效）。
+        #
+        # 文案刻意说「尚未接入」而不是「不支持」：codex / qwen / agy 这些自己都有 MCP，
+        # 只是注入方式各不相同、AICU 还没接线。说成「该 CLI 不支持」是关于 CLI 的假话，
+        # 用户会跑去换 CLI，而不是来问我们。
+        if self.mcp_servers and not self.adapter.supports_mcp:
+            raise RuntimeError(
+                f"CLI '{self.cli_name}' 的 MCP 尚未接入 AICU，但本次运行声明了 MCP server。"
+                f"请改用已接入 MCP 的 CLI（{', '.join(mcp_enabled_clis())}），"
+                f"或从角色配置中移除 mcp 字段。"
+            )
 
         # 模型厂商与 CLI 原生协议不一致时（例如 claude CLI 选了 GLM），把 base_url
         # 指向该厂商对应协议的原生端点。厂商自己就实现这套协议，不需要任何翻译。
@@ -160,6 +211,7 @@ class ClaudeCodeAgent:
             model=self.cli_model_arg,
             skip_permissions=self.skip_permissions,
             enable_project_skills=self.enable_project_skills,
+            mcp_servers=self.mcp_servers,
         )
 
     def _communicate_with_stream(
@@ -267,6 +319,7 @@ class ClaudeCodeAgent:
             api_base_url=self.api_base_url,
             api_key_env=key_env_name or self.api_key_env,
             model=self.model,
+            mcp_servers=self.mcp_servers,
         )
         if sk and key_env_name:
             env[key_env_name] = sk
@@ -284,6 +337,7 @@ class ClaudeCodeAgent:
         cmd = self._build_base_command()
         streaming = bool(self.output_callback)
         cmd.extend(self.adapter.print_flags(streaming=streaming))
+        cmd.extend(self.adapter.mcp_flags(self.mcp_servers))
 
         # 如果已有 conversation_id，通过 CLI 的 resume 参数续接上下文
         if self.conversation_id:
@@ -303,16 +357,25 @@ class ClaudeCodeAgent:
 
         # 用 Popen + start_new_session=True 创建独立进程组，
         # 超时时用 os.killpg kill 整个进程组，避免 CLI 子进程成为孤儿进程
-        proc = subprocess.Popen(
-            cmd,
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            cwd=self.workspace,
-            env=self._build_process_env(),
-            start_new_session=True,  # 子进程成为新会话/进程组的组长
-        )
+        #
+        # 少数 CLI（qwen）只能从「cwd 下的项目级配置文件」读 MCP，没法走 argv/env。
+        # 这类文件必须在 Popen 之前写好（CLI 启动时就要读），进程结束后立刻删掉，
+        # 否则会被产物收集当成交付物（见 _drop_transient）。
+        transient = self.adapter.mcp_workspace_files(self.workspace, self.mcp_servers)
+        try:
+            proc = subprocess.Popen(
+                cmd,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                cwd=self.workspace,
+                env=self._build_process_env(),
+                start_new_session=True,  # 子进程成为新会话/进程组的组长
+            )
+        except BaseException:
+            _drop_transient(transient)
+            raise
         self._last_process_pid = proc.pid
         try:
             prompt_input = prompt if prompt_via_stdin else None
@@ -336,6 +399,7 @@ class ClaudeCodeAgent:
             raise
         finally:
             self._last_process_pid = None
+            _drop_transient(transient)
 
         if proc.returncode != 0:
             stdout_tail = (stdout or "").strip()

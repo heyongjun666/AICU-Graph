@@ -33,6 +33,7 @@ import {
   AgentEvent,
   ApiKeyResponse,
   InternalUsernameResponse,
+  EffectiveBaseUrlResponse,
 } from '../types';
 import { useUIStateStore } from '../stores/UIStateStore';
 export type { RoleInfo } from '../types';
@@ -561,6 +562,22 @@ export function updateSessionSettings(
 
 export function getGlobalConfig(): Promise<GlobalConfigResponse> {
   return sessionRequest<GlobalConfigResponse>('config');
+}
+
+/** 这次运行**真正会用到**的端点，由后端按 (CLI, 模型, 已配置地址) 算出来。
+ *
+ *  连接表单拿它显示「生效地址」—— 不在这里复刻任何路由规则：地址跟着模型厂商变，
+ *  规则在 cli_adapters.effective_base_url 里、与实际发请求用的是同一份。 */
+export function getEffectiveBaseUrl(params: {
+  cliName?: string | null;
+  model?: string | null;
+  apiBaseUrl?: string | null;
+}): Promise<EffectiveBaseUrlResponse> {
+  const query = new URLSearchParams();
+  if (params.cliName) query.set('cli_name', params.cliName);
+  if (params.model) query.set('model', params.model);
+  if (params.apiBaseUrl) query.set('api_base_url', params.apiBaseUrl);
+  return sessionRequest<EffectiveBaseUrlResponse>(`effective-base-url?${query.toString()}`);
 }
 
 export function updateGlobalConfig(

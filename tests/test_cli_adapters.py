@@ -1124,6 +1124,25 @@ class TestManagedSlot:
         assert entry["baseUrl"] == cli_adapters.protocol_endpoint("aliyun", "chat")
         assert entry["envKey"] == "BAILIAN_API_KEY"
 
+    def test_agent_wires_rewritten_endpoint_into_slot(self, monkeypatch, tmp_path):
+        """预置地址 + 异族模型：槽里必须写**改写后**的端点，不能照抄配置里存着的预置地址。
+
+        照抄会怎样：选 OpenAI 预置、再把模型换成 deepseek-v4-pro —— 环境变量那条通道
+        按厂商改道到了 deepseek，槽里却还留着 api.openai.com，而 codex 读的正是槽
+        （顶层 ``model_provider = "aicu"`` 指过去的那块），于是带着 deepseek 的模型名
+        打到 openai。界面上显示的地址也一样会卡住不变，因为它是真的没变。
+        """
+        monkeypatch.setattr(cli_adapters.Path, "home", lambda: tmp_path)
+        monkeypatch.setattr(CodexAdapter, "is_installed", lambda self: True)
+        ClaudeCodeAgent(
+            workspace_path=str(tmp_path / "ws"), model="deepseek-v4-pro", cli_name="codex",
+            api_base_url="https://api.openai.com/v1",  # openai 预置声明的地址
+            skip_permissions=False,
+        )
+        config = (tmp_path / ".codex" / "config.toml").read_text(encoding="utf-8")
+        assert 'base_url = "https://api.deepseek.com/v1"' in config
+        assert "https://api.openai.com/v1" not in config
+
     def test_agent_releases_slot_for_codex_native_model(self, monkeypatch, tmp_path):
         monkeypatch.setattr(cli_adapters.Path, "home", lambda: tmp_path)
         monkeypatch.setattr(CodexAdapter, "is_installed", lambda self: True)
@@ -1558,6 +1577,112 @@ class TestCrossVendorEndpoint:
         assert cli_adapters.protocol_endpoint("不存在的厂商", "chat") is None
 
     # ------------------------------------------------------------ 下拉过滤
+
+class TestEffectiveBaseUrl:
+    """界面要显示的「这次真正会用的端点」—— 换模型必须跟着变，用户自己的端点不能被动。
+
+    这一层是给前端连接表单用的：它显示的地址必须与实际请求同源，所以判据来自
+    native_base_url / provider_slot_base_url 这两个真正被 claude_code_agent 调用的函数。
+    """
+
+    def test_same_family_falls_back_to_the_cli_own_endpoint(self):
+        """同族直连时两个改写函数都给 None，但界面不能就此显示空白。"""
+        assert cli_adapters.effective_base_url("claude", "claude-opus-5", "") == (
+            "https://api.anthropic.com",
+            "cli_default",
+        )
+        # codex 同族时连托管槽都要撤掉（订阅登录态），所以它只能靠 CLINative 兜底
+        assert cli_adapters.effective_base_url("codex", "gpt-5.6", "") == (
+            "https://api.openai.com/v1",
+            "cli_default",
+        )
+
+    def test_model_vendor_switch_moves_the_address(self):
+        """同一个 CLI、同一个（空的）配置地址，换模型 → 地址必须跟着换。
+
+        这正是用户提的那件事：「切换模型的时候岂不是用不了？得跟随模型」。
+        """
+        claude_glm = cli_adapters.effective_base_url("claude", "glm-5.2", "")
+        claude_kimi = cli_adapters.effective_base_url("claude", "kimi-k3", "")
+        assert claude_glm[0] == "https://open.bigmodel.cn/api/anthropic"
+        assert claude_kimi[0] == "https://api.moonshot.cn/anthropic"
+        assert claude_glm[0] != claude_kimi[0]
+        assert {claude_glm[1], claude_kimi[1]} == {"model_vendor"}
+
+        # codex 走托管槽（config.toml 里的 provider 块），一样要跟着模型走
+        assert cli_adapters.effective_base_url("codex", "deepseek-v4-pro", "") == (
+            "https://api.deepseek.com/v1",
+            "model_vendor",
+        )
+
+    def test_user_endpoint_is_never_moved(self):
+        """手填的网关地址必须原样显示 —— 包括换模型时。"""
+        custom = "https://my-gateway.corp/v1"
+        for cli, model in (("claude", "glm-5.2"), ("codex", "deepseek-v4-pro")):
+            assert cli_adapters.effective_base_url(cli, model, custom) == (custom, "configured")
+            assert cli_adapters.effective_base_url(cli, "gpt-5.6", custom) == (custom, "configured")
+
+    def test_preset_address_is_shown_verbatim(self):
+        """选了预置厂商时显示的必须就是预置声明的那个地址，且不属于「按模型改道」。
+
+        预置的 (cli, model) 自洽 —— 模型厂商要么就是该 CLI 的原生厂商，要么预置地址
+        本身就是该厂商在所需协议下的端点，两种情形都不该再被改写。
+        """
+        checked = 0
+        for preset in cli_adapters.list_provider_presets():
+            url = preset.get("api_base_url")
+            if not url:
+                # google 预置没有 api_base_url（antigravity 只认自家原生协议）
+                continue
+            assert cli_adapters.effective_base_url(
+                preset["cli_name"], preset["model"], url
+            ) == (url, "configured"), preset["id"]
+            checked += 1
+        assert checked >= 7, f"只校验到 {checked} 条预设，覆盖不足"
+
+    def test_slot_cli_follows_the_model_too(self):
+        """托管槽 CLI（codex）跨厂商换模型时地址也要跟着走 —— 槽里写的必须是改写后的端点。
+
+        曾经的错法：槽照抄配置里存着的**预置地址**，于是「选 OpenAI 预置再把模型换成
+        deepseek」时环境变量改道了、槽没改，而 codex 读的是槽 → 带着 deepseek 的模型名
+        打到 openai，界面上的地址也卡住不变。槽里那份地址与实际请求是同一个来源，
+        所以这里显示的必须是改写后的端点。
+        """
+        assert cli_adapters.effective_base_url(
+            "codex", "deepseek-v4-pro", "https://api.openai.com/v1"
+        ) == ("https://api.deepseek.com/v1", "model_vendor")
+        # 同族不受影响：预置自家的模型本来就该走预置声明的那个地址
+        assert cli_adapters.effective_base_url(
+            "codex", "gpt-5.6", "https://api.openai.com/v1"
+        ) == ("https://api.openai.com/v1", "configured")
+        # 用户手填的地址同样不受影响
+        assert cli_adapters.effective_base_url(
+            "codex", "deepseek-v4-pro", "https://my-gw.corp/v1"
+        ) == ("https://my-gw.corp/v1", "configured")
+
+    def test_undecidable_cli_stays_honest(self):
+        """没纳入路由的 CLI（internal / cursor）不猜端点：没配就老实说不知道。"""
+        assert cli_adapters.effective_base_url("internal", "DeepSeek-V4-Flash", "") == (
+            None,
+            "cli_default",
+        )
+        assert cli_adapters.effective_base_url("cursor", "glm-5.2", "") == (None, "cli_default")
+        # 但它自己配了地址时，显示的就是那个地址
+        assert cli_adapters.effective_base_url(
+            "internal", "DeepSeek-V4-Flash", "https://my-gateway.corp/v1"
+        ) == ("https://my-gateway.corp/v1", "configured")
+        assert cli_adapters.effective_base_url(None, None, None) == (None, "cli_default")
+
+    def test_empty_string_is_treated_as_unset(self):
+        """落盘时空串会被归一成 null（session_manager），这里也要当没配处理。"""
+        assert cli_adapters.effective_base_url("claude", "glm-5.2", "") == (
+            "https://open.bigmodel.cn/api/anthropic",
+            "model_vendor",
+        )
+        assert cli_adapters.effective_base_url("claude", "glm-5.2", None) == (
+            "https://open.bigmodel.cn/api/anthropic",
+            "model_vendor",
+        )
 
 
 class TestResultEventShapes:

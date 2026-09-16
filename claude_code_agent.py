@@ -113,8 +113,18 @@ class ClaudeCodeAgent:
         # 走环境变量 / 内联配置的 CLI（claude / kimi / opencode / codebuddy）没有槽，
         # 这里恒为 None，provision 是 no-op，它们的行为与改动前一致。
         #
+        # 喂进去的是**改写后**的 self.api_base_url，不是 configured_base_url：预置地址
+        # 不算「用户自己指定的端点」，上面那步已经按模型厂商把它改道了，槽必须跟着同一个
+        # 值走。照抄配置值会让两条通道各说各话 —— codex 读的正是槽（顶层
+        # model_provider = "aicu" 指过去的那块），于是「选了 OpenAI 预置再把模型换成
+        # deepseek」会把 deepseek 的模型名发到 api.openai.com 去。
+        # 用户手填的地址不受影响：native_base_url 对非预置地址返回 None，self.api_base_url
+        # 仍是原值。同族时 self.api_base_url 为 None 也不影响槽 —— provider_slot_base_url
+        # 自己会把同族该接管的那份端点算出来（qwen 同族照样接管，codex 同族撤槽）。
         self.adapter.provision(
-            api_base_url=self.api_base_url,
+            api_base_url=provider_slot_base_url(
+                self.cli_name, self.model, self.api_base_url
+            ),
             api_key_env=self.api_key_env,
             model=self.model,
         )

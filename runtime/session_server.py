@@ -26,7 +26,13 @@ from runtime.session_manager import SessionHandle, SessionManager
 from runtime.skills_manager import SkillsManager
 from runtime.credentials import vendor_of_model
 from runtime.i18n import LanguageMiddleware, localized_detail, t
-from cli_adapters import detect_default, get_adapter, list_clis, list_provider_presets
+from cli_adapters import (
+    detect_default,
+    effective_base_url,
+    get_adapter,
+    list_clis,
+    list_provider_presets,
+)
 from claude_code_agent import CCExecutionError, ClaudeCodeAgent
 
 
@@ -307,6 +313,19 @@ def create_session_app(
             "provider_presets": list_provider_presets(),
             "default_cli": default_cli,
         }
+
+    @app.get("/v1/effective-base-url")
+    def get_effective_base_url(cli_name: str = "", model: str = "", api_base_url: str = ""):
+        """给定 (CLI, 模型, 已配置地址) 时**真正会被用到**的端点。
+
+        连接表单用它显示「生效地址」：换模型就重新问一次，显示的永远是与实际请求同源的
+        那个值（cli_adapters.effective_base_url 直接复用建子进程前的那两个函数）。
+        传的是表单里的**当前**值而非已保存的值 —— 用户改了模型还没保存时也要能看见。
+        """
+        base_url, source = effective_base_url(
+            cli_name or None, model or None, api_base_url or None
+        )
+        return {"base_url": base_url, "source": source}
 
     @app.patch("/v1/config")
     def update_global_config(body: GlobalConfigRequest):

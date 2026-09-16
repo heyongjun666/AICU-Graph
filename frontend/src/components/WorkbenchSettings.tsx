@@ -13,6 +13,7 @@ import {
   deleteSkill,
   getApiKey,
   getInternalUsername,
+  getEffectiveBaseUrl,
   getGlobalConfig,
   getRole,
   getRolePools,
@@ -62,6 +63,11 @@ const emptyConfig: GlobalConfig = {
 /** 单节点 agent 数量在关闭动态配置时的合法区间（与后端 plan_validator 对齐）。 */
 const NUM_CCS_MIN = 1;
 const NUM_CCS_MAX = 4;
+
+/** Provider 下拉里「手动配置」那一项的取值。预置 id 全是厂商名（openai / deepseek…），
+ *  用双下划线包起来不会撞上。取值只有两种：某个预置 id，或它 —— 没有「不指定」那一项，
+ *  因为「什么都没选」和「我要自己填」在界面上长得一样，用户却以为是两回事。 */
+const MANUAL_PROVIDER = '__manual__';
 
 const clampNumCcs = (value: unknown): number => {
   const parsed = Number.parseInt(String(value ?? ''), 10);
@@ -278,8 +284,9 @@ const WorkbenchSettings: React.FC<WorkbenchSettingsProps> = ({ open, onClose, on
   const [config, setConfig] = useState<GlobalConfig>(emptyConfig);
   const [clis, setClis] = useState<CliInfo[]>([]);
   const [providerPresets, setProviderPresets] = useState<ProviderPreset[]>([]);
-  const [selectedProviderId, setSelectedProviderId] = useState('');
-  const [providerInput, setProviderInput] = useState('');
+  // 加载完成前先当作「手动配置」：此时什么都没读到，摆一个预置出来是无中生有，
+  // 而手动模式是唯一不宣称任何事实的那一态。
+  const [selectedProviderId, setSelectedProviderId] = useState(MANUAL_PROVIDER);
   const [defaultCli, setDefaultCli] = useState<string | null>(null);
   const [roles, setRoles] = useState<RoleInfo[]>([]);
   const [pools, setPools] = useState<RolePool[]>([]);
@@ -317,6 +324,8 @@ const WorkbenchSettings: React.FC<WorkbenchSettingsProps> = ({ open, onClose, on
   const [apiKey, setApiKey] = useState('');
   const [apiKeyVendor, setApiKeyVendor] = useState<string | null>(null);
   const [internalUsername, setInternalUsername] = useState('');
+  // 后端算出的「生效地址」（非手动模式下地址框显示的就是它，随模型厂商变）。
+  const [effectiveBaseUrl, setEffectiveBaseUrl] = useState<EffectiveBaseUrlResponse | null>(null);
 
   const load = async () => {
     setBusy(true);
@@ -327,10 +336,29 @@ const WorkbenchSettings: React.FC<WorkbenchSettingsProps> = ({ open, onClose, on
       ]);
       setConfig(globalResp.config);
       setClis(globalResp.clis);
-      setProviderPresets(globalResp.provider_presets || []);
-      const initialPreset = (globalResp.provider_presets || []).find((preset) => preset.available !== false && preset.model === globalResp.config.model);
-      setSelectedProviderId(initialPreset?.id || '');
-      setProviderInput(initialPreset?.display_name || '');
+      const providerPresets = globalResp.provider_presets || [];
+      setProviderPresets(providerPresets);
+      // 反查预置：先按「模型 + 该预置自己声称的 CLI」，再按已存的 api_base_url。
+      // 两条都要比对 cli_name —— 预置是「把某个 CLI 配起来」的一组参数，CLI 对不上时
+      // 它就不是当前这套配置的来源（用户选了预置又改了 CLI 就会这样）。
+      const presetCliId = globalResp.config.cli_name || globalResp.default_cli;
+      const usablePresets = providerPresets.filter(
+        (preset) => preset.available !== false && preset.cli_name === presetCliId,
+      );
+      const initialPreset = usablePresets.find((preset) => preset.model === globalResp.config.model)
+        ?? usablePresets.find(
+          (preset) => globalResp.config.api_base_url && preset.api_base_url === globalResp.config.api_base_url,
+        );
+      // 反查不到任何预置就落回「手动配置」：这一态下模型是自由输入、地址交还用户，用户
+      // 自己架了网关时还能把已存的模型/地址原样带走；若在这里擅自挑一个预置，界面就会
+      // 宣称一套用户从没选过的参数。仓库里没有任何 config.json 迁移代码
+      //（session_manager.py:388-401 对未知键静默丢弃、不做归一），兼容只能在这做。
+      setSelectedProviderId(initialPreset?.id ?? MANUAL_PROVIDER);
+      // 预置是靠地址认出来的、而模型是空的时候（手改过 config.json），把预置的模型带上：
+      // 严格下拉里没有「空」这一项，不补值用户看到的就是一个空框。
+      if (initialPreset && !globalResp.config.model) {
+        setConfig((current) => ({ ...current, model: initialPreset.model ?? null }));
+      }
       setDefaultCli(globalResp.default_cli);
       setRoles(nextRoles);
       setSkills(nextSkills);
@@ -415,18 +443,18 @@ const WorkbenchSettings: React.FC<WorkbenchSettingsProps> = ({ open, onClose, on
   const setGlobal = <K extends keyof GlobalConfig>(key: K, value: GlobalConfig[K]) =>
     setConfig((current) => ({ ...current, [key]: value }));
 
-  /** Provider 输入：精确匹配预置厂商则自动填充 CLI/模型/API 参数；否则视为手动自定义，保留用户已填字段。 */
-  const applyProviderInput = (raw: string) => {
-    const value = raw.trim();
-    const preset = providerPresets.find((item) => item.id === value)
-      || providerPresets.find((item) => item.display_name === value);
-    if (!preset || preset.available === false) {
-      setSelectedProviderId('');
-      setProviderInput(value);
+  /** Provider 下拉：选预置则自动填充 CLI/模型/API 参数；选「手动配置」则把端点交还用户。
+   *  取值只有预置 id 与 MANUAL_PROVIDER 两种（与旁边的 CLI 下拉取值一致，不是 display_name）。 */
+  const chooseProvider = (value: string) => {
+    setSelectedProviderId(value);
+    if (value === MANUAL_PROVIDER) {
+      // 必须清空地址：预置残留值若恰好等于某个预置地址，后端会按模型厂商把它改写掉
+      //（cli_adapters.py:216-217），界面上写着「手动配置」而实际地址被换掉。
+      setConfig((current) => ({ ...current, api_base_url: null }));
       return;
     }
-    setSelectedProviderId(preset.id);
-    setProviderInput(preset.display_name);
+    const preset = providerPresets.find((item) => item.id === value);
+    if (!preset || preset.available === false) return;  // 认不出的取值：各字段保持原样
     setConfig((current) => ({
       ...current,
       cli_name: preset.cli_name || current.cli_name,
@@ -436,8 +464,42 @@ const WorkbenchSettings: React.FC<WorkbenchSettingsProps> = ({ open, onClose, on
     }));
   };
 
+  const manualMode = selectedProviderId === MANUAL_PROVIDER;
   const selectedProvider = providerPresets.find((preset) => preset.id === selectedProviderId);
-  const providerModelOptions = selectedProvider?.models || [];
+  // 模型能不能手输 = 端点是不是用户自己的：手动配置下名单无从算起，只能让他填；
+  // 其余情形（某个预置）名单是确定的，就不该让人把 gpt-5.6 敲进 claude 的下拉里。
+  const modelIsFreeText = manualMode;
+  // 地址框只在手动模式下可编辑。其余模式下框架里显示的是后端算出的「生效地址」——
+  // 它随模型厂商变，用户改它没有意义（存进去也会被后端按模型改写掉）。
+  const addressLocked = Boolean(selectedProvider);
+
+  // 生效地址随 (CLI, 模型, 已存地址) 变，所以每次变化都去后端问一次 —— 规则只有后端那一份
+  //（cli_adapters.effective_base_url），前端不复刻，免得改了这边忘了那边。
+  useEffect(() => {
+    if (!open || !addressLocked) {
+      setEffectiveBaseUrl(null);
+      return;
+    }
+    let cancelled = false;
+    getEffectiveBaseUrl({ cliName: config.cli_name, model: config.model, apiBaseUrl: config.api_base_url })
+      .then((resp) => { if (!cancelled) setEffectiveBaseUrl(resp); })
+      // 问不到就退回显示已存地址（下面 displayedBaseUrl 的 `??`）：宁可少说，不可说错。
+      .catch(() => { if (!cancelled) setEffectiveBaseUrl(null); });
+    return () => { cancelled = true; };
+  }, [open, addressLocked, config.cli_name, config.model, config.api_base_url]);
+
+  // 非手动模式下这个框是只读的「生效地址」，值不来自 config（config 里存的是预置地址，
+  // 后端会按模型把它改写掉）——所以显示与落盘本来就会不一致，显示的那个才是真的。
+  const displayedBaseUrl = manualMode
+    ? config.api_base_url || ''
+    : effectiveBaseUrl?.base_url ?? config.api_base_url ?? '';
+  const baseUrlHint = manualMode
+    ? t('settings.directConnectNote')
+    : effectiveBaseUrl?.source === 'model_vendor'
+      ? t('settings.apiBaseUrlFromModel')
+      : effectiveBaseUrl?.source === 'cli_default'
+        ? t('settings.apiBaseUrlCliDefault')
+        : t('settings.apiBaseUrlLocked');
 
   // 当前 CLI 的已知模型清单：显式选择时用该 CLI 的 models；
   // Auto-detect 时用默认 CLI 的 models；都无法确定则用全部 CLI 模型的并集（去重）。
@@ -448,8 +510,12 @@ const WorkbenchSettings: React.FC<WorkbenchSettingsProps> = ({ open, onClose, on
     : Array.from(new Set(clis.flatMap((cli) => cli.models || [])));
   // 模型可输入（combobox）：把厂商预置模型与 CLI 已知模型合并为建议项，仍允许手输任意模型名。
   const allModelOptions = Array.from(new Set([...providerModelOptions, ...modelOptions]));
-  // 已知模型也可能来自预置 provider，因此不能据此清空或禁用自定义地址。
-  const modelIsKnown = Boolean(config.model) && modelOptions.includes(config.model as string);
+
+  // 严格下拉时，已保存的 model 可能落在候选之外（换过 CLI、或目录里删过该 id）。不把它
+  // 作为一个 option 注入的话，<select value> 匹配不到任何项、浏览器会显示成空白 —— 用户
+  // 看到的和他实际保存的不是一回事，他动一下别的字段再保存，这个值就被悄悄换掉了。
+  // 不自动清空它：清掉用户已存的值比留着更烦人。
+  const modelIsForeign = Boolean(config.model) && !allModelOptions.includes(config.model as string);
   const refreshAfterSave = async () => {
     try {
       await onSaved();
@@ -862,7 +928,7 @@ const WorkbenchSettings: React.FC<WorkbenchSettingsProps> = ({ open, onClose, on
           <div className="settings-body">
             {error && <div className="settings-message is-error">{error}</div>}
             {notice && <div className="settings-message is-success">{notice}</div>}
-            {tab === 'connection' && <div className="settings-section"><div className="section-heading"><div><h3>{t('settings.connectionTitle')}</h3><p>{t('settings.connectionDesc')}</p></div></div><div className="form-grid"><label>Provider 厂商<input list="provider-options" value={providerInput} onChange={(event) => applyProviderInput(event.target.value)} placeholder="手动配置（输入厂商名，或从列表选择预置厂商）" /><datalist id="provider-options">{providerPresets.filter((preset) => preset.available !== false).map((preset) => <option key={preset.id} value={preset.display_name} />)}</datalist><small>选择预置厂商会自动填充 CLI/模型/API 地址；也可手动输入自定义厂商后自行配置下方各项。</small></label><label>{t('settings.cli')}<select value={config.cli_name || ''} onChange={(event) => setGlobal('cli_name', event.target.value || null)}><option value="">{t('settings.autoDetect')}{defaultCli ? ` (${defaultCli})` : ''}</option>{clis.map((cli) => <option key={cli.id} value={cli.id}>{cli.display_name}{cli.installed ? '' : t('settings.notInstalled')}</option>)}</select></label><label>{t('settings.model')}<input list="model-options" value={config.model || ''} onChange={(event) => setGlobal('model', event.target.value || null)} placeholder={selectedCli ? t('settings.selectOrTypeModel') : t('settings.usesRuntimeDefault')} /><datalist id="model-options">{allModelOptions.map((model) => <option key={model} value={model} />)}</datalist></label><label>{t('settings.apiBaseUrl')}<input value={config.api_base_url || ''} onChange={(event) => setGlobal('api_base_url', event.target.value || null)} placeholder={t('common.optional')} /><small>{t('settings.directConnectNote')}</small></label>{(config.cli_name || defaultCli) === 'internal' ? <label>账号名称<input value={internalUsername} onChange={(event) => setInternalUsername(event.target.value)} placeholder="请输入账号名称" /><small>Internal 使用账号名称认证。</small></label> : <label>{t('settings.apiKey')}<input type="password" value={apiKey} onChange={(event) => setApiKey(event.target.value)} placeholder={t('settings.apiKeyPlaceholder')} /><small>{apiKeyVendor ? t('settings.vendor', { vendor: apiKeyVendor }) : ''}{t('settings.localPlaintextNote')}</small></label>}</div><div className="settings-actions"><button className="secondary-button" disabled={testing || busy} onClick={runConnectionTest}>{testing ? t('settings.testing') : t('settings.testConnection')}</button><button className="primary-button" disabled={busy} onClick={saveConnection}><Save size={15} /> {t('settings.saveConnection')}</button></div></div>}
+            {tab === 'connection' && <div className="settings-section"><div className="section-heading"><div><h3>{t('settings.connectionTitle')}</h3><p>{t('settings.connectionDesc')}</p></div></div><div className="form-grid"><label>{t('settings.provider')}<select id="provider-select" value={selectedProviderId} onChange={(event) => chooseProvider(event.target.value)}><option value={MANUAL_PROVIDER}>{t('settings.providerManual')}</option>{providerPresets.filter((preset) => preset.available !== false).map((preset) => <option key={preset.id} value={preset.id}>{preset.display_name}</option>)}</select><small>{manualMode ? t('settings.providerManualHint') : t('settings.providerHint')}</small></label><label>{t('settings.cli')}<select id="cli-select" value={config.cli_name || ''} onChange={(event) => setGlobal('cli_name', event.target.value || null)}><option value="">{t('settings.autoDetect')}{defaultCli ? ` (${defaultCli})` : ''}</option>{clis.map((cli) => <option key={cli.id} value={cli.id}>{cli.display_name}{cli.installed ? '' : t('settings.notInstalled')}</option>)}</select></label><label>{t('settings.model')}{modelIsFreeText ? <><input list="model-options" value={config.model || ''} onChange={(event) => setGlobal('model', event.target.value || null)} placeholder={t('settings.selectOrTypeModel')} /><datalist id="model-options">{allModelOptions.map((model) => <option key={model} value={model} />)}</datalist></> : <select id="model-select" value={config.model || ''} onChange={(event) => setGlobal('model', event.target.value || null)}>{modelIsForeign && <option value={config.model as string}>{t('settings.modelNotInList', { model: config.model as string })}</option>}{allModelOptions.map((model) => <option key={model} value={model}>{model}</option>)}</select>}</label><label>{t('settings.apiBaseUrl')}<input id="api-base-url" value={displayedBaseUrl} disabled={addressLocked} onChange={(event) => setGlobal('api_base_url', event.target.value || null)} placeholder={t('common.optional')} /><small>{baseUrlHint}</small></label>{(config.cli_name || defaultCli) === 'internal' ? <label>{t('settings.accountName')}<input value={internalUsername} onChange={(event) => setInternalUsername(event.target.value)} placeholder={t('settings.accountNamePlaceholder')} /><small>{t('settings.accountNameNote')}</small></label> : <label>{t('settings.apiKey')}<input type="password" value={apiKey} onChange={(event) => setApiKey(event.target.value)} placeholder={t('settings.apiKeyPlaceholder')} /><small>{apiKeyVendor ? t('settings.vendor', { vendor: apiKeyVendor }) : ''}{t('settings.localPlaintextNote')}</small></label>}</div><div className="settings-actions"><button className="secondary-button" disabled={testing || busy} onClick={runConnectionTest}>{testing ? t('settings.testing') : t('settings.testConnection')}</button><button className="primary-button" disabled={busy} onClick={saveConnection}><Save size={15} /> {t('settings.saveConnection')}</button></div></div>}
             {tab === 'workspace' && <div className="settings-section"><div className="section-heading"><div><h3>{t('settings.workspaceTitle')}</h3><p>{t('settings.workspaceDesc')}</p></div></div><label>{t('settings.workspaceRoot')}<input value={config.workspace_root || ''} onChange={(event) => setGlobal('workspace_root', event.target.value || null)} placeholder={t('settings.workspaceRootPlaceholder')} /></label><div className="settings-actions"><button className="primary-button" disabled={busy} onClick={saveWorkspace}><Save size={15} /> {t('settings.saveWorkspace')}</button></div></div>}
             {tab === 'workspace' && <div className="settings-section"><div className="section-heading"><div><h3>{t('settings.executionTitle')}</h3><p>{t('settings.executionDesc')}</p></div></div><label className="settings-toggle"><input type="checkbox" checked={config.dynamic_num_ccs !== false} onChange={(event) => setGlobal('dynamic_num_ccs', event.target.checked)} /><span>{t('settings.dynamicNumCcs')}</span><HelpTip text={t('settings.dynamicNumCcsHelp')} title={t('settings.dynamicNumCcs')} /></label>{config.dynamic_num_ccs === false && <label>{t('settings.defaultNumCcs')}<input type="number" min={NUM_CCS_MIN} max={NUM_CCS_MAX} step={1} value={config.default_num_ccs ?? NUM_CCS_MIN} disabled={busy} onChange={(event) => setGlobal('default_num_ccs', clampNumCcs(event.target.value))} /><small>{t('settings.defaultNumCcsHelp', { min: NUM_CCS_MIN, max: NUM_CCS_MAX })}</small></label>}<div className="settings-actions"><button className="primary-button" disabled={busy} onClick={saveExecution}><Save size={15} /> {t('settings.saveExecution')}</button></div></div>}
             {tab === 'roles' && <div className="settings-section roles-editor"><div className="section-heading"><div><h3>{t('settings.rolesTitle')}</h3><p>{t('settings.rolesDesc', { count: roleFields.length })}</p></div><div className="section-heading-actions">{!editingRole && <button className="secondary-button" disabled={!selectedRole || busy} onClick={() => setEditingRole(true)}><Pencil size={15} /> {t('common.edit')}</button>}<button className="secondary-button" onClick={startCreateRole}><Plus size={15} /> {t('settings.newRole')}</button></div></div><div className="role-editor-layout"><aside className="resource-list"><ul className="resource-list-items">{roles.map((item) => { const value = `${item.type}:${item.id}`; return <li key={value}><button type="button" className={selectedRole === value ? 'is-active' : ''} disabled={busy} onClick={() => requestSelectRole(value)}><span className="resource-list-type">{roleTypeLabel(item.type)}</span><span className="resource-list-name">{item.display_name}</span></button></li>; })}</ul><div className="resource-list-note">{t('settings.customRoles', { count: roles.length })}</div></aside><div className="role-form">

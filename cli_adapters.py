@@ -271,6 +271,50 @@ def provider_slot_base_url(
     return protocol_endpoint(vendor, protocol)
 
 
+def effective_base_url(
+    cli_name: Optional[str], model: Optional[str], configured_base_url: Optional[str]
+) -> tuple[Optional[str], str]:
+    """这次运行**真正会用到**的端点，以及它是怎么定下来的 —— 给界面看的那个答案。
+
+    返回值 ``(url, source)``，``source`` 取值：
+      - ``"configured"``：用的就是用户配置里存着的那个地址（预置厂商自家端点，或用户
+        自己填的网关）—— 换模型不会改它。
+      - ``"model_vendor"``：AICU 按**当前模型所属厂商**改写了地址 —— 换模型就会跟着变。
+      - ``"cli_default"``：谁都没指定，CLI 用自己的默认端点（url 可能为 None，表示
+        连默认端点都无从得知，例如 google 系 CLI 只认自家原生协议）。
+
+    存在的理由是「界面上显示的地址」和「请求实际发往的地址」必须是同一个来源。
+    所以这里不另立规则，而是把 claude_code_agent 建子进程前调用那两个函数的**顺序与取值**
+    照搬过来（改动那处接线时必须回来同步这里，否则两边又分家）：
+      1. ``native_base_url`` 先按模型厂商改写「CLI 自身寻址」（环境变量 / 内联配置）；
+      2. 托管槽（codex 的 ``model_providers.aicu``、qwen 的 ``modelProviders.aicu``、
+         pi 的 ``providers.aicu``）用**上一步改写后**的值去写 —— 槽是 CLI 真正读的那份
+         （codex 顶层 ``model_provider = "aicu"`` 指过去就是它），照抄配置里的预置地址
+         会让「选了 OpenAI 预置再把模型换成 deepseek」打到 openai 去。
+    """
+    configured = str(configured_base_url) if configured_base_url else None
+
+    endpoint = native_base_url(cli_name, model, configured)
+    addressed = endpoint or configured
+
+    slot = provider_slot_base_url(cli_name, model, addressed)
+    if slot:
+        return slot, "configured" if slot == configured else "model_vendor"
+
+    if endpoint:
+        return endpoint, "configured" if endpoint == configured else "model_vendor"
+
+    # 两条路都没改写：要么用户自己的端点原样生效，要么压根没指定过端点。
+    if configured:
+        return configured, "configured"
+
+    native = _CLI_NATIVE.get(cli_name or "")
+    if not native:
+        return None, "cli_default"
+    # 同族直连时 CLI 走的就是自家端点，替它把话说全（判不出就是判不出，不猜）。
+    return protocol_endpoint(native[0], native[1]), "cli_default"
+
+
 def _provision_codex_config(api_base_url: str, api_key_env: Optional[str], model: Optional[str]) -> None:
     """把第三方端点注册进 ``~/.codex/config.toml`` 的 ``model_providers``（幂等）。
 

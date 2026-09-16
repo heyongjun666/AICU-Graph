@@ -206,6 +206,15 @@ export interface GlobalConfigResponse {
   default_cli: string | null;
 }
 
+/** 后端 /v1/effective-base-url 响应 —— 这次运行真正会用的端点，以及它是怎么定下来的。
+ *  - ``configured``：用的就是配置里存着的地址（换模型不会改它）
+ *  - ``model_vendor``：AICU 按当前模型所属厂商改写了它（换模型就跟着变）
+ *  - ``cli_default``：谁都没指定，CLI 用自己的默认端点（base_url 可能为 null） */
+export interface EffectiveBaseUrlResponse {
+  base_url: string | null;
+  source: 'configured' | 'model_vendor' | 'cli_default';
+}
+
 /** 后端 /v1/config/api-key 响应（按模型厂商回显的 sk）。 */
 export interface ApiKeyResponse {
   vendor: string | null;

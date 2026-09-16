@@ -4,13 +4,14 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import WorkbenchSettings from '../WorkbenchSettings';
 import * as api from '../../utils/api';
-import { RoleField } from '../../types';
+import { CliInfo, GlobalConfig, ProviderPreset, RoleField, RoleInfo } from '../../types';
 
 vi.mock('../../utils/api', () => ({
   createRole: vi.fn(),
   createRolePool: vi.fn(),
   createSkill: vi.fn(),
   deleteRolePool: vi.fn(),
+  getEffectiveBaseUrl: vi.fn(),
   getGlobalConfig: vi.fn(),
   getRole: vi.fn(),
   getRolePools: vi.fn(),
@@ -63,6 +64,12 @@ beforeEach(() => {
     fields,
   });
   vi.mocked(api.getRolePools).mockResolvedValue([]);
+  // 生效地址由后端算（真实规则见 tests/test_cli_adapters.py::TestEffectiveBaseUrl）。
+  // 这里只回显已配置的地址，判据不落在这份 stub 里 —— 前端本来就不该复刻那套规则。
+  vi.mocked(api.getEffectiveBaseUrl).mockImplementation(async ({ apiBaseUrl }) => ({
+    base_url: apiBaseUrl || null,
+    source: apiBaseUrl ? 'configured' : 'cli_default',
+  }));
 });
 
 afterEach(() => {
@@ -583,3 +590,146 @@ describe('WorkbenchSettings role pools', () => {
 // 模型下拉只显示「当前 CLI 真能用」的模型。过滤的主体在后端（CliAdapter.known_models
 // 按协议端点过滤），这里覆盖前端这一侧：候选是「当前 CLI 的 models」∪「厂商预置的
 // models」，而后者与当前 CLI 无关，曾经会把别家 CLI 的模型混进来。
+
+describe('WorkbenchSettings Provider 下拉与模型形态', () => {
+  const CLIS: CliInfo[] = [
+    { id: 'claude', display_name: 'Claude Code', installed: true, priority: 0,
+      models: ['claude-opus-5'] },
+    // deepseek-v4-pro 是「同协议可达但不属于 openai 预置」的模型：预置模式下切到它，
+    // 生效地址应当跟着模型厂商走（真实规则在后端，见 TestEffectiveBaseUrl）。
+    { id: 'codex', display_name: 'OpenAI Codex CLI', installed: true, priority: 1,
+      models: ['gpt-5.6', 'deepseek-v4-pro'] },
+  ];
+  const PRESETS: ProviderPreset[] = [
+    { id: 'openai', display_name: 'OpenAI 官方 API', cli_name: 'codex', model: 'gpt-5.6',
+      models: ['gpt-5.6'], api_base_url: 'https://api.openai.com/v1', available: true },
+    { id: 'xai', display_name: 'xAI 官方 API · Grok', cli_name: 'grok', model: 'grok-4.6',
+      models: ['grok-4.6'], api_base_url: 'https://api.x.ai/v1', available: false },
+  ];
+
+  const renderSettings = async (config: Partial<GlobalConfig> = {}) => {
+    vi.mocked(api.getGlobalConfig).mockResolvedValue({
+      config: {
+        workspace_root: null, cli_name: null, model: null,
+        api_base_url: null, api_key_env: null, ...config,
+      },
+      clis: CLIS,
+      provider_presets: PRESETS,
+      default_cli: 'claude',
+    });
+    render(<WorkbenchSettings open onClose={() => {}} onSaved={() => {}} />);
+    await waitFor(() => expect(api.getGlobalConfig).toHaveBeenCalled());
+  };
+
+  const providerSelect = () =>
+    document.querySelector<HTMLSelectElement>('#provider-select') as HTMLSelectElement;
+  const modelInput = () => document.querySelector<HTMLInputElement>('input[list="model-options"]');
+  const modelSelect = () => document.querySelector<HTMLSelectElement>('#model-select');
+  const addressInput = () =>
+    document.querySelector<HTMLInputElement>('#api-base-url') as HTMLInputElement;
+
+  it('Provider 只能下拉选择，没有自由输入框', async () => {
+    await renderSettings();
+    expect(document.querySelector('input[list="provider-options"]')).toBeNull();
+    expect(providerSelect()).not.toBeNull();
+    // 只列可用的预置；xai 是 available:false，不该出现
+    const values = Array.from(providerSelect().options).map((option) => option.value);
+    expect(values).toContain('openai');
+    expect(values).not.toContain('xai');
+    // 「手动配置」是下拉里的一项，不是靠手输触发
+    expect(values).toContain('__manual__');
+    // 没有「不指定」那一项：「什么都没选」和「我要自己填」在界面上长得一样，
+    // 用户却以为是两回事 —— 空值一律由「手动配置」承担。
+    expect(values).not.toContain('');
+  });
+
+  it('模型严格下拉里没有空值项（不再有「使用运行时默认值」）', async () => {
+    await renderSettings({ cli_name: 'codex', model: 'gpt-5.6',
+      api_base_url: 'https://api.openai.com/v1' });
+    await waitFor(() => expect(modelSelect()).not.toBeNull());
+    const values = Array.from(modelSelect()!.options).map((option) => option.value);
+    expect(values).not.toContain('');
+    expect(modelSelect()!.value).toBe('gpt-5.6');
+  });
+
+  it('选预置后 API 地址锁成只读；切「手动配置」会清空并解锁', async () => {
+    // 匹配不到预置 → 默认就是「手动配置」：这一态不宣称任何事实
+    await renderSettings();
+    expect(providerSelect().value).toBe('__manual__');
+    expect(addressInput().disabled).toBe(false);
+
+    fireEvent.change(providerSelect(), { target: { value: 'openai' } });
+    await waitFor(() => expect(addressInput().value).toBe('https://api.openai.com/v1'));
+    expect(addressInput().disabled).toBe(true);
+
+    fireEvent.change(providerSelect(), { target: { value: '__manual__' } });
+    // 必须清空：残留的预置地址会被后端按模型厂商改写掉（cli_adapters.py:216-217），
+    // 界面上写着「手动配置」而实际地址被换掉。
+    await waitFor(() => expect(addressInput().value).toBe(''));
+    expect(addressInput().disabled).toBe(false);
+  });
+
+  it('预置模式下换模型，地址框显示的生效地址跟着后端变', async () => {
+    await renderSettings({ cli_name: 'codex', model: 'gpt-5.6',
+      api_base_url: 'https://api.openai.com/v1' });
+    await waitFor(() => expect(addressInput().value).toBe('https://api.openai.com/v1'));
+
+    // 后端按模型厂商算出的端点（这里只 stub 出「换模型就换个地址」这个事实）
+    vi.mocked(api.getEffectiveBaseUrl).mockImplementation(async ({ model }) =>
+      model === 'deepseek-v4-pro'
+        ? { base_url: 'https://api.deepseek.com/v1', source: 'model_vendor' }
+        : { base_url: 'https://api.openai.com/v1', source: 'configured' });
+
+    fireEvent.change(modelSelect(), { target: { value: 'deepseek-v4-pro' } });
+    // 显示的必须是后端算出的生效地址，而不是 config 里存着的那个预置地址
+    await waitFor(() => expect(addressInput().value).toBe('https://api.deepseek.com/v1'));
+    expect(addressInput().disabled).toBe(true);
+    expect(api.getEffectiveBaseUrl).toHaveBeenLastCalledWith(
+      expect.objectContaining({ model: 'deepseek-v4-pro' }),
+    );
+    // 提示语也要跟着换，否则用户看不出这个地址是随模型变的
+    expect(screen.getByText('生效地址：由当前模型的厂商决定，换模型会跟着变')).toBeDefined();
+  });
+
+  it('手动模式下不问后端要生效地址：地址由用户自己填', async () => {
+    await renderSettings({ cli_name: 'claude', model: 'my-internal-model',
+      api_base_url: 'https://gateway.corp.internal/v1' });
+    await waitFor(() => expect(providerSelect().value).toBe('__manual__'));
+    expect(api.getEffectiveBaseUrl).not.toHaveBeenCalled();
+  });
+
+  it('只有「手动配置」才把模型放开为自由输入', async () => {
+    // 预置：名单确定 → 只能下拉
+    await renderSettings({ cli_name: 'codex', model: 'gpt-5.6',
+      api_base_url: 'https://api.openai.com/v1' });
+    await waitFor(() => expect(modelSelect()).not.toBeNull());
+    expect(modelInput()).toBeNull();
+
+    // 手动配置：端点由用户决定，我们算不出名单 → 放开手输
+    fireEvent.change(providerSelect(), { target: { value: '__manual__' } });
+    await waitFor(() => expect(modelInput()).not.toBeNull());
+    expect(modelSelect()).toBeNull();
+  });
+
+  it('配置里存着自定义端点时落回「手动配置」，模型可手输且值保留', async () => {
+    // 私有网关的用户：model 是目录外的值。若不落回手动模式，模型被锁成下拉，
+    // 他连自己正在用的模型都选不回来。
+    await renderSettings({ cli_name: 'claude', model: 'my-internal-model',
+      api_base_url: 'https://gateway.corp.internal/v1' });
+    await waitFor(() => expect(providerSelect().value).toBe('__manual__'));
+    expect(modelInput()).not.toBeNull();
+    expect(modelInput()!.value).toBe('my-internal-model');
+    // 自定义地址原样保留，不被当作预置值
+    expect(addressInput().value).toBe('https://gateway.corp.internal/v1');
+    expect(addressInput().disabled).toBe(false);
+  });
+
+  it('预置认的是「它自己声称的那个 CLI」，CLI 被改过就不算数', async () => {
+    // 存着 openai 预置的地址，但 CLI 是 claude：这套配置已经不是该预置产生的了，
+    // 此时宣称「Provider = OpenAI 官方 API」会把用户没选过的参数按在他头上。
+    await renderSettings({ cli_name: 'claude', model: 'gpt-5.6',
+      api_base_url: 'https://api.openai.com/v1' });
+    await waitFor(() => expect(providerSelect().value).toBe('__manual__'));
+    expect(addressInput().value).toBe('https://api.openai.com/v1');
+  });
+});

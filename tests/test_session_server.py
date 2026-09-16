@@ -1061,6 +1061,53 @@ def test_internal_username_empty_value_deletes(session_client):
 
 
 # ============================================================================
+# 生效地址端点（/v1/effective-base-url）
+# ============================================================================
+
+def test_effective_base_url_follows_the_model(session_client):
+    """连接表单显示「生效地址」用的端点：换模型就换地址。
+
+    传的是**表单里当前的值**（可能还没保存），所以只走 query，不读全局配置。
+    """
+    resp = session_client.get(
+        "/v1/effective-base-url",
+        params={"cli_name": "claude", "model": "glm-5.2", "api_base_url": ""},
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json() == {
+        "base_url": "https://open.bigmodel.cn/api/anthropic",
+        "source": "model_vendor",
+    }
+
+    resp = session_client.get(
+        "/v1/effective-base-url",
+        params={"cli_name": "claude", "model": "kimi-k3", "api_base_url": ""},
+    )
+    assert resp.json() == {
+        "base_url": "https://api.moonshot.cn/anthropic",
+        "source": "model_vendor",
+    }
+
+
+def test_effective_base_url_keeps_user_gateway(session_client):
+    """用户手填的网关不被改写 —— 换模型也不动。"""
+    params = {"cli_name": "codex", "model": "gpt-5.6", "api_base_url": "https://my-gw.corp/v1"}
+    resp = session_client.get("/v1/effective-base-url", params=params)
+    assert resp.json() == {"base_url": "https://my-gw.corp/v1", "source": "configured"}
+
+    params["model"] = "deepseek-v4-pro"
+    resp = session_client.get("/v1/effective-base-url", params=params)
+    assert resp.json() == {"base_url": "https://my-gw.corp/v1", "source": "configured"}
+
+
+def test_effective_base_url_missing_params_degrade_quietly(session_client):
+    """表单刚打开、什么都还没填时不能 500。"""
+    resp = session_client.get("/v1/effective-base-url")
+    assert resp.status_code == 200, resp.text
+    assert resp.json() == {"base_url": None, "source": "cli_default"}
+
+
+# ============================================================================
 # 单节点 agent 数量策略（dynamic_num_ccs / default_num_ccs）
 # ============================================================================
 

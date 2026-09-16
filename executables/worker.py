@@ -271,7 +271,8 @@ def _create_real_aicu(ctx: ExecutableContext) -> Any:
     # 目录，与角色配置不一致且该目录往往不存在，导致带 skill 的节点失败。
     skills_dir = node.config.get("skills_dir")
     # MCP server 名字列表；同样以 None 表示「未配置」，由 AICU 回退到角色 yaml 的 mcp。
-    # 解析与连通性预检都由 AICU 做（见 runtime/mcp_client.py），这里只透传名字。
+    # 解析与连通性预检都由 AICU 做（见 runtime/mcp_manager.py 与 runtime/mcp_client.py），
+    # 这里只透传名字。
     selected_mcp = node.config.get("mcp")
 
     # ---- V3-2.1 shared_target：Worker 有共享工作区 → CC 直写分区 ----
@@ -315,6 +316,29 @@ def _create_real_aicu(ctx: ExecutableContext) -> Any:
     return aicu
 
 
+def _backfill_failed(ctx: ExecutableContext, exc: Exception, *, stage: str) -> NodeStatus:
+    """把失败写回节点：error + 一条 ERROR 日志。
+
+    startup（建 AICU）与 execution（跑任务）两处失败共用这一份，因为它们对用户是同一件
+    事 —— 节点红了、原因在日志里。``stage`` 只影响日志措辞，让人一眼看出失败发生在建
+    AICU 之前还是任务执行当中；两者的 error 兜底形状也刻意保持一致。
+    """
+    error = getattr(exc, "error", None) or ErrorObject.create_worker_execution_error()
+    ctx.runtime.update_node_status(
+        ctx.node.id,
+        NodeStatus.FAILED,
+        error=error,
+        log=[
+            LogEntry(
+                ts=datetime.now(),
+                level=LogLevel.ERROR,
+                message=f"Worker {stage} failed: {exc}",
+            )
+        ],
+    )
+    return NodeStatus.FAILED
+
+
 def _fail_startup(ctx: ExecutableContext, exc: Exception) -> NodeStatus:
     """AICU 构造期失败 → 节点 FAILED + 可读日志。
 
@@ -323,26 +347,14 @@ def _fail_startup(ctx: ExecutableContext, exc: Exception) -> NodeStatus:
     error 为空」。而这一类失败（MCP 预检连不上、skills_dir 不存在、角色 yaml 非法）
     恰恰都要用户去改环境或配置才能修，看不见原因就等于修不了。
 
-    刻意复用下方执行期失败的回填形状（同一个 error 兜底 + 一条 ERROR 日志），
-    让两种失败在 UI 上是同一种东西。
+    与执行期唯一的差别是这里多兜一层异常：回填本身若再抛出，就退回「日志为空」，
+    等于白做。
     """
-    error = getattr(exc, "error", None) or ErrorObject.create_worker_execution_error()
     try:
-        ctx.runtime.update_node_status(
-            ctx.node.id,
-            NodeStatus.FAILED,
-            error=error,
-            log=[
-                LogEntry(
-                    ts=datetime.now(),
-                    level=LogLevel.ERROR,
-                    message=f"Worker startup failed: {exc}",
-                )
-            ],
-        )
-    except Exception:  # noqa: BLE001  回填本身不能再抛出，否则又退回「日志为空」
+        return _backfill_failed(ctx, exc, stage="startup")
+    except Exception:  # noqa: BLE001
         logger.exception("Failed to backfill startup failure for node '%s'", ctx.node.id)
-    return NodeStatus.FAILED
+        return NodeStatus.FAILED
 
 
 # ========== 生产侧通用验收原则（领域无关，Worker 专属注入） ==========
@@ -1112,37 +1124,14 @@ class Worker(Executable):
             if getattr(ctx.node, 'status', None) == NodeStatus.PAUSED:
                 return NodeStatus.PAUSED
 
-            # Build structured error via factory method
-            error = getattr(exc, "error", None) or ErrorObject.create_worker_execution_error()
-
             # 失败路径兜底摄取事件（Agent 可能在失败前已发布部分事件）。
             try:
                 ctx.runtime.flush_node_events(ctx.node.id)
             except Exception:  # noqa: BLE001
                 pass
 
-            # Build the worker-level terminal entry. A real CC failure, when
-            # available, is emitted once by the activity callback.
-            log_entries = [
-                LogEntry(
-                    ts=datetime.now(),
-                    level=LogLevel.ERROR,
-                    message=f"Worker execution failed: {exc}",
-                ),
-            ]
-
-            # Backfill FAILED status with error and logs
-            update_kwargs = {
-                "error": error,
-                "log": log_entries,
-            }
-            ctx.runtime.update_node_status(
-                ctx.node.id,
-                NodeStatus.FAILED,
-                **update_kwargs,
-            )
-
-            return NodeStatus.FAILED
+            # A real CC failure, when available, is emitted once by the activity callback.
+            return _backfill_failed(ctx, exc, stage="execution")
 
         finally:
             executor.shutdown(wait=False)

@@ -23,7 +23,7 @@ from cli_adapters import (
 )
 from claude_code_agent import ClaudeCodeAgent
 from runtime.credentials import CredentialStore, set_credential_store, vendor_of_model
-from runtime.mcp_client import McpServer, load_registry, resolve_servers
+from runtime.mcp_manager import McpServer, load_registry, resolve_servers
 
 
 def _mcp_servers(*names, **kwargs) -> list:

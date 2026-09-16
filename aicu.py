@@ -11,7 +11,9 @@ from typing import Callable, Optional, Dict, List, Sequence, Set, Tuple
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from claude_code_agent import ClaudeCodeAgent, CCExecutionError, ModelImageInputError
-from runtime.mcp_client import probe_servers, resolve_servers
+from runtime.mcp_client import probe_servers
+from runtime.mcp_manager import resolve_servers
+from runtime.repo_paths import REPO_ROOT, resolve_repo_relative
 
 
 # sentinel for "调用方未传此参数"，与 None（可能是有效值，如 output_file=null）区分
@@ -279,7 +281,7 @@ class AICU:
             raise ValueError("AICU 需要 parent_workspace（工作目录）")
 
         _role_type = (role_type or "worker")
-        _roles_parent = Path(__file__).parent / "roles"  # roles/ 父目录
+        _roles_parent = REPO_ROOT / "roles"  # roles/ 父目录
         # system_role 目录保持原名（框架内部角色）；其余统一首字母大写
         # （"manager" → "Manager", "worker" → "Worker"）。
         _roles_dir_name = "system_role" if _role_type == "system_role" else _role_type.capitalize()
@@ -406,12 +408,9 @@ class AICU:
             skills if skills is not None else self.role_config.get("skills") or []
         )
         skills_dir_cfg = skills_dir or self.role_config.get("skills_dir") or "~/.claude/skills"
-        # 相对路径 → 相对项目根（aicu.py 所在目录）解析，便于开源分发：
-        # 仓库自带 skills/ 时 yaml 可直接写 "skills"，clone 后无需改配置。
-        _user_skills_dir = Path(skills_dir_cfg).expanduser()
-        if not _user_skills_dir.is_absolute():
-            _user_skills_dir = (Path(__file__).parent / _user_skills_dir).resolve()
-        self._user_skills_dir = _user_skills_dir
+        # 相对路径 → 相对项目根解析，便于开源分发：仓库自带 skills/ 时 yaml 可直接写
+        # "skills"，clone 后无需改配置。规则与 MCP 注册表共用一份（runtime/repo_paths.py）。
+        self._user_skills_dir = resolve_repo_relative(skills_dir_cfg)
 
         # ---- mcp 配置 ----
         # mcp: 要启用的 MCP server 名字列表，在仓库根 mcp_servers.json 中定义。

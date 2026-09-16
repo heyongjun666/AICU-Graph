@@ -1,8 +1,8 @@
-"""MCP server 注册表与连通性预检。
+"""MCP server 的 stdio 预检：连一次，确认它真的能起来并握手。
 
-角色 yaml 只写 server 名字（``mcp: [echo-probe]``），``command`` / ``args`` 集中在仓库根的
-``mcp_servers.json``。与 ``skills/`` 同一思路：角色只引用名字，实现在别处。这样角色配置
-（可在设置页上编辑）里不会出现「一段将被执行的命令」，命令只在一个地方维护。
+与 ``runtime/mcp_manager.py`` 的分工：那边管注册表（server 定义从哪来、名字怎么解析），
+本模块只管拿一个已经解析好的 ``McpServer`` 去连一下。分开是因为两者的失败面不同 ——
+那边的错是配置写坏，这边的错是环境问题（命令不存在、缺依赖、握手超时）。
 
 **为什么必须预检**：MCP server 起不来时，CLI 通常只打一条 warning 就照常启动 —— agent
 发现工具不在会绕路，或者报一个与 MCP 毫无关系的错。于是节点不会失败，日志里也没有
@@ -23,13 +23,9 @@ import os
 import select
 import subprocess
 import sys
-from dataclasses import dataclass, field
-from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
-# 注册表与仓库根同级（本模块在 runtime/ 下）
-_REPO_ROOT = Path(__file__).resolve().parent.parent
-REGISTRY_FILE = _REPO_ROOT / "mcp_servers.json"
+from runtime.mcp_manager import McpServer
 
 # 预检握手的默认超时（秒）。只覆盖「启动 + 握手」，不覆盖 server 自身的重活；
 # stdio server 通常是本地小进程，超过这个数多半是卡住了而不是慢。
@@ -38,104 +34,8 @@ DEFAULT_PROBE_TIMEOUT = 20.0
 PROTOCOL_VERSION = "2024-11-05"
 
 
-class McpConfigError(ValueError):
-    """注册表本身有问题，或角色引用了一个不存在的 server。"""
-
-
 class McpProbeError(RuntimeError):
     """server 存在但连不上（起不来、握手超时、返回错误）。"""
-
-
-@dataclass
-class McpServer:
-    """注册表里的一条 server 定义，路径已解析成绝对路径。
-
-    这是个**与 CLI 无关**的中立表示：``command`` 与 ``args`` 分开存，不预设哪家
-    CLI 想要什么形状。各 adapter 自己决定怎么序列化它 —— claude 系要
-    ``{"command": str, "args": [...]}``，opencode 要 ``command: [str, ...]``，
-    codex 要拆成一对对 ``-c`` 键值。把序列化放在 adapter 里，是因为那才是
-    「这家 CLI 要什么」的知识该待的地方。
-    """
-
-    name: str
-    command: str
-    args: list[str] = field(default_factory=list)
-    env: dict[str, str] = field(default_factory=dict)
-    description: str = ""
-    required: bool = True
-
-
-def _resolve_path(value: str) -> str:
-    """把注册表里的路径解析成绝对路径。
-
-    规则与角色 yaml 的 ``skills_dir`` 一致：支持 ``~`` 家目录、绝对路径，
-    以及按仓库根解析的相对路径（如 ``tests/mcp_echo_server.py``），
-    clone 下来即可用，不必改配置。不含路径分隔符的值（如 ``python3``）原样保留，
-    交由 PATH 查找。
-    """
-    if os.sep not in value and "/" not in value:
-        return value
-    path = Path(value).expanduser()
-    if not path.is_absolute():
-        path = _REPO_ROOT / path
-    return str(path)
-
-
-def load_registry(path: Optional[Path] = None) -> dict[str, McpServer]:
-    """读取注册表；文件缺失或损坏时抛 McpConfigError（不静默吞掉）。"""
-    registry_path = path or REGISTRY_FILE
-    try:
-        raw = json.loads(registry_path.read_text(encoding="utf-8"))
-    except FileNotFoundError:
-        raise McpConfigError(f"MCP 注册表不存在: {registry_path}") from None
-    except json.JSONDecodeError as error:
-        raise McpConfigError(f"MCP 注册表不是合法 JSON: {registry_path} — {error}") from None
-
-    entries = raw.get("servers") if isinstance(raw, dict) else None
-    if not isinstance(entries, dict):
-        raise McpConfigError(f"MCP 注册表缺少 servers 对象: {registry_path}")
-
-    servers: dict[str, McpServer] = {}
-    for name, spec in entries.items():
-        if not isinstance(spec, dict):
-            raise McpConfigError(f"MCP 注册表条目 '{name}' 不是对象")
-        command = spec.get("command")
-        if not command or not isinstance(command, str):
-            raise McpConfigError(f"MCP 注册表条目 '{name}' 缺少 command")
-        args = spec.get("args") or []
-        if not isinstance(args, list):
-            raise McpConfigError(f"MCP 注册表条目 '{name}' 的 args 不是列表")
-        env = spec.get("env") or {}
-        if not isinstance(env, dict):
-            raise McpConfigError(f"MCP 注册表条目 '{name}' 的 env 不是对象")
-        servers[str(name)] = McpServer(
-            name=str(name),
-            command=_resolve_path(command),
-            args=[_resolve_path(str(arg)) for arg in args],
-            env={str(k): str(v) for k, v in env.items()},
-            description=str(spec.get("description") or ""),
-            required=bool(spec.get("required", True)),
-        )
-    return servers
-
-
-def resolve_servers(
-    names: Optional[list[str]], registry: Optional[dict[str, McpServer]] = None
-) -> list[McpServer]:
-    """把角色声明的名字列表解析成 server 定义；名字不存在时报错并列出可用的。"""
-    if not names:
-        return []
-    available = registry if registry is not None else load_registry()
-    missing = [name for name in names if name not in available]
-    if missing:
-        raise McpConfigError(
-            f"角色配置的 mcp 在注册表 ({REGISTRY_FILE}) 中未找到: {missing}。"
-            f"可用 MCP server: {sorted(available)}"
-        )
-    return [available[name] for name in names]
-
-
-# ---- 预检 -------------------------------------------------------------------
 
 
 class _Eof:

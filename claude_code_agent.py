@@ -95,7 +95,8 @@ class ClaudeCodeAgent:
             下 .claude/skills/ 中的 skill，不加载用户级 ~/.claude/skills/。
             调用方需自行在 workspace/.claude/skills/ 准备好 skill 软链接/拷贝。
         :param mcp_servers: 要下发给 CLI 的 MCP server 列表（``list[McpServer]``），
-            由 AICU 侧完成注册表解析与预检（见 runtime/mcp_client.py）。
+            由 AICU 侧完成注册表解析（runtime/mcp_manager.py）与连通性预检
+            （runtime/mcp_client.py）。
             **这里刻意收对象而不是 JSON 串**：三家 CLI 的配置形态互不相同（CC 族是
             argv 里的 mcpServers JSON、codex 是一串 -c 键值、opencode 是环境变量里的
             另一份 JSON），序列化只有 adapter 知道该怎么做。早先传 JSON 串还得反解出

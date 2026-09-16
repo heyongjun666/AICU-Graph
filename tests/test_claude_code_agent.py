@@ -17,7 +17,7 @@ from claude_code_agent import (
     is_model_image_input_error,
     ClaudeCodeAgent,
 )
-from runtime.mcp_client import McpServer
+from runtime.mcp_manager import McpServer
 from aicu import AICU
 import cli_adapters
 

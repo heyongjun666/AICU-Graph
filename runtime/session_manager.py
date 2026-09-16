@@ -27,6 +27,7 @@ _SESSION_CONFIG_KEYS = {
     "api_key_env",
     "skip_permissions",
     "skills",
+    "candidate_roles",
     "num_ccs",
     "audit_rounds",
     "max_iterations",
@@ -71,6 +72,21 @@ def _safe_session_config(config: Optional[dict]) -> dict[str, Any]:
     if not config:
         return {}
     return {key: value for key, value in config.items() if key in _SESSION_CONFIG_KEYS}
+
+
+def _normalize_candidate_roles(value: Any) -> Optional[list[str]]:
+    """把会话配置里的 candidate_roles 归一成去重保序的角色 id 列表。
+
+    None 表示「未绑定候选池」→ Manager 看到 roles/ 下全部角色（历史会话行为）。
+    空列表与非法值一律归一为 None：一个角色都没有的池没有意义，等同于不限制。
+    """
+    if not isinstance(value, (list, tuple)):
+        return None
+    cleaned: list[str] = []
+    for role_id in value:
+        if isinstance(role_id, str) and role_id and role_id not in cleaned:
+            cleaned.append(role_id)
+    return cleaned or None
 
 
 # 哨兵：update_settings 的 shared_workspace 三态（_UNSET=不修改 / None 或 ""=清除 / 路径=设置）。
@@ -245,6 +261,10 @@ class SessionManager:
         handle = self.get_session(session_id)
         with self._lock:
             handle.metadata.config.update(_safe_session_config(config))
+            # 候选角色池：用 metadata 反推而非只看本次入参，否则两次 PATCH 会互相清空。
+            handle.runtime.candidate_roles = _normalize_candidate_roles(
+                handle.metadata.config.get("candidate_roles")
+            )
             if workspace_root is not None:
                 value = workspace_root.strip()
                 if not value:
@@ -653,6 +673,11 @@ class SessionManager:
             workspace_root=workspace_dir,
             shared_workspace=metadata.shared_workspace,
             roles_dir=self.roles_dir,
+            # 必须走构造参数而非构造后赋值：_restore_sessions 恢复时
+            # runtime.start(paused=restoring) 可能立即调度已恢复的 Manager。
+            candidate_roles=_normalize_candidate_roles(
+                metadata.config.get("candidate_roles")
+            ),
             router_config=self.global_config,
             dynamic_num_ccs=self.global_config.get("dynamic_num_ccs", True),
             default_num_ccs=self.global_config.get("default_num_ccs", 1),

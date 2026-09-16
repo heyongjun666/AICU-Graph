@@ -302,6 +302,9 @@ def _create_real_aicu(ctx: ExecutableContext) -> Any:
         shared_target=shared_target,
         # 只喂边界声明，不影响产物归属判定（那是 shared_target 的职责）。
         shared_root=shared_root,
+        # 会话候选角色池：绑定后 Manager 只看到池内角色的摘要。
+        # 会话级属性（Runtime），无需逐节点透传 —— 子节点构造 AICU 时同样读到这里。
+        candidate_roles=getattr(ctx.runtime, "candidate_roles", None),
     )
     with Worker._aicu_cache_lock:
         Worker._aicu_cache[node.id] = aicu

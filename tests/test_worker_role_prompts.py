@@ -701,3 +701,87 @@ class TestHolisticRenderedInAllModes:
                              lambda x: x._pair_review("q", x.ccs[1]))
         assert "holistic_experience" in a and "holistic_visual" in b
         assert "holistic_visual" not in a and "holistic_experience" not in b
+
+
+# ============================================================================
+# 12. 会话候选角色池对 {available_roles} 面板的过滤
+#
+# 池是**提示词候选范围**（软约束），不是 PlanValidator 边界；本组只钉面板文本。
+# 最关键的一条是向后兼容：未绑池时必须与历史行为逐字节一致。
+# ============================================================================
+
+import tempfile  # noqa: E402
+
+from aicu import _ROLE_POOL_INVALID_NOTICE, _ROLE_POOL_NOTICE  # noqa: E402
+
+
+def _panel(allowed_roles=None) -> str:
+    return AICU._build_available_roles_text(ROOT / "roles", allowed_roles)
+
+
+class TestCandidateRolePoolPanel:
+    def test_unbound_panel_lists_every_role_and_default(self):
+        """向后兼容回归钉：未绑池 = 历史行为，且不得出现任何池引导行。"""
+        panel = _panel(None)
+
+        for role_id in ALL_ROLES:
+            assert f"  - **{role_id}**:" in panel, role_id
+        assert "  - **default**:" in panel
+        assert _ROLE_POOL_NOTICE not in panel
+        assert _ROLE_POOL_INVALID_NOTICE not in panel
+
+    def test_unbound_panel_is_byte_identical_to_the_two_arg_default(self):
+        assert _panel() == _panel(None)
+
+    def test_filtered_panel_is_exactly_the_pool(self):
+        """严格模式：面板 == 池，无例外（连 default 也不列）。"""
+        pool = {"code", "engineering_coord"}
+        panel = _panel(pool)
+
+        assert "  - **code**:" in panel
+        assert "  - **engineering_coord**:" in panel
+        assert "  - **test**:" not in panel
+        assert "  - **default**:" not in panel
+        assert _ROLE_POOL_NOTICE in panel
+
+    def test_pool_of_one_manager_role_drops_the_worker_section(self):
+        panel = _panel({"engineering_coord"})
+
+        assert "  ### Manager 角色" in panel
+        assert "  ### Worker 角色" not in panel
+        assert "  - **engineering_coord**:" in panel
+
+    def test_partially_stale_pool_renders_the_survivors_without_an_alarm(self):
+        """只失效一部分时照常渲染剩余角色，不告警 —— 告警只留给全失效。"""
+        panel = _panel({"code", "deleted_role"})
+
+        assert "  - **code**:" in panel
+        assert "deleted_role" not in panel
+        assert _ROLE_POOL_INVALID_NOTICE not in panel
+
+    def test_fully_stale_pool_fails_loud_instead_of_falling_back(self):
+        """防「静默回退全量」的钉：池全失效时只输出告警，一个角色名都不出现。"""
+        panel = _panel({"ghost", "phantom"})
+
+        assert panel == _ROLE_POOL_INVALID_NOTICE
+        assert "  - **code**:" not in panel
+        assert "  - **default**:" not in panel
+        assert _ROLE_POOL_NOTICE not in panel
+
+    def test_pool_ids_are_not_matched_across_role_type(self, tmp_path):
+        """同名角色在 Manager/ 与 Worker/ 下会被 id 一起放行（池存的是扁平 id 列表）。"""
+        (tmp_path / "Manager").mkdir()
+        (tmp_path / "Worker").mkdir()
+        (tmp_path / "Manager" / "shared.yaml").write_text("summary: m\n", encoding="utf-8")
+        (tmp_path / "Worker" / "shared.yaml").write_text("summary: w\n", encoding="utf-8")
+        (tmp_path / "Worker" / "other.yaml").write_text("summary: o\n", encoding="utf-8")
+
+        panel = AICU._build_available_roles_text(tmp_path, {"shared"})
+
+        assert panel.count("  - **shared**:") == 2
+        assert "  - **other**:" not in panel
+
+    def test_missing_roles_dir_still_reports_invalidation(self, tmp_path):
+        panel = AICU._build_available_roles_text(tmp_path / "nope", {"code"})
+
+        assert panel == _ROLE_POOL_INVALID_NOTICE

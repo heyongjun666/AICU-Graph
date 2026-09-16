@@ -1228,3 +1228,55 @@ def test_role_pool_crud_is_isolated_and_persisted(session_manager, tmp_path):
     assert fresh.list_pools() == []
 
 
+def test_session_binding_to_candidate_roles_reaches_the_runtime(session_manager, tmp_path):
+    roles_manager = _seed_roles(tmp_path / "roles")
+    app = create_session_app(
+        session_manager,
+        roles_manager,
+        role_pools_manager=RolePoolsManager(
+            str(tmp_path / "role_pools.json"), roles_manager
+        ),
+    )
+
+    with TestClient(app) as client:
+        session_id = _create_session(client)["id"]
+        url = f"/v1/sessions/{session_id}/settings"
+
+        assert client.patch(url, json={"config": {"candidate_roles": ["code"]}}).status_code == 200
+        # 回显只能证明白名单放行；真正的生效判据是 Runtime 上的候选集
+        assert client.get(url).json()["config"]["candidate_roles"] == ["code"]
+        assert session_manager.get_session(session_id).runtime.candidate_roles == ["code"]
+
+        # 后续 PATCH 未带该键 → 不得把已有绑定清空
+        assert client.patch(url, json={"config": {"num_ccs": 2}}).status_code == 200
+        assert client.get(url).json()["config"]["candidate_roles"] == ["code"]
+        assert session_manager.get_session(session_id).runtime.candidate_roles == ["code"]
+
+        # 空列表 = 解除绑定（归一为 None → Manager 看到全部角色）
+        assert client.patch(url, json={"config": {"candidate_roles": []}}).status_code == 200
+        assert session_manager.get_session(session_id).runtime.candidate_roles is None
+
+
+def test_deleting_a_pool_leaves_bound_sessions_untouched(session_manager, tmp_path):
+    """会话存的是角色 id 快照，不是池 id —— 删池不得影响已绑定会话。"""
+    roles_manager = _seed_roles(tmp_path / "roles")
+    app = create_session_app(
+        session_manager,
+        roles_manager,
+        role_pools_manager=RolePoolsManager(
+            str(tmp_path / "role_pools.json"), roles_manager
+        ),
+    )
+
+    with TestClient(app) as client:
+        pool = client.post(
+            "/v1/role-pools", json={"name": "纯编码", "roles": ["code", "test"]}
+        ).json()
+        session_id = _create_session(client)["id"]
+        url = f"/v1/sessions/{session_id}/settings"
+        client.patch(url, json={"config": {"candidate_roles": pool["roles"]}})
+
+        assert client.delete(f"/v1/role-pools/{pool['id']}").status_code == 204
+
+        assert client.get(url).json()["config"]["candidate_roles"] == ["code", "test"]
+        assert session_manager.get_session(session_id).runtime.candidate_roles == ["code", "test"]

@@ -7,7 +7,7 @@ import subprocess
 import yaml
 from datetime import datetime
 from pathlib import Path
-from typing import Callable, Optional, Dict, List, Tuple
+from typing import Callable, Optional, Dict, List, Sequence, Set, Tuple
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from claude_code_agent import ClaudeCodeAgent, CCExecutionError, ModelImageInputError
@@ -80,6 +80,23 @@ _CHECKLIST_APPLICABILITY_NOTE = (
     "不适用项在 summary（审计位为 overall_assessment）中标注为 N/A 并说明理由。\n"
     "仅当所有适用项通过（无 high/medium 缺陷）时才 approved=true；审计位以无 high/medium 缺陷为准。\n"
     "N/A 不得用于规避真实缺陷。"
+)
+
+# 绑定候选角色池时，在角色面板最前面插入的引导（未绑定时不插入，保证历史会话提示词逐字不变）。
+# 两个作用：① 说明候选被限定，避免 Manager 去引用面板外的角色；② 池覆盖不足时的正确动作 ——
+# roles/Manager/default.yaml 的通用建议是「建议新增专用角色」，有了池之后那句会把 Manager
+# 往池外推，这里就地覆盖掉。
+_ROLE_POOL_NOTICE = (
+    "  【候选角色池】本会话的候选角色已限定在下方清单内，清单之外的角色不在本会话候选范围内。\n"
+    "  若清单内无角色能覆盖某个 Capability，请勿强行套用最近邻，也不要使用清单外的角色名；\n"
+    "  应在输出中如实标注候选缺失。"
+)
+
+# 池内角色全部不存在时（多半是后续被删）的失效告警。绝不静默回退全量角色 ——
+# 那会让用户以为池在生效，实际它已退化成不限制。
+_ROLE_POOL_INVALID_NOTICE = (
+    "  ⚠ 本会话绑定的候选角色池已失效：池内角色均已不存在（可能已被删除）。\n"
+    "  请勿改用池外的角色；请先在会话中重新绑定候选角色池，或如实说明候选角色缺失。"
 )
 
 
@@ -190,7 +207,8 @@ class AICU:
                  skills_dir: Optional[str] = None,
                  skip_permissions: bool = True,
                  shared_target: Optional[str] = None,
-                 shared_root: Optional[str] = None):
+                 shared_root: Optional[str] = None,
+                 candidate_roles: Optional[Sequence[str]] = None):
         """
         初始化 AICU
 
@@ -224,6 +242,13 @@ class AICU:
                      （见 `_build_workspace_boundary_template`）。不传则边界块退化为只声明
                      本节点工作区（Router CC 等无共享区场景）。它不影响产物归属判定 ——
                      那是 shared_target 的职责。
+        :param candidate_roles: 会话候选角色池（角色 id 列表）。非空时，
+                     `{available_roles}` 面板**只列出池内角色**（严格模式，无例外，
+                     连 default 也不出现在面板里）；不传/为空表示不限制，面板列出
+                     roles/ 下全部角色（历史行为，逐字不变）。
+                     注意这是**提示词候选范围**而非校验边界：PlanValidator 仍以全量角色
+                     为允许集合（见 runtime/runtime.py 的 roles_dir），因此池外角色不会
+                     被拒 —— 池的作用是收窄 Manager 的候选描述，不是阻断。
         """
         # ---- 加载角色配置（数据驱动：default.yaml 为基础，{role}.yaml 覆盖） ----
         if role is None:
@@ -273,6 +298,12 @@ class AICU:
         self.role_name = role
         self.role_type = role_type
 
+        # 会话候选角色池：None = 未绑定 → 角色面板列出 roles/ 下全部角色。
+        # 空列表与 None 等价（一个角色都没有的池没有意义），必须在下面拼面板之前归一。
+        self.candidate_roles: Optional[Set[str]] = (
+            set(candidate_roles) if candidate_roles else None
+        )
+
         # 4. 应用初始化参数：调用方未传（_UNSET）的从合并后的 yaml 取
         #    注意：num_ccs/model/cli_name/audit_rounds 用 None-sentinel（None 不是有效值）
         #    output_file/final_file/modular_output/generate_instruction 用 _UNSET sentinel
@@ -302,9 +333,12 @@ class AICU:
         # ---- 动态注入可用角色列表到 generate_instruction ----
         # 如果 generate_instruction 中包含 {available_roles} 占位符，
         # 扫描 roles/Manager/ 和 roles/Worker/ 目录动态生成角色列表文本并替换
+        # （绑定了候选角色池时只列池内角色，见 _build_available_roles_text）。
         self.available_roles_text = ""
         if "{available_roles}" in generate_instruction:
-            available_text = self._build_available_roles_text(_roles_parent)
+            available_text = self._build_available_roles_text(
+                _roles_parent, self.candidate_roles
+            )
             generate_instruction = generate_instruction.replace(
                 "{available_roles}", available_text
             )
@@ -469,7 +503,9 @@ class AICU:
         return sorted(p.name for p in self._user_skills_dir.iterdir() if p.is_dir())
 
     @staticmethod
-    def _build_available_roles_text(roles_parent: Path) -> str:
+    def _build_available_roles_text(
+        roles_parent: Path, allowed_roles: Optional[Set[str]] = None
+    ) -> str:
         """扫描 roles/Manager/ 和 roles/Worker/ 目录，动态生成可用角色列表文本。
 
         用于替换 generate_instruction 中的 {available_roles} 占位符。
@@ -485,6 +521,9 @@ class AICU:
 
         Args:
             roles_parent: roles/ 父目录的 Path。
+            allowed_roles: 会话候选角色池（角色 id 集合）。非 None 时**严格只列池内角色**
+                —— 不并上 default，因为 default 不在 RolesManager 的可选角色里，让它出现
+                会让 Manager 看到一个本不该被当作候选的条目。None 表示未绑定，列全部。
 
         Returns:
             格式化后的角色列表文本（含 Manager 角色和 Worker 角色两段）。
@@ -526,6 +565,9 @@ class AICU:
             return ""
 
         lines = []
+        if allowed_roles is not None:
+            lines.append(_ROLE_POOL_NOTICE)
+        matched = 0                 # 池内真实存在（可渲染）的角色数，用于 fail-loud 判定
         for subdir_name, label in [("Manager", "Manager"), ("Worker", "Worker")]:
             subdir = roles_parent / subdir_name
             if not subdir.is_dir():
@@ -534,6 +576,10 @@ class AICU:
                 p.stem for p in subdir.glob("*.yaml")
                 if not p.stem.startswith("_")
             )
+            if allowed_roles is not None:
+                # 严格模式：面板 == 池，无例外（default 也不列）
+                role_files = [r for r in role_files if r in allowed_roles]
+                matched += len(role_files)
             if not role_files:
                 continue
             lines.append(f"  ### {label} 角色（可用于 exec_type=\"{label.lower()}\" 的 step）")
@@ -574,6 +620,11 @@ class AICU:
                 else:
                     lines.append(f"  - **{r}**: （未提供描述信息，请直接阅读其 role_md 内容判断适用边界）")
             lines.append("")
+
+        if allowed_roles is not None and matched == 0:
+            # 池内角色全部不存在（多半是后续被删了）。绝不静默回退全量 ——
+            # 那会让用户以为池在生效，实际它已退化成不限制。
+            return _ROLE_POOL_INVALID_NOTICE
 
         if not lines:
             return "  （暂无可用角色）"

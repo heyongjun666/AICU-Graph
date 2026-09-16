@@ -16,7 +16,7 @@ import threading
 import time
 import uuid
 from datetime import datetime
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Optional, Sequence
 
 from executables.base import RuntimeGateway, SchedulerDelegate
 from executables.registry import ExecutableRegistry
@@ -104,6 +104,7 @@ class Runtime(RuntimeGateway, SchedulerDelegate):
         workspace_root: Optional[str] = None,
         shared_workspace: Optional[str] = None,
         roles_dir: Optional[str] = None,
+        candidate_roles: Optional[Sequence[str]] = None,
         router_aicu_instance: Optional[Any] = None,
         router_config: Optional[dict[str, Any]] = None,
         dynamic_num_ccs: Optional[bool] = None,
@@ -123,6 +124,12 @@ class Runtime(RuntimeGateway, SchedulerDelegate):
         # None 归一为「动态 + 默认 1」，保证旧调用方与 legacy server 行为不变。
         self.dynamic_num_ccs = True if dynamic_num_ccs is None else bool(dynamic_num_ccs)
         self.default_num_ccs = self._clamp_num_ccs(default_num_ccs)
+
+        # 会话候选角色池（session 级，由会话 config 注入）：
+        # 绑定后该会话的 Manager 只看到池内角色的摘要（见 aicu._build_available_roles_text）。
+        # None / 空 = 未绑定 → Manager 看到 roles/ 下全部角色（历史会话行为，逐字不变）。
+        # 注意这是**提示词候选范围**，不是校验边界：PlanValidator 仍以 roles_dir 全量为准。
+        self.candidate_roles = list(candidate_roles) if candidate_roles else None
 
         # PlanValidator 角色集（exec_type↔role 一致性校验用）。
         # roles_dir 未注入时保持 None → 该校验跳过（向后兼容，不依赖 roles 目录）。

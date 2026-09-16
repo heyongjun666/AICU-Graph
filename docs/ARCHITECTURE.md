@@ -297,12 +297,15 @@ Shared FS（共享分区）是产物单一事实源。
 - `metrics.py`：`record` → `{workspace_root}/codegraph_metrics.jsonl`。
 - `notify_artifact_updated(shared_root)` → `GroupGraphState.mark_stale`（产物变更即失效）。
 
-### 6.11 角色 / 技能 / 持久化 / SSE / HTTP API
+### 6.11 角色 / 技能 / MCP / 持久化 / SSE / HTTP API
 
 | 文件 | 职责 |
 |---|---|
 | `runtime/roles_manager.py` | 扫描 `roles/Manager/` + `roles/Worker/` YAML；`list_roles`（跳过 default.yaml）、`get_role_schema`、`get_role`、`add_role/update_role`；role_id 模式 `^[a-z][a-z0-9_]*$` |
 | `runtime/skills_manager.py` | 扫描带 `SKILL.md` 的目录（主目录 + 额外目录）；`list_skills / get_skill / save_skill` |
+| `runtime/mcp_manager.py` | MCP server 注册表（仓库根 `mcp_servers.json`）读取与名字解析：`load_registry` / `resolve_servers`；`McpServer` 中立表示（command 与 args 分开存，各 CLI 自己序列化）；相对路径按仓库根解析 |
+| `runtime/mcp_client.py` | MCP server 的 stdio 预检：`probe_server`（initialize → notifications/initialized → tools/list）、`probe_servers`（逐个预检，`required=false` 连不上只告警）；连完即收子进程 |
+| `runtime/repo_paths.py` | `REPO_ROOT` 与 `resolve_repo_relative`（`~` 展开 / 绝对原样 / 相对按仓库根）—— 角色 yaml `skills_dir` 与 MCP 注册表路径共用的唯一一份实现 |
 | `runtime/persistence.py` | `graph.json` 快照的 save/load；graph_version 单调性 |
 | `runtime/sse_manager.py` | `SSEManager` 订阅 EventBus `"*"`，`deque(maxlen=10000, ttl=1800)`，微批合并（同 type <200ms 合并），`get_events_since`（空 → snapshot 回退）、`get_snapshot_event`、`get_stats`、`format_sse` |
 | `runtime/server.py` | `create_app(runtime, sse_manager)` 单会话 app：`CONFIG_WHITELIST{num_ccs,model,skills,audit_rounds,max_iterations}`、task≤5000、graph/manager/plan/stats、pause/resume/stop/clear、node CRUD + start/pause/stop/continue/task/delete/external-input、`/v1/logs`、`/v1/roles`、SSE `/v1/graph/events`（含 `/since/{seq}`，snapshot/catch-up、1s poll、15s keepalive） |
@@ -420,6 +423,7 @@ Shared FS（共享分区）是产物单一事实源。
 | 23 | **CC 活动视图（cc_activity 追踪 + 多会话 activity 端点）** | `runtime/runtime.py` `update_cc_activity/get_cc_activity`、`executables/worker.py` `_handle_cc_stream_output`、`runtime/session_server.py` `GET /v1/sessions/{session_id}/nodes/{node_id}/activity` | — |
 | 24 | **多依赖分级阅读（tiered reading）** | `executables/worker.py` `_build_tiered_reading_instructions` | 默认开（≥4 依赖触发） |
 | 25 | **CC 流式日志分流（粗粒度 log + 细粒度开关）** | `executables/worker.py` `_handle_cc_stream_output` | `AICU_NODE_LOG_STREAMING=1` 才全量写 |
+| 26 | **MCP 工具下发（角色 `mcp:` 声明 → 注册表解析 → 连通性预检 → 按各 CLI 的注入口下发）** | `runtime/mcp_manager.py` `runtime/mcp_client.py` `cli_adapters.py` | 角色 yaml `mcp` 字段；server 定义在仓库根 `mcp_servers.json` |
 
 ---
 
@@ -456,6 +460,13 @@ Shared FS（共享分区）是产物单一事实源。
 | `workspace_resolver.py` | 共享工作区解析：`resolve_shared_workspace` / `resolve_partition` / `_partition_of`（realpath+commonpath 防穿越） |
 | `roles_manager.py` | 角色配置：扫描 YAML、`list_roles` / `get_role_schema` / `get_role` / `add_role` / `update_role` |
 | `skills_manager.py` | 技能目录扫描：`list_skills` / `get_skill` / `save_skill` |
+| `mcp_manager.py` | MCP server 注册表（仓库根 `mcp_servers.json`）：`load_registry` / `resolve_servers`；`McpServer` 中立表示；相对路径按仓库根解析 |
+| `mcp_client.py` | MCP server stdio 预检：`probe_server` / `probe_servers`（initialize + tools/list，连完即收子进程） |
+| `repo_paths.py` | `REPO_ROOT` + `resolve_repo_relative`：仓库根相对路径的唯一实现（skills_dir 与 MCP 注册表共用） |
+| `role_pools_manager.py` | 候选角色池管理：`RolePoolsManager` |
+| `shared_io.py` | Runtime 与交付路径共用的文件系统助手：`previewable_path` / `mime_type_for` / `build_dir_index` |
+| `credentials.py` | 凭据存储（明文）与模型厂商映射：`CredentialStore` / `set_credential_store` / `resolve_sk_for_model` / `resolve_internal_username` / `vendor_of_model` / `api_key_env_for_vendor` |
+| `i18n.py` | 后端面向用户消息的轻量 i18n：`t` / `localized_detail` / `LanguageMiddleware` |
 | `sse_manager.py` | SSE 事件流：环形缓冲、微批合并、`get_events_since`（空→snapshot 回退）、`get_snapshot_event` |
 | `server.py` | `create_app` 单会话 FastAPI app（CONFIG_WHITELIST、节点 CRUD、日志查询、SSE `/v1/graph/events`） |
 | `session_manager.py` | 多会话生命周期：create/list/pause/resume/stop/delete、`sessions.json` 原子持久化、`_summary` 状态推导 |

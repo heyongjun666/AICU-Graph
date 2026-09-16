@@ -610,7 +610,7 @@ export const en: Dict = {
 
   // ---- Subgraph tab ----
   'subgraph.iteration': 'Iteration {n}',
-  'subgraph.childNodes': '{count} child node{s}',
+  'subgraph.childNodes': '{count} child nodes',
   'subgraph.noChildNodes': 'No child nodes',
 
   // ---- Shared workspace panel ----

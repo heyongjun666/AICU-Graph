@@ -105,6 +105,14 @@ class ClaudeCodeAgent:
         # 由 adapter 统一换算。必须在 native_base_url 之后算 —— 换不换算取决于
         # 本次是否真的改道了。
         self.cli_model_arg = self.adapter.model_arg(self.model, api_base_url=self.api_base_url)
+
+        # 端点落在 CLI 配置文件里的托管槽（codex / qwen / pi）与「CLI 自身寻址」是两回事：
+        # 那个槽只有 AICU 会写，留着上次的值就是留着一份过期的事实，所以它的取值单独算，
+        # 每次都给出确定答案 —— 要么按当前模型所属厂商重写，要么撤掉自己写过的
+        # （返回 None 即撤槽，见 provider_slot_base_url）。
+        # 走环境变量 / 内联配置的 CLI（claude / kimi / opencode / codebuddy）没有槽，
+        # 这里恒为 None，provision 是 no-op，它们的行为与改动前一致。
+        #
         self.adapter.provision(
             api_base_url=self.api_base_url,
             api_key_env=self.api_key_env,

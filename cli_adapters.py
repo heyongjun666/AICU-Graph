@@ -224,6 +224,53 @@ def native_base_url(
     return protocol_endpoint(vendor, protocol)
 
 
+def _has_managed_slot(cli_name: Optional[str]) -> bool:
+    """该 CLI 是否有一份 AICU 托管的配置文件槽（未知 id 视为没有）。"""
+    try:
+        return get_adapter(cli_name or "").managed_slot
+    except ValueError:
+        return False
+
+
+def provider_slot_base_url(
+    cli_name: Optional[str], model: Optional[str], configured_base_url: Optional[str]
+) -> Optional[str]:
+    """本次运行 AICU 托管槽该持有的端点；返回 None 表示「把自己上次写的撤掉」。
+
+    与 native_base_url 是两回事，别混：
+      - ``native_base_url`` 管「CLI 自身寻址」（环境变量 / 内联配置）。同族返回 None
+        是对的 —— 不设变量，CLI 就用自己的认证。
+      - 本函数管「AICU 写在 CLI 配置文件里的那个槽」（codex 的 ``model_providers.aicu``、
+        qwen 的 ``modelProviders.aicu``、pi 的 ``providers.aicu``）。那个槽**只有 AICU
+        会写**，上一次运行留下的值会被这一次当成事实 —— 所以每次运行都必须给出确定
+        答案：要么按当前模型所属厂商重写，要么撤掉自己写过的。留着旧值是最坏的一种。
+
+    只有 ``managed_slot`` 为 True 的 CLI 有槽，其余一律返回 None（它们的 provision 是
+    no-op，没有可撤的东西）。
+
+    返回 None 的三种情形：没有托管槽；模型判不出厂商（无从下手，撤槽好过留残值）；
+    同族且该 CLI 属于 _SAME_VENDOR_RELEASE_CLIS（交还 CLI 自己的认证）。
+
+    用户自己指定的 api_base_url（无论手填还是选了 preset）一律原样写进槽 ——
+    那种用户可能自己架了中转，也可能就是要 AICU 走这个端点。
+    """
+    if not _has_managed_slot(cli_name):
+        return None
+    if configured_base_url:
+        return str(configured_base_url)
+    native = _CLI_NATIVE.get(cli_name or "")
+    if not native:
+        # 有槽却不在 _CLI_NATIVE 里 = 声明漏了（有测试守着），这里不做无声猜测。
+        return None
+    native_vendor, protocol = native
+    vendor = vendor_of_model(model or "")
+    if not vendor:
+        return None
+    if vendor == native_vendor and cli_name in _SAME_VENDOR_RELEASE_CLIS:
+        return None
+    return protocol_endpoint(vendor, protocol)
+
+
 def _provision_codex_config(api_base_url: str, api_key_env: Optional[str], model: Optional[str]) -> None:
     """把第三方端点注册进 ``~/.codex/config.toml`` 的 ``model_providers``（幂等）。
 
@@ -280,6 +327,39 @@ def _provision_codex_config(api_base_url: str, api_key_env: Optional[str], model
     config_path.write_text(text, encoding="utf-8")
 
 
+def _release_codex_config() -> None:
+    """撤掉 AICU 写进 ``~/.codex/config.toml`` 的东西（幂等，文件不存在就什么都不做）。
+
+    删两样，且都只删属于自己的：
+      - ``[model_providers.aicu]`` 块：没有 ``model_provider`` 指着它就是死配置，
+        留着只会让下一个读它的人以为 AICU 还生效；
+      - 顶层 ``model_provider``，**仅当其值就是 AICU 的 id**。别的值是用户自己设的，
+        不能碰。
+
+    顶层 ``model`` 不动：它没有「值即归属」的判据，分不清是 AICU 写的还是用户写的，
+    宁可留着（AICU 每次都用 ``--model`` 覆盖它，运行期无影响）。
+    """
+    config_path = Path.home() / ".codex" / "config.toml"
+    if not config_path.exists():
+        return
+    try:
+        text = config_path.read_text(encoding="utf-8")
+    except OSError:
+        return
+    released = re.sub(
+        r"(?m)^\[model_providers\." + re.escape(_CUSTOM_PROVIDER_ID) + r"\]\s*\n(?:^[^\[]+\n)*",
+        "",
+        text,
+    )
+    released = re.sub(
+        r'(?m)^model_provider\s*=\s*"' + re.escape(_CUSTOM_PROVIDER_ID) + r'"\s*\n',
+        "",
+        released,
+    )
+    if released != text:
+        config_path.write_text(released, encoding="utf-8")
+
+
 def _provision_qwen_config(api_base_url: str, api_key_env: Optional[str], model: Optional[str]) -> None:
     """把第三方端点注册进 ``~/.qwen/settings.json`` 的 ``modelProviders``（幂等）。
 
@@ -319,6 +399,91 @@ def _provision_qwen_config(api_base_url: str, api_key_env: Optional[str], model:
     data["providerProtocol"] = protocols
     config_path.parent.mkdir(parents=True, exist_ok=True)
     config_path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+
+def _release_qwen_config() -> None:
+    """撤掉 AICU 写进 ``~/.qwen/settings.json`` 的 aicu 条目（幂等）。
+
+    只删 ``modelProviders`` / ``providerProtocol`` 里 key 为 ``_CUSTOM_PROVIDER_ID``
+    的两项，用户自己的 provider 原样保留；文件或分区不存在时不创建。
+    """
+    config_path = Path.home() / ".qwen" / "settings.json"
+    if not config_path.exists():
+        return
+    try:
+        loaded = json.loads(config_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return
+    if not isinstance(loaded, dict):
+        return
+    changed = False
+    for section_name in ("modelProviders", "providerProtocol"):
+        section = loaded.get(section_name)
+        if isinstance(section, dict) and _CUSTOM_PROVIDER_ID in section:
+            del section[_CUSTOM_PROVIDER_ID]
+            changed = True
+    if changed:
+        config_path.write_text(
+            json.dumps(loaded, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+        )
+
+
+def _provision_pi_config(api_base_url: str, api_key_env: Optional[str], model: Optional[str]) -> None:
+    """把第三方端点注册进 ``~/.pi/agent/models.json`` 的 ``providers``（幂等）。
+
+    结构依据 pi 的 ``dist/core/model-config.d.ts`` 核实：顶层 ``providers`` 是
+    provider id → ProviderConfig 的映射，ProviderConfig 含 name/baseUrl/apiKey/api/
+    models。``api`` 取 ``openai-completions``（OpenAI Chat 协议，baseUrl 含 /v1）。
+
+    apiKey 不写字面量，写 ``$ENV_NAME`` —— pi 的 dist/core/resolve-config-value.js
+    会把 ``$VAR`` / ``${VAR}`` 插值成环境变量值（本机实测通过）。键是 AICU 注入的，
+    落盘的就只是一个变量名。
+
+    只管理 ``aicu`` 这一项，保留用户其它 provider 配置。
+    """
+    config_path = Path.home() / ".pi" / "agent" / "models.json"
+    data: dict = {}
+    if config_path.exists():
+        try:
+            loaded = json.loads(config_path.read_text(encoding="utf-8"))
+            if isinstance(loaded, dict):
+                data = loaded
+        except (OSError, json.JSONDecodeError):
+            data = {}
+    providers = data.get("providers")
+    if not isinstance(providers, dict):
+        providers = {}
+    entry: dict = {"name": "AICU", "baseUrl": api_base_url, "api": "openai-completions"}
+    if api_key_env:
+        entry["apiKey"] = f"${api_key_env}"
+    if model:
+        entry["models"] = [{"id": model, "name": model}]
+    providers[_CUSTOM_PROVIDER_ID] = entry
+    data["providers"] = providers
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    config_path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+
+def _release_pi_config() -> None:
+    """撤掉 AICU 写进 ``~/.pi/agent/models.json`` 的 aicu provider（幂等）。
+
+    用户自己的 provider 原样保留；文件或 ``providers`` 不存在时不创建。
+    """
+    config_path = Path.home() / ".pi" / "agent" / "models.json"
+    if not config_path.exists():
+        return
+    try:
+        loaded = json.loads(config_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return
+    if not isinstance(loaded, dict):
+        return
+    providers = loaded.get("providers")
+    if isinstance(providers, dict) and _CUSTOM_PROVIDER_ID in providers:
+        del providers[_CUSTOM_PROVIDER_ID]
+        config_path.write_text(
+            json.dumps(loaded, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+        )
 
 
 def _opencode_config_content(
@@ -517,14 +682,26 @@ class CliAdapter:
 
     # ---- 第三方模型供给（provision） ----
 
+    # 本 CLI 的第三方端点是否落在「AICU 托管的配置文件槽」里（见 provider_slot_base_url）。
+    #   False（默认）—— 端点走环境变量（claude / kimi / codebuddy）或每次运行现拼的内联
+    #     配置（opencode），盘上不留 AICU 的痕迹，也就没有「上次的旧值」可言。
+    #   True —— 端点和 key 变量名写在 CLI 自己的配置文件里（codex / qwen / pi）。
+    #     这类适配器必须覆盖 provision，且**每次运行都要被调用**、不允许在入参为空时
+    #     早退：入参为空恰恰是「撤掉自己上次写的」的信号。这条对应关系有测试守着
+    #     （test_managed_slot_flag_matches_provision_override）。
+    managed_slot = False
+
     def provision(
         self, *, api_base_url: Optional[str], api_key_env: Optional[str], model: Optional[str]
     ) -> None:
-        """预写该 CLI 的第三方模型配置（默认 no-op）。
+        """把本次运行该由 AICU 供的端点写进该 CLI 的配置（默认 no-op）。
 
-        只有 api_base_url 非空（指向第三方端点）时才需要预写；部分 CLI
-        走环境变量，无需写配置文件。codex/qwen 覆盖此方法把端点注册进各自的
-        配置文件（config.toml / settings.json），使运行时 ``--model <id>`` 能命中。
+        ``api_base_url`` 取 ``provider_slot_base_url(...)`` 的返回值，也就是「AICU 托管槽
+        本次该持有的端点」；**为 None 表示撤掉自己上次写进配置的内容**，而不是「什么都不做」。
+
+        覆盖此方法的是有托管槽的 CLI（codex：``~/.codex/config.toml``；qwen：
+        ``~/.qwen/settings.json``；pi：``~/.pi/agent/models.json``），它们靠预写配置让
+        运行时的 ``--model <id>`` 能命中；其余 CLI 走环境变量或内联配置，无需写盘。
         """
         return None
 
@@ -815,12 +992,23 @@ class CodexAdapter(CliAdapter):
         # Codex 的自定义 provider 通过 config.toml 的 env_key 读取对应厂商 Key。
         return api_key_env_for_vendor(vendor_of_model(model))
 
+    managed_slot = True
+
     def provision(
         self, *, api_base_url: Optional[str], api_key_env: Optional[str], model: Optional[str]
     ) -> None:
+        # api_base_url 为 None = 本次不由 AICU 供端点（同族且策略是撤槽、或模型判不出
+        # 厂商），必须把上次写进 config.toml 的东西撤掉 —— 早退就会把过期端点当成
+        # 这一次的事实。见 provider_slot_base_url / _release_codex_config。
         if not api_base_url:
+            _release_codex_config()
             return
-        _provision_codex_config(api_base_url, api_key_env, model)
+        # config.toml 的 env_key 必须与 _build_process_env 注入 sk 用的变量名逐字一致，
+        # 否则 codex 报「Missing environment variable: OPENAI_API_KEY」。后者走
+        # api_key_env_for_model（按厂商），所以这里也优先按厂商解析；显式传入的
+        # api_key_env 只作兜底（模型判不出厂商时）。
+        env_key = api_key_env_for_vendor(vendor_of_model(model)) or api_key_env
+        _provision_codex_config(api_base_url, env_key, model)
 
     def format_stream_event(self, line: str) -> str:
         try:
@@ -1131,12 +1319,23 @@ class QwenAdapter(CliAdapter):
                 env[self.api_key_env] = api_key
         return env
 
+    managed_slot = True
+
     def provision(
         self, *, api_base_url: Optional[str], api_key_env: Optional[str], model: Optional[str]
     ) -> None:
+        # api_base_url 为 None = 本次不由 AICU 供端点，撤掉上次写进 settings.json 的
+        # aicu 条目 —— 早退就会把过期端点当成这一次的事实。
+        # 注意这条退路对 qwen 并不好用（撤槽后 CLI 的非交互模式没有 auth type 可用，
+        # 见 _SAME_VENDOR_RELEASE_CLIS 的说明），所以 qwen 的同族是接管而非撤槽；
+        # 只有「模型判不出厂商」才会走到这里。
         if not api_base_url:
+            _release_qwen_config()
             return
-        _provision_qwen_config(api_base_url, api_key_env, model)
+        # 同 codex：envKey 走 api_key_env_for_model，与注入 sk 的变量名同源，
+        # 显式传入的 api_key_env 只作兜底。
+        env_key = self.api_key_env_for_model(model) or api_key_env
+        _provision_qwen_config(api_base_url, env_key, model)
 
     def format_stream_event(self, line: str) -> str:
         try:
@@ -1467,6 +1666,21 @@ class PiAdapter(CliAdapter):
         # pi 的 --model 支持 provider/id；（--provider 是等价的另一种写法，
         # 用 id 前缀可以让模型名自解释，也少一个 flag）
         return f"{_CUSTOM_PROVIDER_ID}/{model}" if api_base_url and model else model
+
+    managed_slot = True
+
+    def provision(
+        self, *, api_base_url: Optional[str], api_key_env: Optional[str], model: Optional[str]
+    ) -> None:
+        # api_base_url 为 None = 本次不由 AICU 供端点（判不出厂商的模型名），
+        # 撤掉上次写进 models.json 的 aicu provider，不留过期值。
+        if not api_base_url:
+            _release_pi_config()
+            return
+        # 同 codex / qwen：models.json 里 apiKey 引用的变量名必须与注入 sk 的变量名一致，
+        # 两边同源取 api_key_env_for_model；显式传入的 api_key_env 只作兜底。
+        env_key = self.api_key_env_for_model(model) or api_key_env
+        _provision_pi_config(api_base_url, env_key, model)
 
     def build_base_command(
         self, *, model: Optional[str], skip_permissions: bool, enable_project_skills: bool

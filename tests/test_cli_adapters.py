@@ -708,6 +708,32 @@ class TestProvision:
         assert 'model = "m2"' in config
         assert 'base_url = "https://a.example/v1"' not in config
 
+    def test_codex_env_key_matches_injected_variable(self, monkeypatch, tmp_path):
+        """config.toml 的 env_key 必须与 _build_process_env 实际注入 sk 的变量名一致。
+
+        两者分叉过一次（实测）：provision 因 api_key_env=None 写了
+        env_key = "OPENAI_API_KEY"，而 codex + deepseek-v4-pro 的 key 注在
+        DEEPSEEK_API_KEY，于是 codex 报「Missing environment variable:
+        OPENAI_API_KEY」，跨厂商 codex 100% 失败。
+        """
+        monkeypatch.setattr(cli_adapters.Path, "home", lambda: tmp_path)
+        adapter = get_adapter("codex")
+        adapter.provision(api_base_url="https://api.deepseek.com/v1", api_key_env=None,
+                          model="deepseek-v4-pro")
+        config = (tmp_path / ".codex" / "config.toml").read_text(encoding="utf-8")
+        expected = adapter.api_key_env_for_model("deepseek-v4-pro")
+        assert expected == "DEEPSEEK_API_KEY"
+        assert f'env_key = "{expected}"' in config
+        assert 'env_key = "OPENAI_API_KEY"' not in config
+
+    def test_codex_env_key_falls_back_when_vendor_unknown(self, monkeypatch, tmp_path):
+        """模型判不出厂商时（auto 等）退回显式传入的 api_key_env。"""
+        monkeypatch.setattr(cli_adapters.Path, "home", lambda: tmp_path)
+        get_adapter("codex").provision(api_base_url="https://x.example/v1",
+                                       api_key_env="CUSTOM_KEY", model="auto-内部")
+        config = (tmp_path / ".codex" / "config.toml").read_text(encoding="utf-8")
+        assert 'env_key = "CUSTOM_KEY"' in config
+
     def test_codex_provision_preserves_existing_config(self, monkeypatch, tmp_path):
         monkeypatch.setattr(cli_adapters.Path, "home", lambda: tmp_path)
         codex_dir = tmp_path / ".codex"
@@ -753,19 +779,246 @@ class TestProvision:
         assert "dashscope" in data["modelProviders"]
         assert data["modelProviders"]["aicu"][0]["id"] == "m"
 
-    def test_provision_noop_without_base_url(self, monkeypatch, tmp_path):
+    def test_provision_without_base_url_creates_nothing(self, monkeypatch, tmp_path):
+        """盘上原本没有这些文件时，撤槽不该把它们造出来。"""
         monkeypatch.setattr(cli_adapters.Path, "home", lambda: tmp_path)
         get_adapter("codex").provision(api_base_url=None, api_key_env=None, model=None)
         get_adapter("qwen").provision(api_base_url=None, api_key_env=None, model=None)
+        get_adapter("pi").provision(api_base_url=None, api_key_env=None, model=None)
         assert not (tmp_path / ".codex" / "config.toml").exists()
         assert not (tmp_path / ".qwen" / "settings.json").exists()
+        assert not (tmp_path / ".pi" / "agent" / "models.json").exists()
 
     def test_provision_default_noop_for_env_clis(self, monkeypatch, tmp_path):
         monkeypatch.setattr(cli_adapters.Path, "home", lambda: tmp_path)
         get_adapter("claude").provision(api_base_url="https://x/v1", api_key_env="K", model="m")
         get_adapter("kimi").provision(api_base_url="https://x/v1", api_key_env="K", model="m")
+        get_adapter("opencode").provision(api_base_url="https://x/v1", api_key_env="K", model="m")
+        get_adapter("codebuddy").provision(api_base_url="https://x/v1", api_key_env="K", model="m")
         assert not (tmp_path / ".codex" / "config.toml").exists()
         assert not (tmp_path / ".qwen" / "settings.json").exists()
+        assert not (tmp_path / ".pi" / "agent" / "models.json").exists()
+
+    def test_pi_provision_writes_models_json(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(cli_adapters.Path, "home", lambda: tmp_path)
+        get_adapter("pi").provision(
+            api_base_url="https://api.deepseek.com/v1", api_key_env=None,
+            model="deepseek-v4-pro",
+        )
+        data = json.loads((tmp_path / ".pi" / "agent" / "models.json").read_text(encoding="utf-8"))
+        entry = data["providers"]["aicu"]
+        assert entry["baseUrl"] == "https://api.deepseek.com/v1"
+        assert entry["api"] == "openai-completions"
+        assert entry["models"] == [{"id": "deepseek-v4-pro", "name": "deepseek-v4-pro"}]
+
+    def test_pi_api_key_refers_to_injected_variable(self, monkeypatch, tmp_path):
+        """models.json 的 apiKey 引用的变量名必须与注入 sk 的变量名一致（同 codex 那类错配）。"""
+        monkeypatch.setattr(cli_adapters.Path, "home", lambda: tmp_path)
+        adapter = get_adapter("pi")
+        adapter.provision(api_base_url="https://api.deepseek.com/v1", api_key_env=None,
+                          model="deepseek-v4-pro")
+        expected = adapter.api_key_env_for_model("deepseek-v4-pro")
+        assert expected == "DEEPSEEK_API_KEY"
+        data = json.loads((tmp_path / ".pi" / "agent" / "models.json").read_text(encoding="utf-8"))
+        # $VAR 是 pi 自己的环境变量插值语法，落盘的不是 key 本身
+        assert data["providers"]["aicu"]["apiKey"] == f"${expected}"
+
+    def test_pi_provision_merges_existing_providers(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(cli_adapters.Path, "home", lambda: tmp_path)
+        pi_dir = tmp_path / ".pi" / "agent"
+        pi_dir.mkdir(parents=True)
+        (pi_dir / "models.json").write_text(
+            json.dumps({"providers": {"mine": {"baseUrl": "https://mine.example"}}}), encoding="utf-8"
+        )
+        get_adapter("pi").provision(
+            api_base_url="https://x.example/v1", api_key_env="K", model="m"
+        )
+        data = json.loads((pi_dir / "models.json").read_text(encoding="utf-8"))
+        assert data["providers"]["mine"]["baseUrl"] == "https://mine.example"
+        assert data["providers"]["aicu"]["baseUrl"] == "https://x.example/v1"
+
+
+class TestManagedSlot:
+    """AICU 托管槽的不变量：那个槽只有 AICU 会写，所以每次运行都要给出当前事实。
+
+    修复前的形状是「只在改道时写」（provision 见 api_base_url 为空就早退），于是
+    同族模型会沿用上一次运行留下的端点 —— qwen + qwen3-coder-plus 就是这样去要
+    DEEPSEEK_API_KEY 的（AICU 注的却是 BAILIAN_API_KEY）。见 provider_slot_base_url。
+    """
+
+    def test_managed_slot_flag_matches_provision_override(self):
+        """有托管槽 ⇔ 覆盖了 provision。将来加 CLI 时这条会拦住漏声明 / 漏实现。"""
+        for adapter in cli_adapters._ADAPTERS:
+            overrides = type(adapter).provision is not cli_adapters.CliAdapter.provision
+            assert adapter.managed_slot is overrides, f"{adapter.id} 的 declared/implemented 不一致"
+            if adapter.managed_slot:
+                # 有槽就必须在 _CLI_NATIVE 里，否则算不出「本协议下的厂商端点」
+                assert adapter.id in cli_adapters._CLI_NATIVE, adapter.id
+
+    def test_provider_slot_base_url_matrix(self):
+        slot = cli_adapters.provider_slot_base_url
+        aliyun_chat = cli_adapters.protocol_endpoint("aliyun", "chat")
+
+        # 没有托管槽的 CLI 恒为 None —— 端点走环境变量或内联配置，盘上无痕可撤
+        for cli in ("claude", "kimi", "codebuddy", "opencode"):
+            assert slot(cli, "glm-5.2", None) is None, cli
+
+        # 异族：按模型所属厂商写
+        assert slot("codex", "deepseek-v4-flash", None) == (
+            cli_adapters.protocol_endpoint("deepseek", "responses")
+        )
+        assert slot("pi", "glm-5.2", None) == cli_adapters.protocol_endpoint("zhipu", "chat")
+
+        # 同族：qwen 接管（它撤槽后没有可用的 auth type），codex 撤槽（订阅登录是主用法）
+        assert slot("qwen", "qwen3-coder-plus", None) == aliyun_chat
+        assert slot("codex", "gpt-5.6", None) is None
+
+        # 该厂商没有本协议的端点 → 撤槽（智谱没有 Responses API）
+        assert slot("codex", "glm-5.2", None) is None
+
+        # 判不出厂商 → 撤槽（留残值比撤掉更坏）
+        assert slot("qwen", "手工填的模型名", None) is None
+
+        # 用户自己指定的端点一律原样写进槽（可能自架了中转）
+        assert slot("codex", "gpt-5.6", "https://my.proxy/v1") == "https://my.proxy/v1"
+        assert slot("qwen", "qwen3-coder-plus", "https://my.proxy/v1") == "https://my.proxy/v1"
+
+    def test_qwen_stale_slot_overwritten_for_same_vendor_model(self, monkeypatch, tmp_path):
+        """qwen 跑同族模型时也要重写槽，不能沿用上一次运行留下的端点。"""
+        monkeypatch.setattr(cli_adapters.Path, "home", lambda: tmp_path)
+        adapter = get_adapter("qwen")
+        # 上一次运行（deepseek）留下的残值
+        adapter.provision(api_base_url="https://api.deepseek.com/v1",
+                          api_key_env=None, model="deepseek-v4-flash")
+        # 这一次跑同族模型、且用户没选 preset（app 里 api_base_url 默认为空）
+        adapter.provision(
+            api_base_url=cli_adapters.provider_slot_base_url("qwen", "qwen3-coder-plus", None),
+            api_key_env=None,
+            model="qwen3-coder-plus",
+        )
+        entry = json.loads(
+            (tmp_path / ".qwen" / "settings.json").read_text(encoding="utf-8")
+        )["modelProviders"]["aicu"][0]
+        assert entry["id"] == "qwen3-coder-plus"
+        assert entry["baseUrl"] == cli_adapters.protocol_endpoint("aliyun", "chat")
+        assert entry["envKey"] == "BAILIAN_API_KEY"
+
+    def test_codex_stale_slot_released_for_native_model(self, monkeypatch, tmp_path):
+        """codex 跑自家模型（gpt-*）时撤掉 AICU 的 provider，交还它自己的认证。
+
+        codex login 的 ChatGPT 订阅态写在 ~/.codex/auth.json，是它的主用法。AICU 若
+        留着 requires_openai_auth = false + env_key = OPENAI_API_KEY 的块、并让顶层
+        model_provider 指着它，订阅用户会被踢到 API-key 路径上报「Missing environment
+        variable: OPENAI_API_KEY」。
+        """
+        monkeypatch.setattr(cli_adapters.Path, "home", lambda: tmp_path)
+        codex_dir = tmp_path / ".codex"
+        codex_dir.mkdir()
+        (codex_dir / "config.toml").write_text(
+            'model = "glm-5.2"\n'
+            'model_provider = "aicu"\n'
+            "\n"
+            "[model_providers.aicu]\n"
+            'name = "AICU"\n'
+            'base_url = "https://open.bigmodel.cn/api/paas/v4"\n'
+            'env_key = "ZHIPU_API_KEY"\n'
+            'wire_api = "responses"\n'
+            "requires_openai_auth = false\n"
+            "\n"
+            "[some_other]\n"
+            'foo = "bar"\n',
+            encoding="utf-8",
+        )
+        get_adapter("codex").provision(
+            api_base_url=cli_adapters.provider_slot_base_url("codex", "gpt-5.6", None),
+            api_key_env=None,
+            model="gpt-5.6",
+        )
+        config = (codex_dir / "config.toml").read_text(encoding="utf-8")
+        assert "[model_providers.aicu]" not in config
+        assert "model_provider" not in config
+        # 用户自己的配置一个字没动
+        assert "[some_other]" in config
+        assert 'foo = "bar"' in config
+
+    def test_release_keeps_user_owned_providers(self, monkeypatch, tmp_path):
+        """撤槽只删 AICU 自己那一项，用户自己的 provider 原样保留。"""
+        monkeypatch.setattr(cli_adapters.Path, "home", lambda: tmp_path)
+        qwen_dir = tmp_path / ".qwen"
+        qwen_dir.mkdir()
+        (qwen_dir / "settings.json").write_text(
+            json.dumps({
+                "modelProviders": {
+                    "dashscope": [{"id": "qwen3-coder-plus"}],
+                    "aicu": [{"id": "deepseek-v4-flash", "baseUrl": "https://api.deepseek.com/v1"}],
+                },
+                "providerProtocol": {"dashscope": "openai", "aicu": "openai"},
+            }),
+            encoding="utf-8",
+        )
+        pi_dir = tmp_path / ".pi" / "agent"
+        pi_dir.mkdir(parents=True)
+        (pi_dir / "models.json").write_text(
+            json.dumps({"providers": {
+                "mine": {"baseUrl": "https://mine.example"},
+                "aicu": {"baseUrl": "https://api.deepseek.com/v1"},
+            }}),
+            encoding="utf-8",
+        )
+
+        for cli in ("qwen", "pi"):
+            get_adapter(cli).provision(
+                api_base_url=cli_adapters.provider_slot_base_url(cli, "手工填的模型名", None),
+                api_key_env=None,
+                model="手工填的模型名",
+            )
+
+        qwen_data = json.loads((qwen_dir / "settings.json").read_text(encoding="utf-8"))
+        assert "aicu" not in qwen_data["modelProviders"]
+        assert "aicu" not in qwen_data["providerProtocol"]
+        assert qwen_data["modelProviders"]["dashscope"] == [{"id": "qwen3-coder-plus"}]
+        pi_data = json.loads((pi_dir / "models.json").read_text(encoding="utf-8"))
+        assert "aicu" not in pi_data["providers"]
+        assert pi_data["providers"]["mine"]["baseUrl"] == "https://mine.example"
+
+    def test_agent_wires_slot_value_into_provision(self, monkeypatch, tmp_path):
+        """接线：ClaudeCodeAgent 交给 provision 的是「槽该持有的值」，不是 self.api_base_url。
+
+        两者在同族时不同 —— qwen + qwen3-coder-plus 的 self.api_base_url 为 None
+        （同族不改 CLI 自身寻址），而槽必须写成阿里云端点。
+        """
+        monkeypatch.setattr(cli_adapters.Path, "home", lambda: tmp_path)
+        monkeypatch.setattr(QwenAdapter, "is_installed", lambda self: True)
+        agent = ClaudeCodeAgent(
+            workspace_path=str(tmp_path), model="qwen3-coder-plus", cli_name="qwen",
+            skip_permissions=False,
+        )
+        assert agent.api_base_url is None
+        entry = json.loads(
+            (tmp_path / ".qwen" / "settings.json").read_text(encoding="utf-8")
+        )["modelProviders"]["aicu"][0]
+        assert entry["baseUrl"] == cli_adapters.protocol_endpoint("aliyun", "chat")
+        assert entry["envKey"] == "BAILIAN_API_KEY"
+
+    def test_agent_releases_slot_for_codex_native_model(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(cli_adapters.Path, "home", lambda: tmp_path)
+        monkeypatch.setattr(CodexAdapter, "is_installed", lambda self: True)
+        codex_dir = tmp_path / ".codex"
+        codex_dir.mkdir()
+        (codex_dir / "config.toml").write_text(
+            'model_provider = "aicu"\n\n[model_providers.aicu]\nname = "AICU"\n'
+            'base_url = "https://open.bigmodel.cn/api/paas/v4"\n',
+            encoding="utf-8",
+        )
+        ClaudeCodeAgent(
+            workspace_path=str(tmp_path / "ws"), model="gpt-5.6", cli_name="codex",
+            skip_permissions=False,
+        )
+        config = (codex_dir / "config.toml").read_text(encoding="utf-8")
+        assert "[model_providers.aicu]" not in config
+        assert "model_provider" not in config
+
+
 class TestMultiVendorCliWiring:
     """qwen / codebuddy / opencode / pi 各自接管第三方端点的方式。
 
@@ -954,6 +1207,7 @@ class TestBuildEnvSignature:
                 {}, api_base_url=None, api_key_env=None, model="deepseek-v4-flash"
             )
             assert isinstance(env, dict), adapter.id
+
 
 class TestCrossVendorEndpoint:
     """跨厂商模型：把 base_url 指向厂商对应协议的原生端点，不做任何协议翻译。
@@ -1180,3 +1434,5 @@ class TestCrossVendorEndpoint:
         assert cli_adapters.protocol_endpoint("不存在的厂商", "chat") is None
 
     # ------------------------------------------------------------ 下拉过滤
+
+

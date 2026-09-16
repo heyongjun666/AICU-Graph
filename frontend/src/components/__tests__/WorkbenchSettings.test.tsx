@@ -84,10 +84,56 @@ describe('WorkbenchSettings roles form', () => {
     fireEvent.click(screen.getByText('角色'));
 
     expect(await screen.findByText('该角色类型支持 22 个字段。仅覆盖该角色所需的值。')).toBeDefined();
+    // 未选中任何角色时是空闲态，只给一句提示；表单要点了「新建角色」才出现。
+    fireEvent.click(screen.getByText('新建角色'));
     expect(screen.getByText('main_doc')).toBeDefined();
     expect(screen.getByText('index_file')).toBeDefined();
     expect(screen.getAllByText('description')).toHaveLength(2);
     expect(container.querySelectorAll('.role-field')).toHaveLength(22);
+  });
+
+  it('unlocks the config fields on Edit but keeps the role identity locked', async () => {
+    vi.mocked(api.getRoles).mockResolvedValue([
+      { id: 'code', display_name: '代码编写', type: 'worker' },
+    ]);
+    vi.mocked(api.getRole).mockResolvedValue({
+      id: 'code',
+      display_name: '代码编写',
+      type: 'worker',
+      config: { summary: '写代码' },
+      defaults: {},
+      effective_config: { summary: '写代码' },
+    });
+    const { container } = render(
+      <WorkbenchSettings open onClose={() => {}} onSaved={() => {}} />,
+    );
+
+    await waitFor(() => expect(api.getRoleSchema).toHaveBeenCalled());
+    fireEvent.click(screen.getByText('角色'));
+    fireEvent.click(await screen.findByText('代码编写'));
+
+    const identityInputs = () =>
+      Array.from(container.querySelectorAll('.form-grid input, .form-grid select')) as (
+        | HTMLInputElement
+        | HTMLSelectElement
+      )[];
+
+    // 查看态：整个表单只读，且没有保存/删除
+    expect(identityInputs().every((input) => input.disabled)).toBe(true);
+    expect(screen.queryByText('保存角色')).toBeNull();
+
+    fireEvent.click(Array.from(document.querySelectorAll('.section-heading-actions button'))
+      .find((button) => button.textContent?.includes('编辑')) as HTMLButtonElement);
+
+    // 后端 PATCH 拒绝改 id/type，所以编辑态下这两个输入仍然锁着，并给出理由
+    const [roleIdInput, roleTypeSelect] = identityInputs();
+    expect(roleIdInput.disabled).toBe(true);
+    expect(roleTypeSelect.disabled).toBe(true);
+    expect(roleIdInput.title).toBe('角色 ID 与类型创建后不可修改，如需改名请删除后重建。');
+    // 但 config 字段解锁了
+    expect(container.querySelectorAll('.role-field input:not([disabled])').length).toBeGreaterThan(0);
+    expect(screen.getByText('保存角色')).toBeDefined();
+    expect(screen.getByText('删除角色')).toBeDefined();
   });
 });
 
@@ -218,3 +264,322 @@ describe('WorkbenchSettings execution section', () => {
     expect(payload).not.toHaveProperty('default_num_ccs');
   });
 });
+
+describe('WorkbenchSettings role pools', () => {
+  const poolRoles: RoleInfo[] = [
+    { id: 'code', display_name: '代码编写', type: 'worker' },
+    { id: 'test', display_name: '测试验证', type: 'worker' },
+    { id: 'engineering_coord', display_name: '工程协调', type: 'manager' },
+  ];
+  const existingPool = { id: 'p1', name: '博客开发', roles: ['code'] };
+
+  const renderSettings = () =>
+    render(<WorkbenchSettings open onClose={() => {}} onSaved={() => {}} />);
+
+  /** 顶部导航里的 tab 按钮（正文标题与 tab 同名，直接 getByText 会命中两个）。 */
+  const tabButton = (label: string) =>
+    Array.from(document.querySelectorAll('.settings-nav button'))
+      .find((button) => button.textContent === label) as HTMLButtonElement;
+
+  const openPoolsTab = async () => {
+    fireEvent.click(tabButton('角色池'));
+    await waitFor(() => expect(api.getRolePools).toHaveBeenCalled());
+  };
+
+  const nameInputOf = (container: HTMLElement) =>
+    container.querySelector('.role-form input') as HTMLInputElement;
+  /** picker 中的勾选框：label 内还有一个类型 small，getByLabelText 精确匹配会失败。 */
+  const roleCheckbox = (label: string) =>
+    (screen.getByText(label).closest('label') as HTMLLabelElement)
+      .querySelector('input') as HTMLInputElement;
+
+  const saveButtonOf = () =>
+    screen.getByText('保存角色池').closest('button') as HTMLButtonElement;
+
+  /** section-heading 右侧的「编辑」/「新建」按钮：只有非编辑态才会出现。 */
+  const headingButton = (label: string) =>
+    Array.from(document.querySelectorAll('.section-heading-actions button'))
+      .find((button) => button.textContent?.includes(label)) as HTMLButtonElement;
+
+  const editButtonOf = () => headingButton('编辑');
+  const newPoolButtonOf = () => headingButton('新建角色池');
+
+  /** 左侧资源列表里的行按钮（正文里的 input 不带文本，不会误命中）。 */
+  const poolRow = (name: string) =>
+    screen.getByText(name).closest('button') as HTMLButtonElement;
+
+  const cancelButtonOf = () =>
+    screen.getByText('取消').closest('button') as HTMLButtonElement;
+
+  const deleteButtonOf = () =>
+    screen.getByText('删除角色池').closest('button') as HTMLButtonElement;
+
+  beforeEach(() => {
+    vi.mocked(api.getRoles).mockResolvedValue(poolRoles);
+  });
+
+  it('lists existing pools and prefills the form with the first one', async () => {
+    vi.mocked(api.getRolePools).mockResolvedValue([existingPool]);
+    const { container } = renderSettings();
+    await openPoolsTab();
+
+    expect(await screen.findByText('博客开发')).toBeDefined();
+    expect(nameInputOf(container).value).toBe('博客开发');
+    expect((roleCheckbox('代码编写') as HTMLInputElement).checked).toBe(true);
+    expect((roleCheckbox('测试验证') as HTMLInputElement).checked).toBe(false);
+  });
+
+  it('updates the selected pool instead of creating a new one', async () => {
+    vi.mocked(api.getRolePools).mockResolvedValue([existingPool]);
+    vi.mocked(api.updateRolePool).mockResolvedValue({
+      ...existingPool,
+      roles: ['code', 'test'],
+    });
+    renderSettings();
+    await openPoolsTab();
+    fireEvent.click(editButtonOf());
+
+    fireEvent.click(roleCheckbox('测试验证'));
+    fireEvent.click(saveButtonOf());
+
+    await waitFor(() => expect(api.updateRolePool).toHaveBeenCalled());
+    expect(vi.mocked(api.updateRolePool).mock.calls[0]).toEqual([
+      'p1',
+      { name: '博客开发', roles: ['code', 'test'] },
+    ]);
+    expect(api.createRolePool).not.toHaveBeenCalled();
+  });
+
+  it('creates a new pool when nothing is selected', async () => {
+    vi.mocked(api.createRolePool).mockResolvedValue({ id: 'p2', name: '纯编码', roles: ['code'] });
+    const { container } = renderSettings();
+    await openPoolsTab();
+
+    expect(await screen.findByText('暂无角色池，点击「新建角色池」创建。')).toBeDefined();
+    // 未选中任何池时是只读态，保存/删除都不该出现
+    expect(screen.queryByText('保存角色池')).toBeNull();
+    expect(screen.queryByText('删除角色池')).toBeNull();
+
+    fireEvent.click(newPoolButtonOf());
+    expect(saveButtonOf().disabled).toBe(true);
+
+    fireEvent.change(nameInputOf(container), { target: { value: '纯编码' } });
+    fireEvent.click(roleCheckbox('代码编写'));
+    fireEvent.click(saveButtonOf());
+
+    await waitFor(() => expect(api.createRolePool).toHaveBeenCalledWith({ name: '纯编码', roles: ['code'] }));
+    expect(api.updateRolePool).not.toHaveBeenCalled();
+  });
+
+  it('disables save when the name is blank or no role is picked', async () => {
+    vi.mocked(api.getRolePools).mockResolvedValue([existingPool]);
+    const { container } = renderSettings();
+    await openPoolsTab();
+    fireEvent.click(editButtonOf());
+
+    expect(saveButtonOf().disabled).toBe(false);
+
+    fireEvent.change(nameInputOf(container), { target: { value: '   ' } });
+    expect(saveButtonOf().disabled).toBe(true);
+
+    fireEvent.change(nameInputOf(container), { target: { value: '博客开发' } });
+    fireEvent.click(roleCheckbox('代码编写'));
+    expect(saveButtonOf().disabled).toBe(true);
+
+    fireEvent.click(saveButtonOf());
+    expect(api.updateRolePool).not.toHaveBeenCalled();
+    expect(api.createRolePool).not.toHaveBeenCalled();
+  });
+
+  it('deletes the selected pool after confirmation', async () => {
+    vi.stubGlobal('confirm', vi.fn(() => true));
+    vi.mocked(api.getRolePools).mockResolvedValueOnce([existingPool]).mockResolvedValue([]);
+    vi.mocked(api.deleteRolePool).mockResolvedValue(undefined);
+    renderSettings();
+    await openPoolsTab();
+    fireEvent.click(editButtonOf());
+
+    fireEvent.click(screen.getByText('删除角色池'));
+
+    await waitFor(() => expect(api.deleteRolePool).toHaveBeenCalledWith('p1'));
+    expect(await screen.findByText('暂无角色池，点击「新建角色池」创建。')).toBeDefined();
+    vi.unstubAllGlobals();
+  });
+
+  it('keeps a selected pool read-only until Edit is clicked', async () => {
+    vi.mocked(api.getRolePools).mockResolvedValue([existingPool]);
+    const { container } = renderSettings();
+    await openPoolsTab();
+
+    // 点条目只是查看：没有保存/删除，表单是只读的
+    expect(screen.queryByText('保存角色池')).toBeNull();
+    expect(screen.queryByText('删除角色池')).toBeNull();
+    expect(nameInputOf(container).disabled).toBe(true);
+    expect(roleCheckbox('代码编写').disabled).toBe(true);
+
+    // 「编辑」可用（有选中项），「新建」也在
+    expect(editButtonOf().disabled).toBe(false);
+    expect(newPoolButtonOf()).toBeDefined();
+  });
+
+  it('reveals save / delete / cancel and unlocks the form once Edit is clicked', async () => {
+    vi.mocked(api.getRolePools).mockResolvedValue([existingPool]);
+    const { container } = renderSettings();
+    await openPoolsTab();
+    fireEvent.click(editButtonOf());
+
+    expect(saveButtonOf()).toBeDefined();
+    expect(deleteButtonOf()).toBeDefined();
+    expect(cancelButtonOf()).toBeDefined();
+    expect(nameInputOf(container).disabled).toBe(false);
+    expect(roleCheckbox('代码编写').disabled).toBe(false);
+    // 编辑态下不该再挂一个「编辑」按钮
+    expect(editButtonOf()).toBeUndefined();
+  });
+
+  it('discards the edits and restores the stored values on Cancel', async () => {
+    vi.mocked(api.getRolePools).mockResolvedValue([existingPool]);
+    const { container } = renderSettings();
+    await openPoolsTab();
+
+    fireEvent.click(editButtonOf());
+    fireEvent.change(nameInputOf(container), { target: { value: '被改掉的名字' } });
+    fireEvent.click(roleCheckbox('代码编写')); // 取消勾选
+    fireEvent.click(cancelButtonOf());
+
+    // 回到只读：保存/删除消失，取值回到已存的那份
+    expect(screen.queryByText('保存角色池')).toBeNull();
+    expect(nameInputOf(container).value).toBe('博客开发');
+    expect(nameInputOf(container).disabled).toBe(true);
+    expect(roleCheckbox('代码编写').checked).toBe(true);
+
+    // 再进编辑态看到的仍是原值，说明改动确实被丢弃而不是被留在了草稿里
+    fireEvent.click(editButtonOf());
+    expect(nameInputOf(container).value).toBe('博客开发');
+    expect(roleCheckbox('代码编写').checked).toBe(true);
+  });
+
+  it('asks before switching rows mid-edit and stays put when declined', async () => {
+    const confirmMock = vi.fn(() => false);
+    vi.stubGlobal('confirm', confirmMock);
+    vi.mocked(api.getRolePools).mockResolvedValue([
+      existingPool,
+      { id: 'p2', name: '纯编码', roles: ['test'] },
+    ]);
+    const { container } = renderSettings();
+    await openPoolsTab();
+
+    fireEvent.click(editButtonOf());
+    fireEvent.change(nameInputOf(container), { target: { value: '草稿' } });
+    fireEvent.click(poolRow('纯编码'));
+
+    expect(confirmMock).toHaveBeenCalled();
+    // 拒绝 → 不切换，仍停在原条目的编辑态，草稿还在
+    expect(nameInputOf(container).value).toBe('草稿');
+    expect(saveButtonOf()).toBeDefined();
+    expect(poolRow('博客开发').className).toContain('is-active');
+
+    // 同意 → 切过去，并退出编辑态
+    confirmMock.mockReturnValue(true);
+    fireEvent.click(poolRow('纯编码'));
+    await waitFor(() => expect(nameInputOf(container).value).toBe('纯编码'));
+    expect(screen.queryByText('保存角色池')).toBeNull();
+    expect(poolRow('纯编码').className).toContain('is-active');
+    vi.unstubAllGlobals();
+  });
+
+  it('does not ask when switching while not editing', async () => {
+    const confirmMock = vi.fn(() => true);
+    vi.stubGlobal('confirm', confirmMock);
+    vi.mocked(api.getRolePools).mockResolvedValue([
+      existingPool,
+      { id: 'p2', name: '纯编码', roles: ['test'] },
+    ]);
+    const { container } = renderSettings();
+    await openPoolsTab();
+
+    fireEvent.click(poolRow('纯编码'));
+
+    await waitFor(() => expect(nameInputOf(container).value).toBe('纯编码'));
+    expect(confirmMock).not.toHaveBeenCalled();
+    vi.unstubAllGlobals();
+  });
+
+  it('asks before switching to create mid-edit, and stays put when declined', async () => {
+    const confirmMock = vi.fn(() => false);
+    vi.stubGlobal('confirm', confirmMock);
+    vi.mocked(api.getRolePools).mockResolvedValue([existingPool]);
+    const { container } = renderSettings();
+    await openPoolsTab();
+
+    fireEvent.click(editButtonOf());
+    fireEvent.change(nameInputOf(container), { target: { value: '草稿' } });
+    // 「新建」在编辑态下仍然可见：它是除左侧列表之外第二条离开编辑态的路
+    fireEvent.click(newPoolButtonOf());
+
+    expect(confirmMock).toHaveBeenCalled();
+    expect(confirmMock.mock.calls[0][0]).toContain('博客开发');
+    expect(nameInputOf(container).value).toBe('草稿');
+
+    confirmMock.mockReturnValue(true);
+    fireEvent.click(newPoolButtonOf());
+    await waitFor(() => expect(nameInputOf(container).value).toBe(''));
+    // 新建态：可编辑、有保存、没有删除
+    expect(nameInputOf(container).disabled).toBe(false);
+    expect(saveButtonOf()).toBeDefined();
+    expect(screen.queryByText('删除角色池')).toBeNull();
+    vi.unstubAllGlobals();
+  });
+
+  it('asks before closing the panel mid-edit and names the entry being edited', async () => {
+    const confirmMock = vi.fn(() => false);
+    vi.stubGlobal('confirm', confirmMock);
+    vi.mocked(api.getRolePools).mockResolvedValue([existingPool]);
+    const onClose = vi.fn();
+    render(<WorkbenchSettings open onClose={onClose} onSaved={() => {}} />);
+    await openPoolsTab();
+
+    const closeButton = () =>
+      document.querySelector('.settings-dialog .dialog-header .icon-button') as HTMLButtonElement;
+
+    // 不在编辑态：直接关，不该多问一句
+    fireEvent.click(closeButton());
+    expect(confirmMock).not.toHaveBeenCalled();
+    expect(onClose).toHaveBeenCalledTimes(1);
+
+    // 进入编辑态后关闭要问，且提示里指的是库里那条，不是表单里的草稿名
+    onClose.mockClear();
+    confirmMock.mockClear();
+    fireEvent.click(editButtonOf());
+    fireEvent.change(nameInputOf(document.body), { target: { value: '草稿' } });
+    fireEvent.click(closeButton());
+
+    expect(confirmMock.mock.calls[0][0]).toContain('博客开发');
+    expect(confirmMock.mock.calls[0][0]).not.toContain('草稿');
+    expect(onClose).not.toHaveBeenCalled();
+
+    confirmMock.mockReturnValue(true);
+    fireEvent.click(closeButton());
+    expect(onClose).toHaveBeenCalled();
+    vi.unstubAllGlobals();
+  });
+
+  it('starts a new pool directly editable and without a delete button', async () => {
+    vi.mocked(api.getRolePools).mockResolvedValue([existingPool]);
+    const { container } = renderSettings();
+    await openPoolsTab();
+
+    fireEvent.click(newPoolButtonOf());
+
+    expect(nameInputOf(container).disabled).toBe(false);
+    expect(nameInputOf(container).value).toBe('');
+    expect(saveButtonOf()).toBeDefined();
+    expect(cancelButtonOf()).toBeDefined();
+    // 还没存下来的条目不该有删除按钮
+    expect(screen.queryByText('删除角色池')).toBeNull();
+  });
+});
+
+// 模型下拉只显示「当前 CLI 真能用」的模型。过滤的主体在后端（CliAdapter.known_models
+// 按协议端点过滤），这里覆盖前端这一侧：候选是「当前 CLI 的 models」∪「厂商预置的
+// models」，而后者与当前 CLI 无关，曾经会把别家 CLI 的模型混进来。

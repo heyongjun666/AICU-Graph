@@ -1,6 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { ChevronDown, FolderTree, HelpCircle, Languages, Plus, Save, Server, Sparkles, Trash2, Upload, Users, X } from 'lucide-react';
-import { CliInfo, GlobalConfig, ProviderPreset, RoleField, RoleInfo, RoleSchema, SkillInfo } from '../types';
+import { ChevronDown, Boxes, FolderTree, HelpCircle, Languages, Pencil, Plus, Save, Server, Sparkles, Trash2, Upload, Users, X } from 'lucide-react';
 import { CliInfo, EffectiveBaseUrlResponse, GlobalConfig, ProviderPreset, RoleField, RoleInfo, RolePool, RoleSchema, SkillInfo } from '../types';
 import { useI18n } from '../i18n';
 import { useUIStateStore } from '../stores/UIStateStore';
@@ -32,7 +31,7 @@ import {
 } from '../utils/api';
 import { clearRoleHoverDetailCache, loadRoleHoverDetail } from '../utils/roleHoverDetail';
 
-type SettingsTab = 'connection' | 'workspace' | 'roles' | 'skills' | 'language';
+type SettingsTab = 'connection' | 'workspace' | 'roles' | 'pools' | 'skills' | 'language';
 type RoleType = NonNullable<RoleInfo['type']>;
 
 interface WorkbenchSettingsProps {
@@ -45,6 +44,7 @@ const tabs: Array<{ id: SettingsTab; label: string; icon: React.ReactNode }> = [
   { id: 'connection', label: 'settings.tab.connection', icon: <Server size={16} /> },
   { id: 'workspace', label: 'settings.tab.workspace', icon: <FolderTree size={16} /> },
   { id: 'roles', label: 'settings.tab.roles', icon: <Users size={16} /> },
+  { id: 'pools', label: 'settings.tab.pools', icon: <Boxes size={16} /> },
   { id: 'skills', label: 'settings.tab.skills', icon: <Sparkles size={16} /> },
   { id: 'language', label: 'settings.tab.language', icon: <Languages size={16} /> },
 ];
@@ -105,6 +105,13 @@ function coerceField(field: RoleField, value: string): unknown {
   return value;
 }
 
+/** 资源编辑区的显隐状态：idle = 什么都没选，view = 只读查看，edit = 改已有条目，create = 新建。 */
+type ResourceMode = 'idle' | 'view' | 'edit' | 'create';
+
+/** 由「是否在编辑」与「当前选中项」推导，避免两者各存一份而互相打架。 */
+const deriveMode = (editing: boolean, selected: string): ResourceMode =>
+  editing ? (selected ? 'edit' : 'create') : (selected ? 'view' : 'idle');
+
 /** 悬浮（hover）或点击（focus）显示说明气泡的帮助图标。 */
 const HelpTip: React.FC<{ text: string; title?: string }> = ({ text, title }) => {
   if (!text) return null;
@@ -121,7 +128,8 @@ const SkillMultiSelect: React.FC<{
   options: SkillInfo[];
   value: string[];
   onChange: (ids: string[]) => void;
-}> = ({ options, value, onChange }) => {
+  disabled?: boolean;
+}> = ({ options, value, onChange, disabled = false }) => {
   const { t } = useI18n();
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState('');
@@ -148,7 +156,7 @@ const SkillMultiSelect: React.FC<{
 
   return (
     <div className="skill-select" ref={boxRef}>
-      <button type="button" className="skill-select-trigger" onClick={() => setOpen((v) => !v)}>
+      <button type="button" className="skill-select-trigger" disabled={disabled} onClick={() => !disabled && setOpen((v) => !v)}>
         {selected.length > 0 ? (
           <span className="skill-select-chips">
             {selected.map((skill) => <span key={skill.id} className="skill-select-chip">{skill.name || skill.id}</span>)}
@@ -166,7 +174,7 @@ const SkillMultiSelect: React.FC<{
           <div className="skill-select-list">
             {filtered.map((skill) => (
               <label key={skill.id} className={`skill-select-item ${value.includes(skill.id) ? 'is-checked' : ''}`}>
-                <input type="checkbox" checked={value.includes(skill.id)} onChange={() => toggle(skill.id)} />
+                <input type="checkbox" checked={value.includes(skill.id)} onChange={() => toggle(skill.id)} disabled={disabled} />
                 <span className="skill-select-name">{skill.name || skill.id}</span>
                 {skill.name !== skill.id && <code className="skill-select-id">{skill.id}</code>}
               </label>
@@ -186,7 +194,11 @@ const RoleFieldEditor: React.FC<{
   onChange: (value: unknown) => void;
   onReset: () => void;
   skillOptions?: SkillInfo[];
-}> = ({ field, value, overridden, onChange, onReset, skillOptions }) => {
+  /** 只读查看态。必须显式透传：控件的禁用条件是 `!overridden`，
+   *  而 roleConfig 恰好就是被覆盖字段的集合，不单独判只读会让"查看"态里
+   *  最该锁住的那些字段反而可改。 */
+  readOnly?: boolean;
+}> = ({ field, value, overridden, onChange, onReset, skillOptions, readOnly = false }) => {
   const { t, lang } = useI18n();
   const fieldLabel = lang === 'en' ? field.label_en || field.label : field.label;
   const fieldDescription = lang === 'en' ? field.description_en || field.description : field.description;
@@ -213,14 +225,14 @@ const RoleFieldEditor: React.FC<{
             {fieldDescription && <HelpTip text={fieldDescription} title={fieldLabel} />}
           </div>
         </div>
-        <SkillMultiSelect options={skillOptions!} value={currentSkills} onChange={onChange} />
+        <SkillMultiSelect options={skillOptions!} value={currentSkills} onChange={onChange} disabled={readOnly} />
         {currentSkills.length === 0 && <small className="field-default">{t('settings.noSkillSelected')}</small>}
       </div>
     );
   }
 
   const control = field.type === 'boolean' ? (
-    <select value={String(value)} onChange={(event) => onChange(event.target.value === 'true')} disabled={!overridden}>
+    <select value={String(value)} onChange={(event) => onChange(event.target.value === 'true')} disabled={readOnly || !overridden}>
       <option value="true">{t('common.enabled')}</option>
       <option value="false">{t('common.disabled')}</option>
     </select>
@@ -230,7 +242,7 @@ const RoleFieldEditor: React.FC<{
       onChange={(event) => onChange(coerceField(field, event.target.value))}
       placeholder={fieldPlaceholder || defaultText || t('settings.enterValue')}
       rows={field.type === 'list' ? 3 : 5}
-      disabled={!overridden}
+      disabled={readOnly || !overridden}
     />
   ) : (
     <input
@@ -238,7 +250,7 @@ const RoleFieldEditor: React.FC<{
       value={displayValue(value)}
       onChange={(event) => onChange(coerceField(field, event.target.value))}
       placeholder={fieldPlaceholder || defaultText || t('settings.usesDefaultWhenEmpty')}
-      disabled={!overridden}
+      disabled={readOnly || !overridden}
     />
   );
 
@@ -250,11 +262,11 @@ const RoleFieldEditor: React.FC<{
           <code>{field.name}</code>
           {fieldDescription && <HelpTip text={fieldDescription} title={fieldLabel} />}
         </div>
-        <label className="default-toggle"><input type="checkbox" checked={overridden} onChange={(event) => event.target.checked ? onChange(initialOverrideValue) : onReset()} /> {t('settings.override')}</label>
+        <label className="default-toggle"><input type="checkbox" checked={overridden} disabled={readOnly} onChange={(event) => event.target.checked ? onChange(initialOverrideValue) : onReset()} /> {t('settings.override')}</label>
       </div>
       {control}
       {!overridden && <small className="field-default">{hasDefault ? t('settings.default', { value: defaultText || t('settings.empty') }) : t('settings.optionalNoDefault')}</small>}
-      {overridden && <button type="button" className="inline-reset" onClick={onReset}>{hasDefault ? t('settings.useDefault') : t('settings.removeOverride')}</button>}
+      {overridden && !readOnly && <button type="button" className="inline-reset" onClick={onReset}>{hasDefault ? t('settings.useDefault') : t('settings.removeOverride')}</button>}
     </div>
   );
 };
@@ -270,6 +282,16 @@ const WorkbenchSettings: React.FC<WorkbenchSettingsProps> = ({ open, onClose, on
   const [providerInput, setProviderInput] = useState('');
   const [defaultCli, setDefaultCli] = useState<string | null>(null);
   const [roles, setRoles] = useState<RoleInfo[]>([]);
+  const [pools, setPools] = useState<RolePool[]>([]);
+  const [selectedPool, setSelectedPool] = useState('');
+  const [poolName, setPoolName] = useState('');
+  const [poolRoles, setPoolRoles] = useState<string[]>([]);
+  const [poolQuery, setPoolQuery] = useState('');
+  // 三个资源 tab 的编辑开关。不另设 mode 枚举：selectedX === '' 本来就是「新建」的判据，
+  // 再存一份 mode 会出现「编辑中但没有选中项」这类无法自洽的状态。
+  const [editingRole, setEditingRole] = useState(false);
+  const [editingPool, setEditingPool] = useState(false);
+  const [editingSkill, setEditingSkill] = useState(false);
   const [skills, setSkills] = useState<SkillInfo[]>([]);
   const [selectedRole, setSelectedRole] = useState('');
   const [roleId, setRoleId] = useState('');
@@ -300,8 +322,8 @@ const WorkbenchSettings: React.FC<WorkbenchSettingsProps> = ({ open, onClose, on
     setBusy(true);
     setError('');
     try {
-      const [globalResp, nextRoles, nextSkills, schema] = await Promise.all([
-        getGlobalConfig(), getRoles(), getSkills(), getRoleSchema('worker'),
+      const [globalResp, nextRoles, nextSkills, schema, nextPools] = await Promise.all([
+        getGlobalConfig(), getRoles(), getSkills(), getRoleSchema('worker'), getRolePools(),
       ]);
       setConfig(globalResp.config);
       setClis(globalResp.clis);
@@ -313,6 +335,10 @@ const WorkbenchSettings: React.FC<WorkbenchSettingsProps> = ({ open, onClose, on
       setRoles(nextRoles);
       setSkills(nextSkills);
       setRoleSchema(schema);
+      setPools(nextPools);
+      // 与角色/skill 一致：默认选中第一个角色池，而非停留在「新建」态。
+      const firstPool = nextPools[0];
+      if (firstPool) fillPoolForm(firstPool);
       // 进入页面默认选中第一个角色 / 第一个 skill，而非停留在「新建」态。
       const firstRole = nextRoles[0];
       if (firstRole) {
@@ -351,7 +377,13 @@ const WorkbenchSettings: React.FC<WorkbenchSettingsProps> = ({ open, onClose, on
     setRoleId('');
     setRoleType('worker');
     setRoleConfig({});
+    setPoolFormEmpty();
     setSelectedSkill('');
+    // 打开面板一律从只读态开始，且清掉上一次的编辑开关。
+    setEditingRole(false);
+    setEditingPool(false);
+    setEditingSkill(false);
+    setAdvancedOpen(false);
     void load();
   }, [open]);
 
@@ -509,7 +541,7 @@ const WorkbenchSettings: React.FC<WorkbenchSettingsProps> = ({ open, onClose, on
   };
 
   const chooseRole = async (value: string) => {
-    setSelectedRole(value); setError('');
+    setSelectedRole(value); setError(''); setAdvancedOpen(false);
     if (!value) {
       setRoleId(''); setRoleType('worker'); setRoleConfig({}); setRoleSchema(await getRoleSchema('worker')); return;
     }
@@ -517,7 +549,11 @@ const WorkbenchSettings: React.FC<WorkbenchSettingsProps> = ({ open, onClose, on
     try {
       const detail = await getRole(type, id);
       setRoleId(detail.id); setRoleType(type); setRoleConfig(detail.config || {}); setRoleSchema(detail.schema || await getRoleSchema(type));
-    } catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)); }
+    } catch (reason) {
+      // 详情拉不到就清空表单，否则新的高亮行下面还挂着上一个角色的配置。
+      setRoleId(''); setRoleConfig({});
+      setError(reason instanceof Error ? reason.message : String(reason));
+    }
   };
 
   const saveRole = async () => {
@@ -533,6 +569,7 @@ const WorkbenchSettings: React.FC<WorkbenchSettingsProps> = ({ open, onClose, on
       // 角色内容变了，悬停卡片里缓存的旧人格要丢掉，否则池编辑处悬停还看到改之前的。
       clearRoleHoverDetailCache();
       setRoles(await getRoles()); setSelectedRole(`${roleType}:${payload.role_id}`);
+      setEditingRole(false);
       const message = t('settings.roleSaved');
       setNotice(message); addToast({ type: 'success', message });
     } catch (reason) {
@@ -546,7 +583,11 @@ const WorkbenchSettings: React.FC<WorkbenchSettingsProps> = ({ open, onClose, on
     setSelectedSkill(id); setError(''); setZipFile(null);
     if (!id) { setSkillId(''); setSkillContent('# Skill\n\n'); setSkillDetail(null); return; }
     try { const detail = await getSkill(id); setSkillId(detail.id); setSkillContent(detail.content || ''); setSkillDetail(detail); }
-    catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)); }
+    catch (reason) {
+      // 同 chooseRole：拉不到详情就清空，别把上一个 skill 的内容留在新的高亮行下面。
+      setSkillId(''); setSkillContent('# Skill\n\n'); setSkillDetail(null);
+      setError(reason instanceof Error ? reason.message : String(reason));
+    }
   };
 
   const importZip = async () => {
@@ -559,6 +600,7 @@ const WorkbenchSettings: React.FC<WorkbenchSettingsProps> = ({ open, onClose, on
       setSkills(await getSkills());
       setSelectedSkill(detail.id); setSkillId(detail.id); setSkillContent(detail.content || ''); setSkillDetail(detail);
       setZipFile(null);
+      setEditingSkill(false);
       setNotice(t('settings.skillImported'));
     } catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)); }
     finally { setBusy(false); }
@@ -571,6 +613,7 @@ const WorkbenchSettings: React.FC<WorkbenchSettingsProps> = ({ open, onClose, on
       const payload = { skill_id: skillId.trim(), content: skillContent };
       if (selectedSkill) await updateSkill(payload); else await createSkill(payload);
       setSkills(await getSkills()); setSelectedSkill(payload.skill_id);
+      setEditingSkill(false);
       const message = t('settings.skillSaved');
       setNotice(message); addToast({ type: 'success', message });
     } catch (reason) {
@@ -594,10 +637,76 @@ const WorkbenchSettings: React.FC<WorkbenchSettingsProps> = ({ open, onClose, on
       setNotice(t('settings.roleDeleted'));
       addToast({ type: 'success', message: t('settings.roleDeleted') });
       const next = nextRoles[0];
+      setEditingRole(false); setAdvancedOpen(false);
       if (next) await chooseRole(`${next.type}:${next.id}`);
       else { setSelectedRole(''); setRoleId(''); setRoleType('worker'); setRoleConfig({}); setRoleSchema(await getRoleSchema('worker')); }
     } catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)); }
     finally { setBusy(false); }
+  };
+
+  const reportPoolError = (message: string) => {
+    setError(message); addToast({ type: 'error', message });
+  };
+
+  const setPoolFormEmpty = () => { setSelectedPool(''); setPoolName(''); setPoolRoles([]); setPoolQuery(''); };
+
+  const fillPoolForm = (pool: RolePool) => {
+    setSelectedPool(pool.id); setPoolName(pool.name); setPoolRoles(pool.roles); setPoolQuery('');
+  };
+
+  /** 入参为空串表示切到「新建」态。 */
+  const choosePool = (id: string) => {
+    setError('');
+    const pool = id ? pools.find((item) => item.id === id) : undefined;
+    if (pool) fillPoolForm(pool); else setPoolFormEmpty();
+  };
+
+  /** 角色类型的显示名。列表 pill 与悬浮卡片的短标签共用，省得各处再抄一遍三元表达式。 */
+  const roleTypeLabel = (type?: RoleInfo['type']) =>
+    (type === 'manager' ? t('dialog.manager') : t('dialog.worker'));
+
+  const togglePoolRole = (id: string, checked: boolean) => {
+    setPoolRoles((current) => checked
+      ? (current.includes(id) ? current : [...current, id])
+      : current.filter((item) => item !== id));
+  };
+
+  const savePool = async () => {
+    const name = poolName.trim();
+    if (!name) return reportPoolError(t('settings.poolNameRequired'));
+    if (!poolRoles.length) return reportPoolError(t('settings.poolRolesRequired'));
+    setBusy(true); setError(''); setNotice('');
+    try {
+      const payload = { name, roles: poolRoles };
+      const saved = selectedPool
+        ? await updateRolePool(selectedPool, payload)
+        : await createRolePool(payload);
+      setPools(await getRolePools());
+      fillPoolForm(saved);
+      setEditingPool(false);
+      const message = t('settings.poolSaved');
+      setNotice(message); addToast({ type: 'success', message });
+    } catch (reason) {
+      reportPoolError(reason instanceof Error ? reason.message : String(reason));
+    } finally { setBusy(false); }
+  };
+
+  const deleteCurrentPool = async () => {
+    if (!selectedPool) return;
+    const target = pools.find((item) => item.id === selectedPool);
+    if (!window.confirm(t('settings.deletePoolConfirm', { name: target?.name || poolName }))) return;
+    setBusy(true); setError(''); setNotice('');
+    try {
+      await deleteRolePool(selectedPool);
+      const nextPools = await getRolePools();
+      setPools(nextPools);
+      setEditingPool(false);
+      if (nextPools[0]) fillPoolForm(nextPools[0]); else setPoolFormEmpty();
+      setNotice(t('settings.poolDeleted'));
+      addToast({ type: 'success', message: t('settings.poolDeleted') });
+    } catch (reason) {
+      reportPoolError(reason instanceof Error ? reason.message : String(reason));
+    } finally { setBusy(false); }
   };
 
   const deleteCurrentSkill = async () => {
@@ -613,13 +722,108 @@ const WorkbenchSettings: React.FC<WorkbenchSettingsProps> = ({ open, onClose, on
       setNotice(t('settings.skillDeleted'));
       addToast({ type: 'success', message: t('settings.skillDeleted') });
       const next = nextSkills[0];
+      setEditingSkill(false); setZipFile(null);
       if (next) await chooseSkill(next.id);
       else { setSelectedSkill(''); setSkillId(''); setSkillContent('# Skill\n\n'); setSkillDetail(null); }
     } catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)); }
     finally { setBusy(false); }
   };
 
+  /**
+   * 当前选中条目在库里的名字，用于确认框里指名道姓。
+   * 必须是**已存的那一份**，不能直接用表单里的值：用户把名字改成草稿后，
+   * 确认框会拿草稿名去问他要不要放弃「草稿」，等于没说清要丢的是哪一条。
+   * 只有在条目还没落库（新建态，选中为空）时才回退到表单值。
+   */
+  const currentRoleName = () =>
+    roles.find((item) => `${item.type}:${item.id}` === selectedRole)?.display_name || roleId;
+  const currentPoolName = () => pools.find((item) => item.id === selectedPool)?.name || poolName;
+  const currentSkillName = () => skills.find((item) => item.id === selectedSkill)?.name || skillId;
+
+  /**
+   * 用户主动切换条目：编辑中会丢改动，先问一句。
+   * 保存/删除后的内部重选走 chooseRole / chooseSkill / fillPoolForm 等裸加载函数，不经过这里，
+   * 否则「存完自动跳回只读」会自己弹自己一个确认框。
+   *
+   * 有两条路能离开编辑态：左侧列表点另一条，和标题栏的「新建」。两条都走这里，
+   * 所以「新建」按钮在编辑态下仍然显示——它被藏起来的话，用户就只能先点「取消」，
+   * 而这个守卫也就成了永远走不到的死代码。
+   */
+  const confirmSwitchAway = (editing: boolean, nextValue: string, currentValue: string, currentName: string) => {
+    if (!editing || nextValue === currentValue) return true;
+    return window.confirm(t('settings.discardEditsConfirm', { name: currentName }));
+  };
+
+  const requestSelectRole = (value: string) => {
+    if (!confirmSwitchAway(editingRole, value, selectedRole, currentRoleName())) return;
+    setEditingRole(false);
+    void chooseRole(value);
+  };
+
+  const requestSelectPool = (id: string) => {
+    if (!confirmSwitchAway(editingPool, id, selectedPool, currentPoolName())) return;
+    setEditingPool(false);
+    choosePool(id);
+  };
+
+  const requestSelectSkill = (id: string) => {
+    if (!confirmSwitchAway(editingSkill, id, selectedSkill, currentSkillName())) return;
+    setEditingSkill(false);
+    void chooseSkill(id);
+  };
+
+  const startCreateRole = () => {
+    if (!confirmSwitchAway(editingRole, '', selectedRole, currentRoleName())) return;
+    setEditingRole(true);
+    void chooseRole('');
+  };
+
+  const startCreatePool = () => {
+    if (!confirmSwitchAway(editingPool, '', selectedPool, currentPoolName())) return;
+    setEditingPool(true);
+    choosePool('');
+  };
+
+  const startCreateSkill = () => {
+    if (!confirmSwitchAway(editingSkill, '', selectedSkill, currentSkillName())) return;
+    setEditingSkill(true);
+    void chooseSkill('');
+  };
+
+  /** 取消编辑：丢掉改动，重新按权威数据回填，再回到只读态。 */
+  const cancelEditRole = async () => {
+    setEditingRole(false); setAdvancedOpen(false); setError('');
+    if (selectedRole) await chooseRole(selectedRole);
+    else { setRoleId(''); setRoleType('worker'); setRoleConfig({}); setRoleSchema(await getRoleSchema('worker')); }
+  };
+
+  const cancelEditPool = () => {
+    setEditingPool(false); setError('');
+    const pool = pools.find((item) => item.id === selectedPool);
+    if (pool) fillPoolForm(pool); else setPoolFormEmpty();
+  };
+
+  const cancelEditSkill = async () => {
+    setEditingSkill(false); setError(''); setZipFile(null);
+    if (selectedSkill) await chooseSkill(selectedSkill);
+    else { setSkillId(''); setSkillContent('# Skill\n\n'); setSkillDetail(null); }
+  };
+
+  /**
+   * 关闭设置面板时若正在编辑，提醒一句，避免点右上角的关闭直接丢掉改动。
+   * 三个 tab 同一时刻只有一个在编辑，所以按 tab 取当前条目的名字，提示里能指名道姓。
+   */
+  const requestClose = () => {
+    if (!editingRole && !editingPool && !editingSkill) { onClose(); return; }
+    const name = editingRole ? currentRoleName() : editingPool ? currentPoolName() : currentSkillName();
+    if (!window.confirm(t('settings.discardEditsConfirm', { name: name || t('settings.unsavedEdits') }))) return;
+    onClose();
+  };
+
   if (!open) return null;
+  const roleMode = deriveMode(editingRole, selectedRole);
+  const poolMode = deriveMode(editingPool, selectedPool);
+  const skillMode = deriveMode(editingSkill, selectedSkill);
   const roleFields = roleSchema?.fields || [];
   const basicFields = roleFields.filter((field) => !field.advanced);
   const advancedFields = roleFields.filter((field) => field.advanced);
@@ -643,6 +847,7 @@ const WorkbenchSettings: React.FC<WorkbenchSettingsProps> = ({ open, onClose, on
           onChange={(value) => setRoleConfig((current) => ({ ...current, [field.name]: value }))}
           onReset={() => setRoleConfig((current) => { const next = { ...current }; delete next[field.name]; return next; })}
           skillOptions={field.name === 'skills' ? skills : undefined}
+          readOnly={roleMode === 'view' || roleMode === 'idle'}
         />
       ))}
     </fieldset>
@@ -651,17 +856,40 @@ const WorkbenchSettings: React.FC<WorkbenchSettingsProps> = ({ open, onClose, on
   return (
     <div className="dialog-backdrop settings-backdrop" role="presentation">
       <section className="settings-dialog" role="dialog" aria-modal="true" aria-label={t('settings.title')}>
-        <header className="dialog-header"><div><span className="eyebrow">WORKBENCH</span><h2>{t('settings.title')}</h2></div><button className="icon-button" onClick={onClose} title={t('settings.close')}><X size={18} /></button></header>
+        <header className="dialog-header"><div><span className="eyebrow">WORKBENCH</span><h2>{t('settings.title')}</h2></div><button className="icon-button" onClick={requestClose} title={t('settings.close')}><X size={18} /></button></header>
         <div className="settings-layout">
-          <nav className="settings-nav">{tabs.map((item) => <button key={item.id} className={tab === item.id ? 'is-active' : ''} onClick={() => setTab(item.id)}>{item.icon}<span>{t(item.label)}</span></button>)}</nav>
+          <nav className="settings-nav">{tabs.map((item) => <button key={item.id} className={tab === item.id ? 'is-active' : ''} onClick={() => { setTab(item.id); setEditingRole(false); setEditingPool(false); setEditingSkill(false); }}>{item.icon}<span>{t(item.label)}</span></button>)}</nav>
           <div className="settings-body">
             {error && <div className="settings-message is-error">{error}</div>}
             {notice && <div className="settings-message is-success">{notice}</div>}
             {tab === 'connection' && <div className="settings-section"><div className="section-heading"><div><h3>{t('settings.connectionTitle')}</h3><p>{t('settings.connectionDesc')}</p></div></div><div className="form-grid"><label>Provider 厂商<input list="provider-options" value={providerInput} onChange={(event) => applyProviderInput(event.target.value)} placeholder="手动配置（输入厂商名，或从列表选择预置厂商）" /><datalist id="provider-options">{providerPresets.filter((preset) => preset.available !== false).map((preset) => <option key={preset.id} value={preset.display_name} />)}</datalist><small>选择预置厂商会自动填充 CLI/模型/API 地址；也可手动输入自定义厂商后自行配置下方各项。</small></label><label>{t('settings.cli')}<select value={config.cli_name || ''} onChange={(event) => setGlobal('cli_name', event.target.value || null)}><option value="">{t('settings.autoDetect')}{defaultCli ? ` (${defaultCli})` : ''}</option>{clis.map((cli) => <option key={cli.id} value={cli.id}>{cli.display_name}{cli.installed ? '' : t('settings.notInstalled')}</option>)}</select></label><label>{t('settings.model')}<input list="model-options" value={config.model || ''} onChange={(event) => setGlobal('model', event.target.value || null)} placeholder={selectedCli ? t('settings.selectOrTypeModel') : t('settings.usesRuntimeDefault')} /><datalist id="model-options">{allModelOptions.map((model) => <option key={model} value={model} />)}</datalist></label><label>{t('settings.apiBaseUrl')}<input value={config.api_base_url || ''} onChange={(event) => setGlobal('api_base_url', event.target.value || null)} placeholder={t('common.optional')} /><small>{t('settings.directConnectNote')}</small></label>{(config.cli_name || defaultCli) === 'internal' ? <label>账号名称<input value={internalUsername} onChange={(event) => setInternalUsername(event.target.value)} placeholder="请输入账号名称" /><small>Internal 使用账号名称认证。</small></label> : <label>{t('settings.apiKey')}<input type="password" value={apiKey} onChange={(event) => setApiKey(event.target.value)} placeholder={t('settings.apiKeyPlaceholder')} /><small>{apiKeyVendor ? t('settings.vendor', { vendor: apiKeyVendor }) : ''}{t('settings.localPlaintextNote')}</small></label>}</div><div className="settings-actions"><button className="secondary-button" disabled={testing || busy} onClick={runConnectionTest}>{testing ? t('settings.testing') : t('settings.testConnection')}</button><button className="primary-button" disabled={busy} onClick={saveConnection}><Save size={15} /> {t('settings.saveConnection')}</button></div></div>}
             {tab === 'workspace' && <div className="settings-section"><div className="section-heading"><div><h3>{t('settings.workspaceTitle')}</h3><p>{t('settings.workspaceDesc')}</p></div></div><label>{t('settings.workspaceRoot')}<input value={config.workspace_root || ''} onChange={(event) => setGlobal('workspace_root', event.target.value || null)} placeholder={t('settings.workspaceRootPlaceholder')} /></label><div className="settings-actions"><button className="primary-button" disabled={busy} onClick={saveWorkspace}><Save size={15} /> {t('settings.saveWorkspace')}</button></div></div>}
             {tab === 'workspace' && <div className="settings-section"><div className="section-heading"><div><h3>{t('settings.executionTitle')}</h3><p>{t('settings.executionDesc')}</p></div></div><label className="settings-toggle"><input type="checkbox" checked={config.dynamic_num_ccs !== false} onChange={(event) => setGlobal('dynamic_num_ccs', event.target.checked)} /><span>{t('settings.dynamicNumCcs')}</span><HelpTip text={t('settings.dynamicNumCcsHelp')} title={t('settings.dynamicNumCcs')} /></label>{config.dynamic_num_ccs === false && <label>{t('settings.defaultNumCcs')}<input type="number" min={NUM_CCS_MIN} max={NUM_CCS_MAX} step={1} value={config.default_num_ccs ?? NUM_CCS_MIN} disabled={busy} onChange={(event) => setGlobal('default_num_ccs', clampNumCcs(event.target.value))} /><small>{t('settings.defaultNumCcsHelp', { min: NUM_CCS_MIN, max: NUM_CCS_MAX })}</small></label>}<div className="settings-actions"><button className="primary-button" disabled={busy} onClick={saveExecution}><Save size={15} /> {t('settings.saveExecution')}</button></div></div>}
-            {tab === 'roles' && <div className="settings-section roles-editor"><div className="section-heading"><div><h3>{t('settings.rolesTitle')}</h3><p>{t('settings.rolesDesc', { count: roleFields.length })}</p></div><button className="secondary-button" onClick={() => void chooseRole('')}><Plus size={15} /> {t('settings.newRole')}</button></div><div className="role-editor-layout"><aside className="resource-list"><ul className="resource-list-items">{roles.map((item) => { const value = `${item.type}:${item.id}`; return <li key={value}><button type="button" className={selectedRole === value ? 'is-active' : ''} onClick={() => void chooseRole(value)}><span className="resource-list-type">{item.type === 'manager' ? t('dialog.manager') : t('dialog.worker')}</span><span className="resource-list-name">{item.display_name}</span></button></li>; })}</ul><div className="resource-list-note">{t('settings.customRoles', { count: roles.length })}</div></aside><div className="role-form"><div className="form-grid"><label>{t('settings.roleId')}<input value={roleId} onChange={(event) => setRoleId(event.target.value)} placeholder="lowercase_role_id" disabled={Boolean(selectedRole)} /></label><label>{t('settings.roleType')}<select value={roleType} onChange={(event) => void chooseRoleType(event.target.value as RoleType)} disabled={Boolean(selectedRole)}><option value="manager">{t('dialog.manager')}</option><option value="worker">{t('dialog.worker')}</option></select></label></div>{Object.entries(basicSections).map(([section, fields]) => renderFieldset(section, fields))}{advancedFields.length > 0 && <div className="advanced-config"><button type="button" className="advanced-config-toggle" onClick={() => setAdvancedOpen((value) => !value)} aria-expanded={advancedOpen}><ChevronDown size={14} className={advancedOpen ? 'is-open' : ''} /><span>{t('settings.advancedConfig')}</span><span className="advanced-config-count">{advancedFields.length}</span></button>{advancedOpen && <div className="advanced-config-body"><p className="advanced-config-desc">{t('settings.advancedConfigDesc')}</p>{Object.entries(advancedSections).map(([section, fields]) => renderFieldset(section, fields))}</div>}</div>}<div className="settings-actions">{selectedRole && <button className="danger-button" disabled={busy} onClick={deleteCurrentRole}><Trash2 size={15} /> {t('settings.deleteRole')}</button>}<button className="primary-button" disabled={busy || !roleId.trim()} onClick={saveRole}><Save size={15} /> {t('settings.saveRole')}</button></div></div></div></div>}
-            {tab === 'skills' && <div className="settings-section skills-editor"><div className="section-heading"><div><h3>{t('settings.skillsTitle')}</h3><p>{t('settings.skillsDesc')}</p></div><button className="secondary-button" onClick={() => void chooseSkill('')}><Plus size={15} /> {t('settings.newSkill')}</button></div><div className="skill-editor-layout"><aside className="resource-list"><ul className="resource-list-items">{skills.map((item) => <li key={item.id}><button type="button" className={selectedSkill === item.id ? 'is-active' : ''} onClick={() => void chooseSkill(item.id)}><span className="resource-list-name">{item.name || item.id}</span></button></li>)}</ul><div className="resource-list-note">{t('settings.availableSkills', { count: skills.length })}</div></aside><div className="skill-form"><label>{t('settings.skillId')}<input value={skillId} onChange={(event) => setSkillId(event.target.value)} placeholder="lowercase-skill-id" disabled={Boolean(selectedSkill)} /></label><label>{t('settings.instructions')}<textarea className="skill-content-editor" value={skillContent} onChange={(event) => setSkillContent(event.target.value)} rows={18} placeholder={t('settings.skillContentPlaceholder')} /></label>{skillDetail && <div className="skill-meta">{skillDetail.description && <p className="skill-meta-desc">{skillDetail.description}</p>}{skillDetail.license && <div className="skill-meta-row"><span>{t('settings.license')}</span><code>{skillDetail.license}</code></div>}{(skillDetail.allowed_tools?.length ?? 0) > 0 && <div className="skill-meta-row"><span>{t('settings.allowedTools')}</span><div className="skill-tags">{skillDetail.allowed_tools!.map((tool) => <code key={tool}>{tool}</code>)}</div></div>}{(skillDetail.files?.length ?? 0) > 0 && <div className="skill-meta-row"><span>{t('settings.files', { count: skillDetail.files!.length })}</span><div className="skill-files">{skillDetail.files!.map((file) => <code key={file}>{file}</code>)}</div></div>}</div>}<div className="skill-import"><div className="skill-import-title"><Upload size={14} /> {t('settings.importFromZip')}<HelpTip text={t('settings.importHelp')} /></div><div className="skill-import-row"><input type="file" accept=".zip,application/zip" onChange={(event) => setZipFile(event.target.files?.[0] || null)} />{zipFile && <code className="skill-import-file">{zipFile.name}</code>}<button className="secondary-button" disabled={busy || !zipFile} onClick={importZip}>{t('settings.import')}</button></div><small>{t('settings.importNote')}</small></div><div className="settings-actions">{selectedSkill && <button className="danger-button" disabled={busy} onClick={deleteCurrentSkill}><Trash2 size={15} /> {t('settings.deleteSkill')}</button>}<button className="primary-button" disabled={busy || !skillId.trim() || !skillContent.trim()} onClick={saveSkill}><Save size={15} /> {t('settings.saveSkill')}</button></div></div></div></div>}
+            {tab === 'roles' && <div className="settings-section roles-editor"><div className="section-heading"><div><h3>{t('settings.rolesTitle')}</h3><p>{t('settings.rolesDesc', { count: roleFields.length })}</p></div><div className="section-heading-actions">{!editingRole && <button className="secondary-button" disabled={!selectedRole || busy} onClick={() => setEditingRole(true)}><Pencil size={15} /> {t('common.edit')}</button>}<button className="secondary-button" onClick={startCreateRole}><Plus size={15} /> {t('settings.newRole')}</button></div></div><div className="role-editor-layout"><aside className="resource-list"><ul className="resource-list-items">{roles.map((item) => { const value = `${item.type}:${item.id}`; return <li key={value}><button type="button" className={selectedRole === value ? 'is-active' : ''} disabled={busy} onClick={() => requestSelectRole(value)}><span className="resource-list-type">{roleTypeLabel(item.type)}</span><span className="resource-list-name">{item.display_name}</span></button></li>; })}</ul><div className="resource-list-note">{t('settings.customRoles', { count: roles.length })}</div></aside><div className="role-form">
+              {roleMode === 'idle' ? <p className="detail-empty">{t('settings.selectOrCreateRole')}</p> : <>
+                <div className="form-grid"><label>{t('settings.roleId')}<input value={roleId} onChange={(event) => setRoleId(event.target.value)} placeholder="lowercase_role_id" disabled={Boolean(selectedRole)} title={selectedRole ? t('settings.identityLocked') : undefined} /></label><label>{t('settings.roleType')}<select value={roleType} onChange={(event) => void chooseRoleType(event.target.value as RoleType)} disabled={Boolean(selectedRole)} title={selectedRole ? t('settings.identityLocked') : undefined}><option value="manager">{t('dialog.manager')}</option><option value="worker">{t('dialog.worker')}</option></select></label></div>
+                {Object.entries(basicSections).map(([section, fields]) => renderFieldset(section, fields))}
+                {advancedFields.length > 0 && <div className="advanced-config"><button type="button" className="advanced-config-toggle" onClick={() => setAdvancedOpen((value) => !value)} aria-expanded={advancedOpen}><ChevronDown size={14} className={advancedOpen ? 'is-open' : ''} /><span>{t('settings.advancedConfig')}</span><span className="advanced-config-count">{advancedFields.length}</span></button>{advancedOpen && <div className="advanced-config-body"><p className="advanced-config-desc">{t('settings.advancedConfigDesc')}</p>{Object.entries(advancedSections).map(([section, fields]) => renderFieldset(section, fields))}</div>}</div>}
+                {roleMode !== 'view' && <div className="settings-actions">{roleMode === 'edit' && <button className="danger-button" disabled={busy} onClick={deleteCurrentRole}><Trash2 size={15} /> {t('settings.deleteRole')}</button>}<button className="secondary-button" disabled={busy} onClick={() => void cancelEditRole()}>{t('common.cancel')}</button><button className="primary-button" disabled={busy || !roleId.trim()} onClick={saveRole}><Save size={15} /> {t('settings.saveRole')}</button></div>}
+              </>}
+            </div></div></div>}
+            {tab === 'pools' && <div className="settings-section pools-editor"><div className="section-heading"><div><h3>{t('settings.poolsTitle')}</h3><p>{t('settings.poolsDesc')}</p></div><div className="section-heading-actions">{!editingPool && <button className="secondary-button" disabled={!selectedPool || busy} onClick={() => setEditingPool(true)}><Pencil size={15} /> {t('common.edit')}</button>}<button className="secondary-button" onClick={startCreatePool}><Plus size={15} /> {t('settings.newPool')}</button></div></div><div className="role-editor-layout"><aside className="resource-list"><ul className="resource-list-items">{pools.map((item) => <li key={item.id}><button type="button" className={selectedPool === item.id ? 'is-active' : ''} disabled={busy} onClick={() => requestSelectPool(item.id)}><span className="resource-list-name">{item.name}</span><span className="resource-list-type">{t('settings.poolCount', { count: item.roles.length })}</span></button></li>)}</ul><div className="resource-list-note">{pools.length ? t('settings.poolCount', { count: pools.length }) : t('settings.noPools')}</div></aside><div className="role-form">
+              {poolMode === 'idle' ? <p className="detail-empty">{t('settings.selectOrCreatePool')}</p> : <>
+                <label>{t('settings.poolName')}<input value={poolName} onChange={(event) => setPoolName(event.target.value)} placeholder={t('settings.poolNamePlaceholder')} maxLength={60} disabled={poolMode === 'view'} /></label>
+                <div className="node-dialog-section"><div className="node-dialog-section-title">{t('settings.poolRoles')}</div><p className="picker-status">{t('settings.poolRolesHint')}</p><SearchCheckboxPicker items={roles.map((item) => ({ id: item.id, label: item.display_name || item.id, detail: roleTypeLabel(item.type), badge: roleTypeLabel(item.type), description: item.description, detailLoader: () => loadRoleHoverDetail(item.type, item.id) }))} selected={poolRoles} onToggle={togglePoolRole} query={poolQuery} onQueryChange={setPoolQuery} searchPlaceholder={t('dialog.searchRoles')} emptyLabel={t('dialog.noMatchingRoles')} selectedLabel={t('dialog.selectedCount')} disabled={poolMode === 'view'} /></div>
+                {poolMode !== 'view' && <div className="settings-actions">{poolMode === 'edit' && <button className="danger-button" disabled={busy} onClick={() => void deleteCurrentPool()}><Trash2 size={15} /> {t('settings.deletePool')}</button>}<button className="secondary-button" disabled={busy} onClick={cancelEditPool}>{t('common.cancel')}</button><button className="primary-button" disabled={busy || !poolName.trim() || !poolRoles.length} onClick={() => void savePool()}><Save size={15} /> {t('settings.savePool')}</button></div>}
+              </>}
+            </div></div></div>}
+            {tab === 'skills' && <div className="settings-section skills-editor"><div className="section-heading"><div><h3>{t('settings.skillsTitle')}</h3><p>{t('settings.skillsDesc')}</p></div><div className="section-heading-actions">{!editingSkill && <button className="secondary-button" disabled={!selectedSkill || busy} onClick={() => setEditingSkill(true)}><Pencil size={15} /> {t('common.edit')}</button>}<button className="secondary-button" onClick={startCreateSkill}><Plus size={15} /> {t('settings.newSkill')}</button></div></div><div className="skill-editor-layout"><aside className="resource-list"><ul className="resource-list-items">{skills.map((item) => <li key={item.id}><button type="button" className={selectedSkill === item.id ? 'is-active' : ''} disabled={busy} onClick={() => requestSelectSkill(item.id)}><span className="resource-list-name">{item.name || item.id}</span></button></li>)}</ul><div className="resource-list-note">{t('settings.availableSkills', { count: skills.length })}</div></aside><div className="skill-form">
+              {skillMode === 'idle' ? <p className="detail-empty">{t('settings.selectOrCreateSkill')}</p> : <>
+                <label>{t('settings.skillId')}<input value={skillId} onChange={(event) => setSkillId(event.target.value)} placeholder="lowercase-skill-id" disabled={Boolean(selectedSkill)} title={selectedSkill ? t('settings.identityLocked') : undefined} /></label>
+                <label>{t('settings.instructions')}<textarea className="skill-content-editor" value={skillContent} onChange={(event) => setSkillContent(event.target.value)} rows={18} placeholder={t('settings.skillContentPlaceholder')} disabled={skillMode === 'view'} /></label>
+                {skillDetail && <div className="skill-meta">{skillDetail.description && <p className="skill-meta-desc">{skillDetail.description}</p>}{skillDetail.license && <div className="skill-meta-row"><span>{t('settings.license')}</span><code>{skillDetail.license}</code></div>}{(skillDetail.allowed_tools?.length ?? 0) > 0 && <div className="skill-meta-row"><span>{t('settings.allowedTools')}</span><div className="skill-tags">{skillDetail.allowed_tools!.map((tool) => <code key={tool}>{tool}</code>)}</div></div>}{(skillDetail.files?.length ?? 0) > 0 && <div className="skill-meta-row"><span>{t('settings.files', { count: skillDetail.files!.length })}</span><div className="skill-files">{skillDetail.files!.map((file) => <code key={file}>{file}</code>)}</div></div>}</div>}
+                {/* 导入只会新建一个 skill，放在查看/编辑态容易被当成覆盖当前 skill，故只在新建态出现。 */}
+                {skillMode === 'create' && <div className="skill-import"><div className="skill-import-title"><Upload size={14} /> {t('settings.importFromZip')}<HelpTip text={t('settings.importHelp')} /></div><div className="skill-import-row"><input type="file" accept=".zip,application/zip" onChange={(event) => setZipFile(event.target.files?.[0] || null)} />{zipFile && <code className="skill-import-file">{zipFile.name}</code>}<button className="secondary-button" disabled={busy || !zipFile} onClick={importZip}>{t('settings.import')}</button></div><small>{t('settings.importNote')}</small></div>}
+                {skillMode !== 'view' && <div className="settings-actions">{skillMode === 'edit' && <button className="danger-button" disabled={busy} onClick={deleteCurrentSkill}><Trash2 size={15} /> {t('settings.deleteSkill')}</button>}<button className="secondary-button" disabled={busy} onClick={() => void cancelEditSkill()}>{t('common.cancel')}</button><button className="primary-button" disabled={busy || !skillId.trim() || !skillContent.trim()} onClick={saveSkill}><Save size={15} /> {t('settings.saveSkill')}</button></div>}
+              </>}
+            </div></div></div>}
             {tab === 'language' && <div className="settings-section language-switcher"><div className="section-heading"><div><h3>{t('lang.switchTitle')}</h3><p>{t('lang.switchDesc')}</p></div></div><div className="language-options"><button type="button" className={lang === 'zh' ? 'is-active' : ''} onClick={() => setLang('zh')}>中文</button><button type="button" className={lang === 'en' ? 'is-active' : ''} onClick={() => setLang('en')}>English</button></div></div>}
           </div>
         </div>

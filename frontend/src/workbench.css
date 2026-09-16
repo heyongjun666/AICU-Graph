@@ -264,6 +264,8 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .settings-content { min-width: 0; overflow: auto; padding: 22px 24px 26px; }
 .settings-section { max-width: 680px; }
 .section-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 18px; }
+/* 「编辑」与「新建」并排。 */
+.section-heading-actions { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
 .section-heading h3 { margin: 0; font-size: 15px; }
 .configured, .not-configured { font-size: 11px; }
 .configured { color: #176b55; }

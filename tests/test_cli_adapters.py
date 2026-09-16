@@ -737,8 +737,9 @@ class TestKnownModels:
         "gpt-5.6", "gpt-5.6-cyber", "gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.6-sol", "gpt-5-4",
         "kimi-k3", "kimi-k2.7-code", "kimi-k2.7-code-highspeed", "kimi-k2.6", "kimi-k2.5", "kimi-vision-model",
         "grok-4.20", "grok-4.6", "grok-4.5", "grok-4.3",
-        "gemini-3.5", "gemini-3.7-flash", "gemini-3.1-pro", "gemini-3.1-flash-lite", "gemini-3",
-        "gemini-2.5-pro", "gemini-2.5-flash",
+        "gemini-3.8-flash", "gemini-3.7-flash", "gemini-3.6-flash", "gemini-3.5-flash",
+        "gemini-3.5-flash-lite", "gemini-3.1-pro-preview", "gemini-3.1-flash-lite",
+        "gemini-flash-latest", "gemini-pro-latest",
         "deepseek-v4-flash", "deepseek-v4-pro",
         "glm-5.2", "glm-5-turbo",
         "MiniMax-M3",
@@ -757,6 +758,34 @@ class TestKnownModels:
             assert by_id[cli_id]["models"] == self.ALL, f"{cli_id} 模型清单不完整"
         assert "models" in by_id["grok"]
         assert by_id["claude"]["priority"] < by_id["codex"]["priority"]
+        # 所有 CLI 都要给出非空清单
+        for cli_id in ["claude", "codex", "kimi", "antigravity", "grok"]:
+            assert by_id[cli_id]["models"], f"{cli_id} 模型清单为空"
+
+    def test_hidden_clis_absent_from_list_but_adapters_kept(self):
+        """摘出下拉的 CLI：列表里没有，但 adapter 必须保留。
+
+        adapter 留着 —— 将来官方支持了（gemini），或用户有账号并登录了（cursor），
+        把 id 从 _HIDDEN_CLI_IDS 里删掉即可放回，所以这里同时断言
+        「列表里没有」和「get_adapter 仍取得到」。
+
+        gemini：官方只支持 Google 自家模型/端点。
+        cursor：Cursor 私有协议 + 需 Cursor 账号，接不了别家模型（见 cli_adapters 注释）。
+        """
+        hidden = cli_adapters._HIDDEN_CLI_IDS
+        assert hidden == ("gemini", "cursor")
+        listed = {item["id"] for item in cli_adapters.list_clis()}
+        assert listed.isdisjoint(hidden)
+        assert isinstance(get_adapter("gemini"), GeminiAdapter)
+        assert isinstance(get_adapter("cursor"), CursorAdapter)
+
+    def test_hidden_clis_do_not_perturb_priority(self):
+        """priority 取 _ADAPTERS 下标而非结果下标，隐藏项不影响其余 CLI 的相对优先级。"""
+        index = {a.id: i for i, a in enumerate(cli_adapters._ADAPTERS)}
+        for item in cli_adapters.list_clis():
+            assert item["priority"] == index[item["id"]]
+        by_id = {item["id"]: item for item in cli_adapters.list_clis()}
+        assert by_id["claude"]["priority"] < by_id["antigravity"]["priority"]
 
     def test_load_known_models_missing_file_returns_empty(self, monkeypatch, tmp_path):
         monkeypatch.setattr(cli_adapters, "_MODELS_FILE", tmp_path / "missing.json")

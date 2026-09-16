@@ -2037,7 +2037,33 @@ class CursorAdapter(CliAdapter):
         return {"result": text, "session_id": None, "subtype": None, "errors": []}
 
 
-# 优先级顺序即默认选择顺序（internal > claude > codebuddy > codex > kimi > qwen > opencode > pi > gemini > cursor > antigravity > grok）
+# 从设置页的 CLI 下拉里隐藏的 CLI。adapter 与探测逻辑一律保留，只是不出现在列表里，
+# 将来官方支持了把 id 从这里删掉即可放回。
+#
+#   gemini：官方确认只支持 Google 自家的模型与端点。docs/reference/configuration.md 里
+#     能改端点的只有 GOOGLE_GEMINI_BASE_URL 与 GOOGLE_VERTEX_BASE_URL（都是 Google 自己）；
+#     本机 v0.56.0 的 bundle 里 `chat/completions` 与 `OPENAI_COMPATIBLE*` 命中数为 0；
+#     官方仓库「Support Open-source LLM providers alongside Gemini」issue 至今仍 open。
+#     于是它既接不了别家模型，跨厂商改道对它也没有意义，留在下拉里只会是选不动的项。
+#     模型下拉由 list_clis() 提供数据，所以这里摘掉，前端一行都不用改。
+#
+#   cursor：Cursor Agent CLI（`agent`）不是模型客户端，是 Cursor 自己后端的客户端，
+#     因此没有「换个厂商端点」这回事。本机实测（2026.08.11-e8db854）：
+#       - `--api-key` 要的是 Cursor 自己的 key（CURSOR_API_KEY），不是厂商 key；
+#       - `-e/--endpoint` 默认 https://api2.cursor.sh，换的是 **Cursor 协议的后端**，
+#         不是换成 OpenAI/Anthropic 协议。把它指向本地假服务器抓包，第一条请求是
+#         `POST /auth/exchange_user_api_key`（application/json）—— 这是 Cursor 私有的
+#         握手路径，厂商端点不可能认。所以它接不了 deepseek/智谱这些别家模型。
+#       - `--list-models` 直接回 `Authentication required. Run 'agent login'`，
+#         当前账号状态是 Not logged in；而 CursorAdapter.api_key_env = None，
+#         设置页根本没有可填的 key 位。
+#     结论：与 gemini 同类——既接不了别家模型，也没法在设置页配起来。
+#     若将来有人有 Cursor 账号并想用它：跑 `agent login`，把 id 从这里删掉即可放回。
+_HIDDEN_CLI_IDS = ("gemini", "cursor")
+
+
+# 优先级顺序即默认选择顺序（internal > claude > codebuddy > codex > kimi > qwen > opencode > pi > antigravity > grok）。
+# 表里保留 gemini / cursor 以维持既有下标不变，但这两项在 _HIDDEN_CLI_IDS 里，不进下拉。
 _ADAPTERS: list[CliAdapter] = [
     ClaudeCodeAdapter("internal", "Internal", "internal"),
     ClaudeCodeAdapter("claude", "Claude Code", "claude"),
@@ -2085,9 +2111,15 @@ def list_clis() -> list[dict]:
     """返回全部已注册 CLI 的描述（含安装状态），供前端工具切换下拉使用。
 
     每项: {id, display_name, installed, priority, models}，按优先级顺序排列。
+    _HIDDEN_CLI_IDS 里的 CLI 不出现在结果中（adapter 本身仍可用 get_adapter 取到）。
+
+    注意 priority 取 _ADAPTERS 里的下标而非结果下标：隐藏项不影响其余 CLI 的
+    相对优先级，将来放回时也不用重排。
     """
     result = []
     for index, adapter in enumerate(_ADAPTERS):
+        if adapter.id in _HIDDEN_CLI_IDS:
+            continue
         result.append({
             "id": adapter.id,
             "display_name": adapter.display_name,

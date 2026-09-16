@@ -14,8 +14,9 @@
     "gpt-5.6", "gpt-5.6-cyber", "gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.6-sol", "gpt-5-4",
     "kimi-k3", "kimi-k2.7-code", "kimi-k2.7-code-highspeed", "kimi-k2.6", "kimi-k2.5", "kimi-vision-model",
     "grok-4.20", "grok-4.6", "grok-4.5", "grok-4.3",
-    "gemini-3.5", "gemini-3.7-flash", "gemini-3.1-pro", "gemini-3.1-flash-lite", "gemini-3",
-    "gemini-2.5-pro", "gemini-2.5-flash",
+    "gemini-3.8-flash", "gemini-3.7-flash", "gemini-3.6-flash", "gemini-3.5-flash",
+    "gemini-3.5-flash-lite", "gemini-3.1-pro-preview", "gemini-3.1-flash-lite",
+    "gemini-flash-latest", "gemini-pro-latest",
     "deepseek-v4-flash", "deepseek-v4-pro",
     "glm-5.2", "glm-5-turbo",
     "MiniMax-M3",
@@ -126,14 +127,14 @@
     {
       "id": "google",
       "display_name": "Google 官方 API · Gemini",
-      "cli_name": "gemini",
+      "cli_name": "antigravity",
       "model": "gemini-3.1-pro-preview",
-      "models": ["gemini-3.1-pro-preview", "gemini-3.1-pro", "gemini-3", "gemini-2.5-flash"],
+      "models": ["gemini-3.1-pro-preview", "gemini-3.8-flash", "gemini-3.7-flash", "gemini-3.6-flash", "gemini-3.5-flash"],
       "api_base_url": null,
       "api_key_env": "GEMINI_API_KEY",
       "wire_api": "native",
       "available": true,
-      "note": "使用 Gemini CLI 原生 API；自定义 Base URL 当前不支持"
+      "note": "使用 Antigravity 原生 CLI；自定义 Base URL 当前不支持"
     },
     {
       "id": "xai",

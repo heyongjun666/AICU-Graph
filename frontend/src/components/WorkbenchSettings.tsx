@@ -504,10 +504,21 @@ const WorkbenchSettings: React.FC<WorkbenchSettingsProps> = ({ open, onClose, on
   // 当前 CLI 的已知模型清单：显式选择时用该 CLI 的 models；
   // Auto-detect 时用默认 CLI 的 models；都无法确定则用全部 CLI 模型的并集（去重）。
   const selectedCliId = config.cli_name || defaultCli;
-  const selectedCli = clis.find((cli) => cli.id === selectedCliId);
+  // 找不到当前 CLI（例如配置里存着已从下拉隐藏的 CLI id）时退回默认 CLI，而不是落到
+  // 下面的「全部并集」—— 那会把别家 CLI 才能用的模型全带回来。
+  const selectedCli = clis.find((cli) => cli.id === selectedCliId)
+    ?? clis.find((cli) => cli.id === defaultCli);
   const modelOptions = selectedCli?.models?.length
     ? selectedCli.models
     : Array.from(new Set(clis.flatMap((cli) => cli.models || [])));
+
+  // 厂商预置的模型只在「预置自己的 CLI == 当前 CLI」时才并入候选。否则选了 OpenAI
+  // 预置、再把 CLI 切成 claude 时，那几个 gpt-* 仍会留在 claude 的下拉里 —— 而
+  // OpenAI 没有 /v1/messages 端点，选中必然连不上。
+  const providerModelOptions = selectedProvider && selectedProvider.cli_name === selectedCliId
+    ? selectedProvider.models || []
+    : [];
+
   // 模型可输入（combobox）：把厂商预置模型与 CLI 已知模型合并为建议项，仍允许手输任意模型名。
   const allModelOptions = Array.from(new Set([...providerModelOptions, ...modelOptions]));
 

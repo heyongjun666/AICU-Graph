@@ -590,6 +590,91 @@ describe('WorkbenchSettings role pools', () => {
 // 模型下拉只显示「当前 CLI 真能用」的模型。过滤的主体在后端（CliAdapter.known_models
 // 按协议端点过滤），这里覆盖前端这一侧：候选是「当前 CLI 的 models」∪「厂商预置的
 // models」，而后者与当前 CLI 无关，曾经会把别家 CLI 的模型混进来。
+describe('WorkbenchSettings 模型候选按 CLI 过滤', () => {
+  const CLIS: CliInfo[] = [
+    { id: 'claude', display_name: 'Claude Code', installed: true, priority: 0,
+      models: ['claude-opus-5', 'grok-4.6'] },
+    { id: 'codex', display_name: 'OpenAI Codex CLI', installed: true, priority: 1,
+      models: ['gpt-5.6', 'grok-4.6'] },
+  ];
+
+  // gpt-5.6-mini 刻意不在任何 CLI 的 models 里，只能从预置并进来 —— 它的出现与否
+  // 就是「预置模型有没有被并入」的判据。
+  const PRESETS: ProviderPreset[] = [
+    { id: 'openai', display_name: 'OpenAI 官方 API', cli_name: 'codex', model: 'gpt-5.6',
+      models: ['gpt-5.6', 'gpt-5.6-mini'], api_base_url: 'https://api.openai.com/v1',
+      available: true },
+  ];
+
+  const renderSettings = async (config: Partial<GlobalConfig> = {}) => {
+    vi.mocked(api.getGlobalConfig).mockResolvedValue({
+      config: {
+        workspace_root: null, cli_name: null, model: null,
+        api_base_url: null, api_key_env: null, ...config,
+      },
+      clis: CLIS,
+      provider_presets: PRESETS,
+      default_cli: 'claude',
+    });
+    const view = render(<WorkbenchSettings open onClose={() => {}} onSaved={() => {}} />);
+    await waitFor(() => expect(api.getGlobalConfig).toHaveBeenCalled());
+    return view;
+  };
+
+  // 模型控件有两种形态：预置匹配上时是 <select id="model-select">，手动配置时是
+  // <input list="model-options"> + <datalist id="model-options">。两者都读。
+  const modelOptions = () =>
+    Array.from(document.querySelectorAll<HTMLOptionElement>(
+      '#model-options option, #model-select option'))
+      .map((option) => option.value)
+      .filter(Boolean);
+  const providerSelect = () =>
+    document.querySelector<HTMLSelectElement>('#provider-select') as HTMLSelectElement;
+  const cliSelect = () =>
+    document.querySelector<HTMLSelectElement>('#cli-select') as HTMLSelectElement;
+  const modelSelect = () => document.querySelector<HTMLSelectElement>('#model-select');
+
+  it('切换 CLI 后，别家预置的模型不再出现在候选里', async () => {
+    await renderSettings();
+    // 选 OpenAI 预置：CLI 自动变成 codex，预置的 gpt-5.6-mini 被并入候选
+    fireEvent.change(providerSelect(), { target: { value: 'openai' } });
+    await waitFor(() => expect(modelOptions()).toContain('gpt-5.6-mini'));
+
+    // 再把 CLI 切成 claude：OpenAI 没有 /v1/messages 端点，gpt-5.6-mini 必须消失
+    fireEvent.change(cliSelect(), { target: { value: 'claude' } });
+    await waitFor(() => expect(modelOptions()).not.toContain('gpt-5.6-mini'));
+    // 已存的 model 是 gpt-5.6，它此刻不在 claude 的候选里 —— 但不能被静默丢掉，
+    // 要作为「当前值」仍在下拉里（见下面「目录外的 model」那条用例）。
+    expect(modelOptions()).toEqual(['gpt-5.6', 'claude-opus-5', 'grok-4.6']);
+  });
+
+  it('预置的 CLI 与当前 CLI 一致时，预置模型仍然并入候选', async () => {
+    // 初始化按 model 命中 openai 预置，而它的 cli_name 正是当前 CLI codex
+    await renderSettings({ cli_name: 'codex', model: 'gpt-5.6' });
+    await waitFor(() => expect(modelOptions()).toContain('gpt-5.6-mini'));
+    expect(modelOptions()).toContain('grok-4.6');
+  });
+
+  it('配置里存着不存在的 CLI 时，候选退回默认 CLI 而不是全部 CLI 的并集', async () => {
+    // 'gemini' 是后端隐藏的 CLI，不会出现在 clis 里；不退回的话候选会变成
+    // claude ∪ codex 的并集，把 Claude 用不了的 gpt-5.6 带回来
+    await renderSettings({ cli_name: 'gemini' });
+    await waitFor(() => expect(modelOptions().length).toBeGreaterThan(0));
+    expect(modelOptions()).toEqual(['claude-opus-5', 'grok-4.6']);
+    expect(modelOptions()).not.toContain('gpt-5.6');
+  });
+
+  it('目录外的 model 会作为「当前值」保留在下拉里，不被静默清掉', async () => {
+    // 老配置：CLI 与地址对得上 openai 预置，但 model 存着目录里没有的 gpt-5.6-turbo。
+    // <select value> 匹配不到 option 会显示成空白 —— 用户看到的和实际保存的不是一回事，
+    // 一动别的字段再保存这个值就被换掉了。
+    await renderSettings({ cli_name: 'codex', model: 'gpt-5.6-turbo',
+      api_base_url: 'https://api.openai.com/v1' });
+    await waitFor(() => expect(modelSelect()).not.toBeNull());
+    expect(modelOptions()).toEqual(['gpt-5.6-turbo', 'gpt-5.6', 'gpt-5.6-mini', 'grok-4.6']);
+    expect(modelSelect()!.value).toBe('gpt-5.6-turbo');
+  });
+});
 
 describe('WorkbenchSettings Provider 下拉与模型形态', () => {
   const CLIS: CliInfo[] = [

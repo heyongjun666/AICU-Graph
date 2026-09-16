@@ -747,14 +747,21 @@ class TestKnownModels:
     ]
 
     def test_all_public_clis_share_full_model_set(self):
-        # 每个公开 CLI 都返回全厂商官方名并集
-        for cli_id in ["claude", "codebuddy", "codex", "kimi", "qwen", "opencode", "pi", "gemini", "cursor", "antigravity", "grok"]:
+        # 「只列得出来的」与「连得上的」要对齐：
+        #  - 走跨厂商路由的 CLI（claude/codex/kimi/qwen/codebuddy/opencode/pi）能接
+        #    各家 OpenAI-Chat 端点，所以全量列出；
+        #  - 锁死自家协议的（gemini/antigravity/grok）只列同族模型，见
+        #    TestCrossVendorEndpoint::test_protocol_bound_clis_hide_unreachable_models；
+        #  - cursor 未纳入路由（其模型名自成一套），行为保持不变。
+        routed = ["codebuddy", "qwen", "opencode", "pi"]
+        for cli_id in routed:
             assert get_adapter(cli_id).known_models == self.ALL, f"{cli_id} 未返回全厂商模型集"
+        assert get_adapter("cursor").known_models == self.ALL
 
     def test_list_clis_includes_models(self):
         clis = cli_adapters.list_clis()
         by_id = {item["id"]: item for item in clis}
-        for cli_id in ["claude", "codebuddy", "codex", "kimi", "qwen", "opencode", "pi", "gemini", "cursor", "antigravity", "grok"]:
+        for cli_id in ["codebuddy", "qwen", "opencode", "pi"]:
             assert by_id[cli_id]["models"] == self.ALL, f"{cli_id} 模型清单不完整"
         assert "models" in by_id["grok"]
         assert by_id["claude"]["priority"] < by_id["codex"]["priority"]
@@ -1577,6 +1584,36 @@ class TestCrossVendorEndpoint:
         assert cli_adapters.protocol_endpoint("不存在的厂商", "chat") is None
 
     # ------------------------------------------------------------ 下拉过滤
+
+    def test_protocol_bound_clis_hide_unreachable_models(self):
+        claude_models = get_adapter("claude").known_models
+        assert "glm-5.2" in claude_models  # 智谱有 /api/anthropic
+        assert "kimi-k3" in claude_models  # Moonshot 有 /anthropic
+        assert "gpt-5.6" not in claude_models  # OpenAI 没有 Messages 端点
+        assert "gemini-3.7-flash" not in claude_models  # Google 只有 chat 端点
+
+        codex_models = get_adapter("codex").known_models
+        assert "deepseek-v4-pro" in codex_models
+        assert "grok-4.6" in codex_models
+        assert "claude-opus-5" not in codex_models  # Anthropic 没有 Responses 端点
+        assert "gemini-3.7-flash" not in codex_models
+        # 智谱也没实现 Responses API（真实调用 404），glm 同样掉出 codex 的列表
+        assert "glm-5.2" not in codex_models
+        assert "glm-5.2" in claude_models  # 但 claude 走 /api/anthropic，仍然可选
+
+        # kimi 说的 chat 协议九家厂商都有端点，所以一个都不掉
+        kimi_models = get_adapter("kimi").known_models
+        assert "claude-opus-5" in kimi_models  # Anthropic 的 OpenAI 兼容垫片
+        assert "gemini-3.7-flash" in kimi_models  # Google 的 /v1beta/openai
+        assert kimi_models == get_adapter("opencode").known_models
+
+    def test_supported_helper_keeps_undecidable_cases(self):
+        """判不出的情形一律不过滤，避免误伤内部模型。"""
+        assert cli_adapters.model_supported_by_cli("claude", "auto") is True
+        assert cli_adapters.model_supported_by_cli("claude", "") is True
+        assert cli_adapters.model_supported_by_cli("opencode", "gemini-3") is True
+        assert cli_adapters.model_supported_by_cli("claude", "gemini-3") is False
+
 
 class TestEffectiveBaseUrl:
     """界面要显示的「这次真正会用的端点」—— 换模型必须跟着变，用户自己的端点不能被动。

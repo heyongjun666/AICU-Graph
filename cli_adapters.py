@@ -224,6 +224,22 @@ def native_base_url(
     return protocol_endpoint(vendor, protocol)
 
 
+def model_supported_by_cli(cli_name: Optional[str], model: Optional[str]) -> bool:
+    """该 CLI 能不能用这个模型 —— 同族直连，异族得有本协议的原生端点。
+
+    供 known_models 过滤掉选不中的组合（如 claude + gemini）。判不出的情形
+    （未纳入的 CLI、判不出厂商的内部模型）一律返回 True，即保持现状不过滤。
+    """
+    native = _CLI_NATIVE.get(cli_name or "")
+    if not native:
+        return True
+    vendor = vendor_of_model(model or "")
+    if not vendor:
+        return True
+    native_vendor, protocol = native
+    return vendor == native_vendor or protocol_endpoint(vendor, protocol) is not None
+
+
 def _has_managed_slot(cli_name: Optional[str]) -> bool:
     """该 CLI 是否有一份 AICU 托管的配置文件槽（未知 id 视为没有）。"""
     try:
@@ -713,10 +729,18 @@ class CliAdapter:
 
     @property
     def known_models(self) -> list[str]:
-        """已知模型清单（供前端下拉候选）。"""
+        """已知模型清单（供前端下拉候选）。
+
+        对 claude / codex / kimi 过滤掉「该 CLI 的协议没有对应原生端点」的模型
+        （如 claude 选不了 gemini），让下拉里出现的都是真能连上的。
+        """
         if self.id == "internal":
             return KNOWN_MODELS.get("internal", [])
-        return KNOWN_MODELS.get("all", [])
+        return [
+            model
+            for model in KNOWN_MODELS.get("all", [])
+            if model_supported_by_cli(self.id, model)
+        ]
 
     # 可选同名冲突甄别：(探测 argv, 必须含子串, 必须排除子串)。None 表示只用 which。
     # 命令名可能被无关工具占用（如本机 codex 是同名的无关工具）时，设此属性以甄别。

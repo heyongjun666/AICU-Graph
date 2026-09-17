@@ -2,7 +2,7 @@
 runtime/role_pools_manager.py — 候选角色池管理
 
 一个「候选角色池」是若干个角色 id 的命名集合，供会话绑定：绑定后该会话的
-Manager 在组装提示词时只看到池内角色的摘要（见 aicu.AICU._build_available_roles_text）。
+Manager 在组装提示词时只看到池内角色的摘要（见 roles_manager.build_available_roles_text）。
 
 与 RolesManager / SkillsManager 同构：一个实体一个管理器、一份独立 JSON 文件。
 池只保存 **角色 id 快照**，不复制角色定义；角色本身仍由 roles/ 下的 yaml 提供。

@@ -712,11 +712,15 @@ class TestHolisticRenderedInAllModes:
 
 import tempfile  # noqa: E402
 
-from aicu import _ROLE_POOL_INVALID_NOTICE, _ROLE_POOL_NOTICE  # noqa: E402
+from runtime.roles_manager import (  # noqa: E402
+    _ROLE_POOL_INVALID_NOTICE,
+    _ROLE_POOL_NOTICE,
+    build_available_roles_text,
+)
 
 
 def _panel(allowed_roles=None) -> str:
-    return AICU._build_available_roles_text(ROOT / "roles", allowed_roles)
+    return build_available_roles_text(ROOT / "roles", allowed_roles)
 
 
 class TestCandidateRolePoolPanel:
@@ -776,12 +780,12 @@ class TestCandidateRolePoolPanel:
         (tmp_path / "Worker" / "shared.yaml").write_text("summary: w\n", encoding="utf-8")
         (tmp_path / "Worker" / "other.yaml").write_text("summary: o\n", encoding="utf-8")
 
-        panel = AICU._build_available_roles_text(tmp_path, {"shared"})
+        panel = build_available_roles_text(tmp_path, {"shared"})
 
         assert panel.count("  - **shared**:") == 2
         assert "  - **other**:" not in panel
 
     def test_missing_roles_dir_still_reports_invalidation(self, tmp_path):
-        panel = AICU._build_available_roles_text(tmp_path / "nope", {"code"})
+        panel = build_available_roles_text(tmp_path / "nope", {"code"})
 
         assert panel == _ROLE_POOL_INVALID_NOTICE

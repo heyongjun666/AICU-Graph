@@ -19,7 +19,8 @@ runtime/roles_manager.py — 角色配置管理（Manager/Worker 二级目录版
 import logging
 import os
 import re
-from typing import Any, Optional
+from pathlib import Path
+from typing import Any, Optional, Set
 
 import yaml
 
@@ -70,6 +71,162 @@ _MANAGER_HIDDEN_SCHEMA_FIELDS = frozenset({
     "output_file", "final_file", "modular_output", "main_doc",
     "deliverable_dir",
 })
+
+
+# 绑定候选角色池时，在角色面板最前面插入的引导（未绑定时不插入，保证历史会话提示词逐字不变）。
+# 两个作用：① 说明候选被限定，避免 Manager 去引用面板外的角色；② 池覆盖不足时的正确动作 ——
+# roles/Manager/default.yaml 的通用建议是「建议新增专用角色」，有了池之后那句会把 Manager
+# 往池外推，这里就地覆盖掉。
+_ROLE_POOL_NOTICE = (
+    "  【候选角色池】本会话的候选角色已限定在下方清单内，清单之外的角色不在本会话候选范围内。\n"
+    "  若清单内无角色能覆盖某个 Capability，请勿强行套用最近邻，也不要使用清单外的角色名；\n"
+    "  应在输出中如实标注候选缺失。"
+)
+
+# 池内角色全部不存在时（多半是后续被删）的失效告警。绝不静默回退全量角色 ——
+# 那会让用户以为池在生效，实际它已退化成不限制。
+_ROLE_POOL_INVALID_NOTICE = (
+    "  ⚠ 本会话绑定的候选角色池已失效：池内角色均已不存在（可能已被删除）。\n"
+    "  请勿改用池外的角色；请先在会话中重新绑定候选角色池，或如实说明候选角色缺失。"
+)
+
+
+def build_available_roles_text(
+    roles_parent: Path, allowed_roles: Optional[Set[str]] = None
+) -> str:
+    """扫描 roles/Manager/ 和 roles/Worker/ 目录，动态生成可用角色列表文本。
+
+    用于替换 generate_instruction 中的 {available_roles} 占位符。
+
+    本函数与同模块的 ``_extract_description`` / ``RolesManager.list_roles`` 扫的是
+    同一批目录，所以同处本模块 —— 子目录清单也只能有一份（``_ROLE_SUBDIRS``）：
+    各写一遍的话，新增一类角色目录时，界面下拉里会出现它、Manager 的角色面板里
+    却看不到。
+
+    注意**不要**把这里的 ``SUMMARY_MAX_LEN``（140）与 ``_extract_description`` 的
+    ``_DESC_MAX_LEN``（80）合并：前者是塞进 prompt 的面板行、要留住关键词，
+    后者是列表页一行摘要、要防撑破布局，两个长度是各自场景定的。
+
+    每个角色可选择性定义以下结构化字段(在角色yaml顶层):
+      summary     : str  — 一句话精炼描述该角色的核心职责与擅长范围
+      suitable_for: List[str] | str — 关键词清单, 表示本角色适合承接的任务特征
+      not_for     : List[str] | str — 反向清单, 表示本角色不应被分配的任务类型
+
+    若某字段缺失则按以下顺序回退:
+      summary 缺失 → 从 role_md 第一行非纯单词标题内容截取前 N 字
+      suitable_for / not_for 缺失 → 该行不输出
+
+    Args:
+        roles_parent: roles/ 父目录的 Path。
+        allowed_roles: 会话候选角色池（角色 id 集合）。非 None 时**严格只列池内角色**
+            —— 不并上 default，因为 default 不在 RolesManager 的可选角色里，让它出现
+            会让 Manager 看到一个本不该被当作候选的条目。None 表示未绑定，列全部。
+
+    Returns:
+        格式化后的角色列表文本（含 Manager 角色和 Worker 角色两段）。
+    """
+    SUMMARY_MAX_LEN = 140   # 单条summary最大字符数 防止过长污染prompt
+
+    def _normalize_list(val):
+        """把可能是str/list的字段统一成干净字符串清单."""
+        if val is None:
+            return []
+        if isinstance(val, str):
+            # 允许用换行或分号分隔的多项写法
+            raw_items = re.split(r"[\n;]+", val)
+            out = []
+            for it in raw_items:
+                s = it.strip().lstrip("-").lstrip("*").lstrip("•").strip()
+                if s and len(s) <= 100:
+                    out.append(s[:100])
+                elif s:
+                    out.append(s[:100] + "…")
+            return out
+        if isinstance(val, (list, tuple)):
+            out = []
+            for it in val:
+                s = str(it).strip()
+                if s and len(s) <= 100:
+                    out.append(s)
+                elif s:
+                    out.append(s[:100] + "…")
+            return out
+        return [str(val)[:100]]
+
+    def _fallback_summary_from_role_md(role_md_text):
+        """从 role_md 文本提取首句作为兜底摘要."""
+        for line in (role_md_text or "").split("\n"):
+            stripped = line.strip().lstrip("#").lstrip("-").lstrip("*").strip()
+            if stripped and not re.match(r"^[A-Za-z\s]+$", stripped):
+                return stripped[:SUMMARY_MAX_LEN]
+        return ""
+
+    lines = []
+    if allowed_roles is not None:
+        lines.append(_ROLE_POOL_NOTICE)
+    matched = 0                 # 池内真实存在（可渲染）的角色数，用于 fail-loud 判定
+    for subdir_name in _ROLE_SUBDIRS:
+        subdir = roles_parent / subdir_name
+        if not subdir.is_dir():
+            continue
+        role_files = sorted(
+            p.stem for p in subdir.glob("*.yaml")
+            if not p.stem.startswith("_")
+        )
+        if allowed_roles is not None:
+            # 严格模式：面板 == 池，无例外（default 也不列）
+            role_files = [r for r in role_files if r in allowed_roles]
+            matched += len(role_files)
+        if not role_files:
+            continue
+        lines.append(f"  ### {subdir_name} 角色（可用于 exec_type=\"{subdir_name.lower()}\" 的 step）")
+        lines.append(f"  格式说明:每条含summary/suitable_for/not_for三件套,"
+                     f"选角色时须综合判断task关键词是否落在 suitable_for 范围且不被 not_for 否决.")
+        for r in role_files:
+            data = None
+            try:
+                with open(subdir / f"{r}.yaml", "r", encoding="utf-8") as f:
+                    data = yaml.safe_load(f)
+            except Exception:
+                pass
+            if not isinstance(data, dict):
+                data = {}
+
+            # ---- 提取 summary ----
+            summary_raw = data.get("summary", "")
+            if isinstance(summary_raw, str) and summary_raw.strip():
+                summary = summary_raw.strip()[:SUMMARY_MAX_LEN]
+            elif isinstance(summary_raw, (list, tuple)) and summary_raw:
+                joined = "; ".join(str(x).strip() for x in summary_raw if str(x).strip())
+                summary = joined[:SUMMARY_MAX_LEN]
+            else:
+                summary = _fallback_summary_from_role_md(data.get("role_md"))
+
+            # ---- 提取 suitable_for / not_for ----
+            suit_list = _normalize_list(data.get("suitable_for"))
+            nfor_list = _normalize_list(data.get("not_for"))
+
+            if summary:
+                lines.append(f"  - **{r}**:")
+                indent = "      "
+                lines.append(f"{indent}summary: {summary}")
+                if suit_list:
+                    lines.append(f"{indent}suitable_for: {', '.join(suit_list)}")
+                if nfor_list:
+                    lines.append(f"{indent}not_for: {', '.join(nfor_list)}")
+            else:
+                lines.append(f"  - **{r}**: （未提供描述信息，请直接阅读其 role_md 内容判断适用边界）")
+        lines.append("")
+
+    if allowed_roles is not None and matched == 0:
+        # 池内角色全部不存在（多半是后续被删了）。绝不静默回退全量 ——
+        # 那会让用户以为池在生效，实际它已退化成不限制。
+        return _ROLE_POOL_INVALID_NOTICE
+
+    if not lines:
+        return "  （暂无可用角色）"
+
+    return "\n".join(lines)
 
 
 def _id_to_display_name(role_id: str) -> str:

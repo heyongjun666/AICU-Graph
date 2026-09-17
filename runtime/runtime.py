@@ -130,7 +130,7 @@ class Runtime(RuntimeGateway, SchedulerDelegate):
         self.default_num_ccs = self._clamp_num_ccs(default_num_ccs)
 
         # 会话候选角色池（session 级，由会话 config 注入）：
-        # 绑定后该会话的 Manager 只看到池内角色的摘要（见 aicu._build_available_roles_text）。
+        # 绑定后该会话的 Manager 只看到池内角色的摘要（见 roles_manager.build_available_roles_text）。
         # None / 空 = 未绑定 → Manager 看到 roles/ 下全部角色（历史会话行为，逐字不变）。
         # 注意这是**提示词候选范围**，不是校验边界：PlanValidator 仍以 roles_dir 全量为准。
         self.candidate_roles = list(candidate_roles) if candidate_roles else None
@@ -2199,6 +2199,30 @@ class Runtime(RuntimeGateway, SchedulerDelegate):
             raise FileNotFoundError(node.artifact_path)
         return candidate
 
+    @staticmethod
+    def _list_dir_entries(root: str, target: str) -> list[dict[str, Any]]:
+        """列举 target 下的一层条目（目录在前，各按名排序；跳过符号链接，上限 1000）。
+
+        「查看产出」与「工作区」是两条入口，但「这个目录里有哪些文件、各自多大」
+        是同一条事实：各写一份的话，同一目录在两个视图里会给出不同的条数或大小口径。
+        ``path`` 一律是相对 root 的路径，与调用方怎么拼出 target 无关。
+        """
+        entries: list[dict[str, Any]] = []
+        for entry in sorted(os.scandir(target), key=lambda item: (not item.is_dir(), item.name.lower())):
+            if entry.is_symlink():
+                continue
+            stat = entry.stat(follow_symlinks=False)
+            entries.append({
+                "name": entry.name,
+                "path": os.path.relpath(entry.path, root),
+                "type": "directory" if entry.is_dir(follow_symlinks=False) else "file",
+                "size": stat.st_size,
+                "modified_at": stat.st_mtime,
+            })
+            if len(entries) >= 1000:
+                break
+        return entries
+
     def list_node_results(self, node_id: str, path: str = "") -> dict[str, Any]:
         """List only the result declared by node.artifact_path."""
         root = self._get_node_result_root(node_id)
@@ -2219,14 +2243,7 @@ class Runtime(RuntimeGateway, SchedulerDelegate):
         target = self._resolve_workspace_path(root, path)
         if not os.path.isdir(target):
             raise FileNotFoundError(path)
-        entries = []
-        for entry in sorted(os.scandir(target), key=lambda item: (not item.is_dir(), item.name.lower())):
-            if entry.is_symlink():
-                continue
-            stat = entry.stat(follow_symlinks=False)
-            entries.append({"name": entry.name, "path": os.path.relpath(entry.path, root), "type": "directory" if entry.is_dir(follow_symlinks=False) else "file", "size": stat.st_size, "modified_at": stat.st_mtime})
-            if len(entries) >= 1000:
-                break
+        entries = self._list_dir_entries(root, target)
         return {"artifact_path": root, "artifact_kind": kind, "result_root": os.path.basename(root), "path": "." if not path else path, "entries": entries}
 
     def read_node_result_file(self, node_id: str, path: str, max_bytes: int = 1_000_000) -> dict[str, Any]:
@@ -2353,20 +2370,7 @@ class Runtime(RuntimeGateway, SchedulerDelegate):
         target = self._resolve_workspace_path(root, path)
         if not os.path.isdir(target):
             raise FileNotFoundError(path)
-        entries = []
-        for entry in sorted(os.scandir(target), key=lambda item: (not item.is_dir(), item.name.lower())):
-            if entry.is_symlink():
-                continue
-            stat = entry.stat(follow_symlinks=False)
-            entries.append({
-                "name": entry.name,
-                "path": os.path.relpath(entry.path, root),
-                "type": "directory" if entry.is_dir(follow_symlinks=False) else "file",
-                "size": stat.st_size,
-                "modified_at": stat.st_mtime,
-            })
-            if len(entries) >= 1000:
-                break
+        entries = self._list_dir_entries(root, target)
         return {
             "path": "." if target == os.path.realpath(root) else os.path.relpath(target, root),
             "entries": entries,

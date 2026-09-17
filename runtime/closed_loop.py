@@ -30,6 +30,41 @@ VERDICT_DOC = """<!-- VERDICT {...} --> 契约（测试/验收角色产出）：
 }"""
 
 
+def _status(node: Any) -> str:
+    """节点状态转稳定字符串，供台账与清单跨结构比较。
+
+    str Enum 取 ``.name``（如 "COMPLETED"）而非值：两个产物的字段含义相同，
+    状态口径必须一致，否则同一节点在 closed_loop.json 与 deliverable_manifest.json
+    里会显示成两种写法。缺 status 时返回字符串 "None"（而非 None），保持字段恒为串。
+    """
+    s = getattr(node, "status", None)
+    if s is None:
+        return "None"
+    return s.name if hasattr(s, "name") else str(s)
+
+
+def _write_json_into_workspace(
+    report: dict,
+    workspace: str,
+    filename: str,
+    output_dir: str,
+) -> str:
+    """把产物原子写入 {workspace}/{output_dir}/{filename}，返回绝对路径。
+
+    两个交付产物的落盘方式逐字相同，只有文件名不同。写入用 tmp + os.replace
+    保证原子（避免读者看到半截 JSON）；此处**有意不 fsync**，与合并前一致 ——
+    这两个产物是审计用的业务交付物，不是 Runtime 状态，不需要掉电持久化保证。
+    """
+    out_dir = os.path.join(workspace, output_dir)
+    os.makedirs(out_dir, exist_ok=True)
+    path = os.path.join(out_dir, filename)
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(report, f, ensure_ascii=False, indent=2, default=str)
+    os.replace(tmp, path)  # 原子写，避免半截文件
+    return path
+
+
 def build_closed_loop_report(
     manager: Any,
     children: list[Any],
@@ -52,13 +87,6 @@ def build_closed_loop_report(
     if escalations is None:
         escalations = list(getattr(manager, "_escalations", []) or [])
     now = datetime.now().isoformat()
-
-    def _status(node: Any) -> str:
-        s = getattr(node, "status", None)
-        if s is None:
-            return "None"
-        # str Enum：.name 为 TitleCase 枚举名（如 "COMPLETED"），用于稳定比较
-        return s.name if hasattr(s, "name") else str(s)
 
     overall_passed = bool(children) and all(
         _status(c) == "COMPLETED" for c in children
@@ -114,14 +142,7 @@ def write_closed_loop_report(
     Returns:
         写入的绝对路径。
     """
-    out_dir = os.path.join(workspace, output_dir)
-    os.makedirs(out_dir, exist_ok=True)
-    path = os.path.join(out_dir, "closed_loop.json")
-    tmp = path + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(report, f, ensure_ascii=False, indent=2, default=str)
-    os.replace(tmp, path)  # 原子写，避免半截文件
-    return path
+    return _write_json_into_workspace(report, workspace, "closed_loop.json", output_dir)
 
 
 def build_deliverable_manifest(
@@ -149,12 +170,6 @@ def build_deliverable_manifest(
     if escalations is None:
         escalations = list(getattr(manager, "_escalations", []) or [])
     now = datetime.now().isoformat()
-
-    def _status(node: Any) -> str:
-        s = getattr(node, "status", None)
-        if s is None:
-            return "None"
-        return s.name if hasattr(s, "name") else str(s)
 
     items = []
     for c in children:
@@ -202,11 +217,4 @@ def write_deliverable_manifest(
     output_dir: str = "output",
 ) -> str:
     """把交付物清单原子写入 {workspace}/output/deliverable_manifest.json。"""
-    out_dir = os.path.join(workspace, output_dir)
-    os.makedirs(out_dir, exist_ok=True)
-    path = os.path.join(out_dir, "deliverable_manifest.json")
-    tmp = path + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(report, f, ensure_ascii=False, indent=2, default=str)
-    os.replace(tmp, path)
-    return path
+    return _write_json_into_workspace(report, workspace, "deliverable_manifest.json", output_dir)

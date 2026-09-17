@@ -391,9 +391,6 @@ class SessionManager:
     def delete_api_key(self, vendor: str) -> None:
         self.credential_store.delete(vendor)
 
-    def list_api_key_vendors(self) -> list[str]:
-        return self.credential_store.vendors()
-
     def get_internal_username(self) -> Optional[str]:
         return self.credential_store.get_username()
 

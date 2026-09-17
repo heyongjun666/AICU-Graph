@@ -302,14 +302,6 @@ class ErrorObject:
         )
 
     @classmethod
-    def create_artifact_gate_error(cls, errors: list[str]) -> "ErrorObject":
-        return cls(
-            message="Artifact gate validation failed",
-            cause="; ".join(errors) if errors else "产物未通过确定性校验",
-            suggestion="检查 Worker 声明的 final_output_path 是否真实存在、属于本 Session 的允许空间且满足角色产物契约",
-        )
-
-    @classmethod
     def create_manager_execution_error(cls) -> "ErrorObject":
         return cls(
             message="Manager execution failed",

@@ -55,15 +55,6 @@ class ExternalInputRequest(BaseModel):
     input_data: Any
 
 
-class LogsQueryParams(BaseModel):
-    offset: int = 0
-    limit: int = 100
-
-
-class ArtifactQueryParams(BaseModel):
-    path: str
-
-
 class CreateRoleRequest(BaseModel):
     id: str
     content: str = ""

@@ -525,14 +525,14 @@ Shared FS（共享分区）是产物单一事实源。
 |---|---|
 | `frontend/src/App.tsx` `main.tsx` | 应用入口与路由 |
 | `frontend/src/workbench.css` | 全局样式 |
-| `frontend/src/types.ts` `constants.ts` | 类型与常量 |
+| `frontend/src/types.ts` | 类型定义 |
 | `frontend/src/stores/GraphStore.ts` `SessionStore.ts` `UIStateStore.ts` | zustand 状态（图/会话/UI） |
 | `frontend/src/providers/SSEProvider.tsx` | SSE 事件订阅（EventSource） |
 | `frontend/src/components/GraphCanvas.tsx` `TreeNode.tsx` `DependencyEdge.tsx` | React Flow 图渲染 |
 | `frontend/src/components/NodeInspector.tsx` | 节点详情与产物查看 |
 | `frontend/src/components/SessionSidebar.tsx` `SessionOutputsDialog.tsx` `WorkbenchSettings.tsx` `CanvasControls.tsx` `ToastContainer.tsx` `WorkbenchDialogs.tsx` `WorkbenchHeader.tsx` | 工作台各 UI 组件 |
 | `frontend/src/components/mdeditor/` | Markdown 编辑器（编辑/预览/图片上传/自动保存） |
-| `frontend/src/utils/` `dagreLayout.ts` `eventBuffer.ts` `layoutCache.ts` `api.ts` | 布局/事件缓冲/API 工具 |
+| `frontend/src/utils/` `dagreLayout.ts` `layoutCache.ts` `api.ts` | 布局缓存/API 工具 |
 | `frontend/src/hooks/` | `useGraphOptimizations` |
 
 ---

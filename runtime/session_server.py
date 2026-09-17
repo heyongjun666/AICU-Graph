@@ -37,6 +37,16 @@ from cli_adapters import (
 from claude_code_agent import CCExecutionError, ClaudeCodeAgent
 
 
+def _http_error(status_code: int, error: Exception) -> HTTPException:
+    """把领域异常转成响应体一致的 HTTP 错误（detail 走本地化，保留异常链由调用方 ``from``）。
+
+    全 app 四十来个路由都在做同一件事：领域层抛 KeyError/ValueError/FileNotFoundError，
+    路由层按语义翻成 404 或 400。分散写的话，将来改错误信封（加 code、换 detail 形状）
+    要逐个路由去追，漏一个就多一种响应体。
+    """
+    return HTTPException(status_code=status_code, detail=localized_detail(error))
+
+
 class CreateSessionRequest(BaseModel):
     # task 现为可选：新会话默认生成空白图，不再自动创建/执行根节点。
     # 前端不再填写；保留字段仅为 API 兼容（调用方仍可传入并作为标题回退）。
@@ -153,7 +163,7 @@ def create_session_app(
         try:
             return session_manager.get_session(session_id)
         except KeyError as error:
-            raise HTTPException(status_code=404, detail=localized_detail(error)) from error
+            raise _http_error(404, error) from error
 
     def touch(session_id: str) -> None:
         session_manager.touch(session_id)
@@ -167,16 +177,16 @@ def create_session_app(
         try:
             return roles_manager.get_role_schema(role_type)
         except (ValueError, TypeError) as error:
-            raise HTTPException(status_code=400, detail=localized_detail(error)) from error
+            raise _http_error(400, error) from error
 
     @app.get("/v1/roles/{role_type}/{role_id}")
     def get_role(role_type: str, role_id: str):
         try:
             return roles_manager.get_role(role_id, role_type)
         except KeyError as error:
-            raise HTTPException(status_code=404, detail=localized_detail(error)) from error
+            raise _http_error(404, error) from error
         except (ValueError, TypeError) as error:
-            raise HTTPException(status_code=400, detail=localized_detail(error)) from error
+            raise _http_error(400, error) from error
 
     @app.post("/v1/roles", status_code=201)
     def create_role(body: RoleRequest):
@@ -186,9 +196,9 @@ def create_session_app(
             )
         except ValueError as error:
             status_code = 409 if "already exists" in str(error) else 400
-            raise HTTPException(status_code=status_code, detail=localized_detail(error)) from error
+            raise _http_error(status_code, error) from error
         except TypeError as error:
-            raise HTTPException(status_code=400, detail=localized_detail(error)) from error
+            raise _http_error(400, error) from error
 
     @app.patch("/v1/roles/{role_type}/{role_id}")
     def update_role(role_type: str, role_id: str, body: RoleRequest):
@@ -197,18 +207,18 @@ def create_session_app(
                 raise ValueError("Role id and type cannot be changed")
             return roles_manager.update_role(role_id, body.content, role_type, body.config)
         except KeyError as error:
-            raise HTTPException(status_code=404, detail=localized_detail(error)) from error
+            raise _http_error(404, error) from error
         except (ValueError, TypeError) as error:
-            raise HTTPException(status_code=400, detail=localized_detail(error)) from error
+            raise _http_error(400, error) from error
 
     @app.delete("/v1/roles/{role_type}/{role_id}", status_code=204)
     def delete_role(role_type: str, role_id: str):
         try:
             roles_manager.delete_role(role_id, role_type)
         except KeyError as error:
-            raise HTTPException(status_code=404, detail=localized_detail(error)) from error
+            raise _http_error(404, error) from error
         except ValueError as error:
-            raise HTTPException(status_code=400, detail=localized_detail(error)) from error
+            raise _http_error(400, error) from error
 
     @app.get("/v1/role-pools")
     def list_role_pools():
@@ -220,24 +230,24 @@ def create_session_app(
             return role_pools_manager.create_pool(body.name, body.roles)
         except ValueError as error:
             status_code = 409 if "already exists" in str(error) else 400
-            raise HTTPException(status_code=status_code, detail=localized_detail(error)) from error
+            raise _http_error(status_code, error) from error
 
     @app.patch("/v1/role-pools/{pool_id}")
     def update_role_pool(pool_id: str, body: UpdateRolePoolRequest):
         try:
             return role_pools_manager.update_pool(pool_id, body.name, body.roles)
         except KeyError as error:
-            raise HTTPException(status_code=404, detail=localized_detail(error)) from error
+            raise _http_error(404, error) from error
         except ValueError as error:
             status_code = 409 if "already exists" in str(error) else 400
-            raise HTTPException(status_code=status_code, detail=localized_detail(error)) from error
+            raise _http_error(status_code, error) from error
 
     @app.delete("/v1/role-pools/{pool_id}", status_code=204)
     def delete_role_pool(pool_id: str):
         try:
             role_pools_manager.delete_pool(pool_id)
         except KeyError as error:
-            raise HTTPException(status_code=404, detail=localized_detail(error)) from error
+            raise _http_error(404, error) from error
 
     @app.get("/v1/skills")
     def list_skills():
@@ -248,9 +258,9 @@ def create_session_app(
         try:
             return skills_manager.get_skill(skill_id)
         except KeyError as error:
-            raise HTTPException(status_code=404, detail=localized_detail(error)) from error
+            raise _http_error(404, error) from error
         except ValueError as error:
-            raise HTTPException(status_code=400, detail=localized_detail(error)) from error
+            raise _http_error(400, error) from error
 
     @app.post("/v1/skills", status_code=201)
     def create_skill(body: SkillRequest):
@@ -269,7 +279,7 @@ def create_session_app(
                 )
             return skills_manager.save_skill(body.skill_id, body.content)
         except ValueError as error:
-            raise HTTPException(status_code=400, detail=localized_detail(error)) from error
+            raise _http_error(400, error) from error
 
     @app.patch("/v1/skills/{skill_id}")
     def update_skill(skill_id: str, body: SkillRequest):
@@ -279,18 +289,18 @@ def create_session_app(
             skills_manager.get_skill(skill_id)
             return skills_manager.save_skill(skill_id, body.content)
         except KeyError as error:
-            raise HTTPException(status_code=404, detail=localized_detail(error)) from error
+            raise _http_error(404, error) from error
         except ValueError as error:
-            raise HTTPException(status_code=400, detail=localized_detail(error)) from error
+            raise _http_error(400, error) from error
 
     @app.delete("/v1/skills/{skill_id}", status_code=204)
     def delete_skill(skill_id: str):
         try:
             skills_manager.delete_skill(skill_id)
         except KeyError as error:
-            raise HTTPException(status_code=404, detail=localized_detail(error)) from error
+            raise _http_error(404, error) from error
         except ValueError as error:
-            raise HTTPException(status_code=400, detail=localized_detail(error)) from error
+            raise _http_error(400, error) from error
 
     @app.post("/v1/skills/import", status_code=201)
     async def import_skill(skill_id: str, request: Request):
@@ -299,7 +309,7 @@ def create_session_app(
             raw = await request.body()
             return skills_manager.import_skill_zip(skill_id, raw)
         except ValueError as error:
-            raise HTTPException(status_code=400, detail=localized_detail(error)) from error
+            raise _http_error(400, error) from error
 
     @app.get("/v1/config")
     def get_global_config():
@@ -341,7 +351,7 @@ def create_session_app(
         try:
             return {"config": session_manager.update_global_config(body.config)}
         except ValueError as error:
-            raise HTTPException(status_code=400, detail=localized_detail(error)) from error
+            raise _http_error(400, error) from error
 
     @app.post("/v1/config/test-connection")
     def test_connection(body: TestConnectionRequest):
@@ -472,7 +482,7 @@ def create_session_app(
                 config=body.config,
             )
         except (ValueError, RuntimeError) as error:
-            raise HTTPException(status_code=409, detail=localized_detail(error)) from error
+            raise _http_error(409, error) from error
 
     @app.get("/v1/sessions/{session_id}")
     def get_session(session_id: str):
@@ -522,14 +532,14 @@ def create_session_app(
                 session_id, body.config, body.workspace_root, **settings_kwargs
             )
         except (OSError, ValueError) as error:
-            raise HTTPException(status_code=400, detail=localized_detail(error)) from error
+            raise _http_error(400, error) from error
 
     @app.delete("/v1/sessions/{session_id}", status_code=204)
     def delete_session(session_id: str):
         try:
             session_manager.delete_session(session_id)
         except KeyError as error:
-            raise HTTPException(status_code=404, detail=localized_detail(error)) from error
+            raise _http_error(404, error) from error
 
     @app.get("/v1/sessions/{session_id}/graph")
     def get_graph(session_id: str):
@@ -544,7 +554,7 @@ def create_session_app(
                 )
             }
         except ValueError as error:
-            raise HTTPException(status_code=404, detail=localized_detail(error)) from error
+            raise _http_error(404, error) from error
 
     @app.get("/v1/sessions/{session_id}/workspace")
     def list_session_workspace(
@@ -553,9 +563,9 @@ def create_session_app(
         try:
             return resolve(session_id).runtime.list_workspace(path=path)
         except FileNotFoundError as error:
-            raise HTTPException(status_code=404, detail=localized_detail(error)) from error
+            raise _http_error(404, error) from error
         except ValueError as error:
-            raise HTTPException(status_code=400, detail=localized_detail(error)) from error
+            raise _http_error(400, error) from error
 
     @app.get("/v1/sessions/{session_id}/workspace/file")
     def read_session_workspace_file(
@@ -564,9 +574,9 @@ def create_session_app(
         try:
             return resolve(session_id).runtime.read_workspace_file(path=path)
         except FileNotFoundError as error:
-            raise HTTPException(status_code=404, detail=localized_detail(error)) from error
+            raise _http_error(404, error) from error
         except ValueError as error:
-            raise HTTPException(status_code=400, detail=localized_detail(error)) from error
+            raise _http_error(400, error) from error
 
     @app.get("/v1/sessions/{session_id}/shared")
     def list_session_shared(
@@ -576,9 +586,9 @@ def create_session_app(
         try:
             return resolve(session_id).runtime.list_session_shared(path=path)
         except FileNotFoundError as error:
-            raise HTTPException(status_code=404, detail=localized_detail(error)) from error
+            raise _http_error(404, error) from error
         except ValueError as error:
-            raise HTTPException(status_code=400, detail=localized_detail(error)) from error
+            raise _http_error(400, error) from error
 
     @app.get("/v1/sessions/{session_id}/shared/file")
     def read_session_shared_file(
@@ -588,34 +598,34 @@ def create_session_app(
         try:
             return resolve(session_id).runtime.read_session_shared_file(path=path)
         except FileNotFoundError as error:
-            raise HTTPException(status_code=404, detail=localized_detail(error)) from error
+            raise _http_error(404, error) from error
         except ValueError as error:
-            raise HTTPException(status_code=400, detail=localized_detail(error)) from error
+            raise _http_error(400, error) from error
 
     @app.post("/v1/sessions/{session_id}/graph/pause")
     def pause_graph(session_id: str, body: PauseGraphRequest = PauseGraphRequest()):
         try:
             return session_manager.pause_session(session_id, body.mode)
         except KeyError as error:
-            raise HTTPException(status_code=404, detail=localized_detail(error)) from error
+            raise _http_error(404, error) from error
         except (RuntimeError, ValueError) as error:
-            raise HTTPException(status_code=409, detail=localized_detail(error)) from error
+            raise _http_error(409, error) from error
 
     @app.post("/v1/sessions/{session_id}/graph/resume")
     def resume_graph(session_id: str):
         try:
             return session_manager.resume_session(session_id)
         except KeyError as error:
-            raise HTTPException(status_code=404, detail=localized_detail(error)) from error
+            raise _http_error(404, error) from error
         except RuntimeError as error:
-            raise HTTPException(status_code=409, detail=localized_detail(error)) from error
+            raise _http_error(409, error) from error
 
     @app.post("/v1/sessions/{session_id}/graph/stop")
     def stop_graph(session_id: str):
         try:
             return session_manager.stop_session(session_id)
         except KeyError as error:
-            raise HTTPException(status_code=404, detail=localized_detail(error)) from error
+            raise _http_error(404, error) from error
 
     @app.delete("/v1/sessions/{session_id}/graph")
     def clear_graph(session_id: str):
@@ -639,7 +649,7 @@ def create_session_app(
                 dependencies=body.dependencies,
             )
         except ValueError as error:
-            raise HTTPException(status_code=400, detail=localized_detail(error)) from error
+            raise _http_error(400, error) from error
         touch(session_id)
         return _node_detail(runtime, node.id)
 
@@ -657,9 +667,9 @@ def create_session_app(
         try:
             runtime.update_manual_node(node_id, **updates)
         except ValueError as error:
-            raise HTTPException(status_code=404, detail=localized_detail(error)) from error
+            raise _http_error(404, error) from error
         except RuntimeError as error:
-            raise HTTPException(status_code=409, detail=localized_detail(error)) from error
+            raise _http_error(409, error) from error
         touch(session_id)
         return _node_detail(runtime, node_id)
 
@@ -674,9 +684,9 @@ def create_session_app(
         try:
             runtime.delete_manual_node(node_id)
         except ValueError as error:
-            raise HTTPException(status_code=404, detail=localized_detail(error)) from error
+            raise _http_error(404, error) from error
         except RuntimeError as error:
-            raise HTTPException(status_code=409, detail=localized_detail(error)) from error
+            raise _http_error(409, error) from error
         touch(session_id)
 
     @app.post("/v1/sessions/{session_id}/nodes/{node_id}/pause")
@@ -684,7 +694,7 @@ def create_session_app(
         try:
             resolve(session_id).runtime.pause_node(node_id)
         except ValueError as error:
-            raise HTTPException(status_code=404, detail=localized_detail(error)) from error
+            raise _http_error(404, error) from error
         touch(session_id)
         return {"status": "paused", "node_id": node_id}
 
@@ -693,7 +703,7 @@ def create_session_app(
         try:
             resolve(session_id).runtime.resume_node(node_id)
         except ValueError as error:
-            raise HTTPException(status_code=404, detail=localized_detail(error)) from error
+            raise _http_error(404, error) from error
         touch(session_id)
         return {"status": "resumed", "node_id": node_id}
 
@@ -702,7 +712,7 @@ def create_session_app(
         try:
             resolve(session_id).runtime.stop_node(node_id)
         except ValueError as error:
-            raise HTTPException(status_code=404, detail=localized_detail(error)) from error
+            raise _http_error(404, error) from error
         touch(session_id)
         return {"status": "stopped", "node_id": node_id}
 
@@ -711,7 +721,7 @@ def create_session_app(
         try:
             node_id = resolve(session_id).runtime.continue_node(node_id)
         except ValueError as error:
-            raise HTTPException(status_code=409, detail=localized_detail(error)) from error
+            raise _http_error(409, error) from error
         session_manager._auto_recover_from_failed(session_id)
         touch(session_id)
         return {"status": "running", "node_id": node_id}
@@ -723,7 +733,7 @@ def create_session_app(
                 node_id, body.task, body.config
             )
         except ValueError as error:
-            raise HTTPException(status_code=409, detail=localized_detail(error)) from error
+            raise _http_error(409, error) from error
         session_manager._auto_recover_from_failed(session_id)
         touch(session_id)
         return {"status": "revising", "node_id": node_id}
@@ -739,9 +749,9 @@ def create_session_app(
                 path=path, node_id=node_id
             )
         except FileNotFoundError as error:
-            raise HTTPException(status_code=404, detail=localized_detail(error)) from error
+            raise _http_error(404, error) from error
         except ValueError as error:
-            raise HTTPException(status_code=400, detail=localized_detail(error)) from error
+            raise _http_error(400, error) from error
 
     @app.get("/v1/sessions/{session_id}/nodes/{node_id}/workspace/file")
     def read_node_workspace_file(
@@ -754,9 +764,9 @@ def create_session_app(
                 path=path, node_id=node_id
             )
         except FileNotFoundError as error:
-            raise HTTPException(status_code=404, detail=localized_detail(error)) from error
+            raise _http_error(404, error) from error
         except ValueError as error:
-            raise HTTPException(status_code=400, detail=localized_detail(error)) from error
+            raise _http_error(400, error) from error
 
     @app.get("/v1/sessions/{session_id}/nodes/{node_id}/logs")
     def get_node_logs(
@@ -769,7 +779,7 @@ def create_session_app(
         try:
             logs = runtime.get_logs(node_id, offset=offset, limit=limit)
         except ValueError as error:
-            raise HTTPException(status_code=404, detail=localized_detail(error)) from error
+            raise _http_error(404, error) from error
         return [_serialize_log(node_id, entry) for entry in logs]
 
     @app.get("/v1/sessions/{session_id}/nodes/{node_id}/activity")
@@ -777,25 +787,25 @@ def create_session_app(
         try:
             return {"node_id": node_id, "activities": resolve(session_id).runtime.get_cc_activity(node_id)}
         except ValueError as error:
-            raise HTTPException(status_code=404, detail=localized_detail(error)) from error
+            raise _http_error(404, error) from error
 
     @app.get("/v1/sessions/{session_id}/nodes/{node_id}/results")
     def list_node_results(session_id: str, node_id: str, path: str = Query(default="", max_length=4096)):
         try:
             return resolve(session_id).runtime.list_node_results(node_id, path)
         except FileNotFoundError as error:
-            raise HTTPException(status_code=404, detail=localized_detail(error)) from error
+            raise _http_error(404, error) from error
         except ValueError as error:
-            raise HTTPException(status_code=400, detail=localized_detail(error)) from error
+            raise _http_error(400, error) from error
 
     @app.get("/v1/sessions/{session_id}/nodes/{node_id}/results/file")
     def read_node_result_file(session_id: str, node_id: str, path: str = Query(min_length=1, max_length=4096)):
         try:
             return resolve(session_id).runtime.read_node_result_file(node_id, path)
         except FileNotFoundError as error:
-            raise HTTPException(status_code=404, detail=localized_detail(error)) from error
+            raise _http_error(404, error) from error
         except ValueError as error:
-            raise HTTPException(status_code=400, detail=localized_detail(error)) from error
+            raise _http_error(400, error) from error
 
     @app.get("/v1/sessions/{session_id}/nodes/{node_id}/artifact")
     def get_artifact(session_id: str, node_id: str):
@@ -822,7 +832,7 @@ def create_session_app(
                 "content": runtime.read_artifact(node_id, node.artifact_path),
             }
         except (FileNotFoundError, ValueError) as error:
-            raise HTTPException(status_code=404, detail=localized_detail(error)) from error
+            raise _http_error(404, error) from error
 
     @app.post("/v1/sessions/{session_id}/edges", status_code=201)
     def create_edge(session_id: str, body: CreateEdgeRequest):
@@ -830,7 +840,7 @@ def create_session_app(
         try:
             edge = runtime.add_dependency(body.from_node, body.to_node)
         except ValueError as error:
-            raise HTTPException(status_code=400, detail=localized_detail(error)) from error
+            raise _http_error(400, error) from error
         touch(session_id)
         return {
             "id": edge.id,
@@ -845,9 +855,9 @@ def create_session_app(
         try:
             runtime.remove_dependency(edge_id)
         except ValueError as error:
-            raise HTTPException(status_code=404, detail=localized_detail(error)) from error
+            raise _http_error(404, error) from error
         except RuntimeError as error:
-            raise HTTPException(status_code=409, detail=localized_detail(error)) from error
+            raise _http_error(409, error) from error
         touch(session_id)
 
     @app.get("/v1/sessions/{session_id}/graph/events")

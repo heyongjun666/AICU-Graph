@@ -1304,9 +1304,7 @@ class Runtime(RuntimeGateway, SchedulerDelegate):
             ValueError: 节点不存在。
         """
         with self._lock:
-            node = self.graph.get_node(node_id)
-            if node is None:
-                raise ValueError(f"Node '{node_id}' not found")
+            node = self._require_node(node_id)
             old_status = node.status
             self.graph.update_node(node_id, status=NodeStatus.STOPPED)
             changed = old_status != NodeStatus.STOPPED
@@ -1329,9 +1327,7 @@ class Runtime(RuntimeGateway, SchedulerDelegate):
             ValueError: 节点不存在或不在 RUNNING 状态。
         """
         with self._lock:
-            node = self.graph.get_node(node_id)
-            if node is None:
-                raise ValueError(f"Node '{node_id}' not found")
+            node = self._require_node(node_id)
             if node.status != NodeStatus.RUNNING:
                 raise ValueError(
                     f"Cannot pause node '{node_id}': "
@@ -1354,9 +1350,7 @@ class Runtime(RuntimeGateway, SchedulerDelegate):
             ValueError: 节点不存在或不在 PAUSED 状态。
         """
         with self._lock:
-            node = self.graph.get_node(node_id)
-            if node is None:
-                raise ValueError(f"Node '{node_id}' not found")
+            node = self._require_node(node_id)
             if node.status != NodeStatus.PAUSED:
                 raise ValueError(
                     f"Cannot resume node '{node_id}': "
@@ -1384,9 +1378,7 @@ class Runtime(RuntimeGateway, SchedulerDelegate):
             ValueError: 节点不存在；节点不在 FAILED/STOPPED 状态。
         """
         with self._lock:
-            node = self.graph.get_node(node_id)
-            if node is None:
-                raise ValueError(f"Node '{node_id}' not found")
+            node = self._require_node(node_id)
             if node.status not in (NodeStatus.FAILED, NodeStatus.STOPPED):
                 raise ValueError(
                     f"Cannot continue node '{node_id}': "
@@ -1474,9 +1466,7 @@ class Runtime(RuntimeGateway, SchedulerDelegate):
         extra = non_whitelisted_config_keys(config)
         if extra:
             raise ValueError(non_whitelisted_config_message(extra))
-        node = self.graph.get_node(node_id)
-        if node is None:
-            raise ValueError(f"Node '{node_id}' not found")
+        node = self._require_node(node_id)
         if node.exec_type != expected_exec_type:
             raise ValueError(
                 f"Cannot revise node '{node_id}': "
@@ -2070,9 +2060,7 @@ class Runtime(RuntimeGateway, SchedulerDelegate):
         Raises:
             ValueError: 节点不存在。
         """
-        node = self.graph.get_node(node_id)
-        if node is None:
-            raise ValueError(f"Node '{node_id}' not found")
+        node = self._require_node(node_id)
         return node.log[offset:offset + limit]
 
     def append_node_log(
@@ -2137,9 +2125,7 @@ class Runtime(RuntimeGateway, SchedulerDelegate):
         latest_output: Optional[str] = None,
     ) -> None:
         """Update the observable lifecycle state of one CC inside a node."""
-        node = self.graph.get_node(node_id)
-        if node is None:
-            raise ValueError(f"Node '{node_id}' not found")
+        node = self._require_node(node_id)
         activity = dict(node.cc_activity or {})
         current = dict(activity.get(cc_id, {}))
         current.update({"cc_id": cc_id, "status": status, "updated_at": datetime.now().isoformat()})
@@ -2157,15 +2143,11 @@ class Runtime(RuntimeGateway, SchedulerDelegate):
         self.graph.update_node(node_id, cc_activity=activity)
 
     def get_cc_activity(self, node_id: str) -> dict[str, dict]:
-        node = self.graph.get_node(node_id)
-        if node is None:
-            raise ValueError(f"Node '{node_id}' not found")
+        node = self._require_node(node_id)
         return node.cc_activity or {}
 
     def get_node_workspace(self, node_id: str) -> str:
-        node = self.graph.get_node(node_id)
-        if node is None:
-            raise ValueError(f"Node '{node_id}' not found")
+        node = self._require_node(node_id)
         config = node.config or {}
         root = os.path.abspath(config.get("_workspace_root", self.workspace_root))
         relpath = config.get("_workspace_relpath")
@@ -2177,10 +2159,19 @@ class Runtime(RuntimeGateway, SchedulerDelegate):
         os.makedirs(workspace, exist_ok=True)
         return workspace
 
-    def _get_node_result_root(self, node_id: str) -> Optional[str]:
+    def _require_node(self, node_id: str) -> Node:
+        """取出节点，不存在则抛 ``ValueError``。
+
+        门面上十几个入口都要「先拿到 node，拿不到就报同一句话」；分散写的话，
+        将来想区分「未知节点」与「节点不可操作」时得改十几处，漏一处就漏一种语义。
+        """
         node = self.graph.get_node(node_id)
         if node is None:
             raise ValueError(f"Node '{node_id}' not found")
+        return node
+
+    def _get_node_result_root(self, node_id: str) -> Optional[str]:
+        node = self._require_node(node_id)
         if not node.artifact_path:
             return None
         workspace = os.path.realpath(self.get_node_workspace(node_id))
@@ -2514,9 +2505,7 @@ class Runtime(RuntimeGateway, SchedulerDelegate):
         Raises:
             ValueError: 节点不存在。
         """
-        node = self.graph.get_node(node_id)
-        if node is None:
-            raise ValueError(f"Node '{node_id}' not found")
+        node = self._require_node(node_id)
         self.graph.update_node(node_id, task=task)
 
     def create_manual_node(
@@ -2576,9 +2565,7 @@ class Runtime(RuntimeGateway, SchedulerDelegate):
 
     def update_manual_node(self, node_id: str, **updates: Any) -> Node:
         """Update editable execution fields while a node is not active."""
-        node = self.graph.get_node(node_id)
-        if node is None:
-            raise ValueError(f"Node '{node_id}' not found")
+        node = self._require_node(node_id)
         if node.status not in {NodeStatus.WAITING, NodeStatus.PAUSED}:
             raise RuntimeError(
                 f"Node '{node_id}' must be Waiting or Paused before editing"
@@ -2598,8 +2585,8 @@ class Runtime(RuntimeGateway, SchedulerDelegate):
     def get_link_candidates(
         self, node_id: Optional[str] = None
     ) -> list[dict[str, Any]]:
-        if node_id and self.graph.get_node(node_id) is None:
-            raise ValueError(f"Node '{node_id}' not found")
+        if node_id:
+            self._require_node(node_id)
         candidates = []
         for node in self.graph.all_nodes():
             if node.id == node_id:
@@ -2673,9 +2660,7 @@ class Runtime(RuntimeGateway, SchedulerDelegate):
         代码层面不存在级联删除 —— Manager 有子节点时直接拒绝，必须先删除其子节点。
         仅删除单个叶子节点（无子节点），RUNNING 节点需先停止。
         """
-        node = self.graph.get_node(node_id)
-        if node is None:
-            raise ValueError(f"Node '{node_id}' not found")
+        node = self._require_node(node_id)
         children = self.graph.children(node_id)
         if children:
             raise RuntimeError(

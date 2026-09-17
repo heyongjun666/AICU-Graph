@@ -1161,10 +1161,7 @@ class AICU:
         """
         read_instruction = self._build_read_instruction_text(0)
 
-        checklist_text = "\n".join(
-            f"  {i+1}. **{name}**: {desc}"
-            for i, (name, desc) in enumerate(self.review_checklist)
-        )
+        checklist_text = self._build_review_checklist_text()
 
         prompt = (
             f"你是一个{self.adversarial_role or '严格的审查专家'}。请审查你刚刚编写的方案。\n\n"
@@ -1191,8 +1188,7 @@ class AICU:
 
         if parsed is None:
             return None
-        return [d for d in parsed.get("defects", [])
-                if d.get("severity") in ("high", "medium")]
+        return self._high_medium_defects(parsed)
 
     # ==================== CC=2: pair 模式 ====================
     # CC-0 负责完成任务，CC-1 负责 Review 并给出修改建议，CC-0 修正后输出。
@@ -1259,10 +1255,7 @@ class AICU:
         """
         read_instruction = self._build_read_instruction_text(0)
 
-        checklist_text = "\n".join(
-            f"  {i+1}. **{name}**: {desc}"
-            for i, (name, desc) in enumerate(self.review_checklist)
-        )
+        checklist_text = self._build_review_checklist_text()
 
         prompt = (
             f"你是一个{self.adversarial_role}。\n\n"
@@ -1288,8 +1281,7 @@ class AICU:
 
         if parsed is None:
             return None
-        return [d for d in parsed.get("defects", [])
-                if d.get("severity") in ("high", "medium")]
+        return self._high_medium_defects(parsed)
 
     # ==================== CC=3: triple 模式 ====================
     # CC-0 和 CC-1 独立产出方案（彼此看不到对方结果），
@@ -1301,34 +1293,7 @@ class AICU:
         self, question: str, max_rounds: int = 3, incremental: bool = False
     ) -> dict:
         # ---- 双 CC 并行生成 ----
-        print(f"\n[AICU-triple] 阶段1: CC-0/CC-1 并行生成")
-        with ThreadPoolExecutor(max_workers=2) as pool:
-            futures = [
-                pool.submit(
-                    self._cc_chat_with_retry,
-                    self.ccs[i],
-                    self._build_generation_prompt(
-                        question, incremental, self.ccs[i]
-                    ),
-                    86400,
-                )
-                for i in range(2)
-            ]
-            responses = []
-            for i, f in enumerate(futures):
-                try:
-                    resp = f.result()
-                    responses.append(resp)
-                    cc_output_path = self.ccs[i].workspace / "cc_output.md"
-                    cc_output_path.write_text(resp, encoding='utf-8')
-                except Exception as e:
-                    responses.append(None)
-                    print(f"  [AICU-triple] CC-{i} 生成失败: {e}")
-        for i in range(2):
-            if self.is_modular_output:
-                print(f"  CC-{i}: {len(self._list_code_files(i))} 个文件")
-            else:
-                print(f"  CC-{i}: {len(self._read_cc_file(i))} 字符")
+        self._generate_pair_in_parallel(question, incremental, "triple")
 
         # ---- CC-2 比较融合 ----
         print(f"\n[AICU-triple] 阶段2: CC-2 比较融合")
@@ -1391,10 +1356,7 @@ class AICU:
         read_0 = self._build_read_instruction_text(0)
         read_1 = self._build_read_instruction_text(1)
 
-        checklist_text = "\n".join(
-            f"  {i+1}. **{name}**: {desc}"
-            for i, (name, desc) in enumerate(self.review_checklist)
-        )
+        checklist_text = self._build_review_checklist_text()
 
         prompt = (
             f"你是一个评审专家，需要比较两个独立方案并选出最优方案。\n\n"
@@ -1446,8 +1408,7 @@ class AICU:
         # 如果融合了另一方案的部分，CC-2 需要直接编辑文件
         # 这里只记录 merge_notes，实际融合由修订阶段处理
 
-        defects = [d for d in parsed.get("defects", [])
-                   if d.get("severity") in ("high", "medium")]
+        defects = self._high_medium_defects(parsed)
 
         # 保存结果
         merge_data = {"raw_response": resp, "result": parsed}
@@ -1467,10 +1428,7 @@ class AICU:
         reviewer = self.ccs[2]
         read_instruction = self._build_read_instruction_text(0)
 
-        checklist_text = "\n".join(
-            f"  {i+1}. **{name}**: {desc}"
-            for i, (name, desc) in enumerate(self.review_checklist)
-        )
+        checklist_text = self._build_review_checklist_text()
 
         prompt = (
             f"你是一个{self.adversarial_role}，请复查修订后的方案。\n\n"
@@ -1490,8 +1448,7 @@ class AICU:
         if parsed is None:
             print("  [warn] CC-2 复查响应无法解析为 JSON —— 视为未通过（不静默放行）")
             return {"defects": [], "parse_failed": True}
-        defects = [d for d in parsed.get("defects", [])
-                   if d.get("severity") in ("high", "medium")]
+        defects = self._high_medium_defects(parsed)
         return {"defects": defects, "parse_failed": False}
 
     # ==================== CC≥4: full 模式 ====================
@@ -1504,34 +1461,7 @@ class AICU:
         self, question: str, max_rounds: int = 3, incremental: bool = False
     ) -> dict:
         # ---- 双 CC 并行生成 ----
-        print(f"\n[AICU-full] 阶段1: CC-0/CC-1 并行生成")
-        with ThreadPoolExecutor(max_workers=2) as pool:
-            futures = [
-                pool.submit(
-                    self._cc_chat_with_retry,
-                    self.ccs[i],
-                    self._build_generation_prompt(
-                        question, incremental, self.ccs[i]
-                    ),
-                    86400,
-                )
-                for i in range(2)
-            ]
-            responses = []
-            for i, f in enumerate(futures):
-                try:
-                    resp = f.result()
-                    responses.append(resp)
-                    cc_output_path = self.ccs[i].workspace / "cc_output.md"
-                    cc_output_path.write_text(resp, encoding='utf-8')
-                except Exception as e:
-                    responses.append(None)
-                    print(f"  [AICU-full] CC-{i} 生成失败: {e}")
-        for i in range(2):
-            if self.is_modular_output:
-                print(f"  CC-{i}: {len(self._list_code_files(i))} 个文件")
-            else:
-                print(f"  CC-{i}: {len(self._read_cc_file(i))} 字符")
+        self._generate_pair_in_parallel(question, incremental, "full")
 
         # ---- CC-2 评审融合 ----
         print(f"\n[AICU-full] 阶段2: CC-2 评审融合")
@@ -1610,10 +1540,7 @@ class AICU:
         read_instruction = self._build_read_instruction_text(0)
 
         # 合并 review checklist + audit angles
-        checklist_text = "\n".join(
-            f"  {i+1}. **{name}**: {desc}"
-            for i, (name, desc) in enumerate(self.review_checklist)
-        )
+        checklist_text = self._build_review_checklist_text()
         angles_text = "\n".join(
             f"  {len(self.review_checklist)+i+1}. **{angle}**"
             for i, angle in enumerate(self.audit_angles)
@@ -1646,10 +1573,70 @@ class AICU:
 
         if parsed is None:
             return None
-        return [d for d in parsed.get("defects_found", [])
-                if d.get("severity") in ("high", "medium")]
+        return self._high_medium_defects(parsed, "defects_found")
 
     # ==================== 公共工具方法 ====================
+
+    def _generate_pair_in_parallel(
+        self, question: str, incremental: bool, label: str
+    ) -> List[Optional[str]]:
+        """阶段1：CC-0/CC-1 并行生成并把各自回复落到 ``cc_output.md``。
+
+        triple 与 full 的唯一差异在阶段1之后（比较融合 vs 评审融合），这一段逐字相同。
+        ``label`` 只影响日志前缀（``AICU-triple`` / ``AICU-full``）。
+
+        返回各 CC 的回复（失败的位为 None）。调用方目前不消费它 —— 保留是为了不改动
+        既有的失败隔离语义：单个 CC 抛错不中断另一位，失败在日志里可见。
+        """
+        print(f"\n[AICU-{label}] 阶段1: CC-0/CC-1 并行生成")
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            futures = [
+                pool.submit(
+                    self._cc_chat_with_retry,
+                    self.ccs[i],
+                    self._build_generation_prompt(
+                        question, incremental, self.ccs[i]
+                    ),
+                    86400,
+                )
+                for i in range(2)
+            ]
+            responses: List[Optional[str]] = []
+            for i, f in enumerate(futures):
+                try:
+                    resp = f.result()
+                    responses.append(resp)
+                    cc_output_path = self.ccs[i].workspace / "cc_output.md"
+                    cc_output_path.write_text(resp, encoding='utf-8')
+                except Exception as e:
+                    responses.append(None)
+                    print(f"  [AICU-{label}] CC-{i} 生成失败: {e}")
+        for i in range(2):
+            if self.is_modular_output:
+                print(f"  CC-{i}: {len(self._list_code_files(i))} 个文件")
+            else:
+                print(f"  CC-{i}: {len(self._read_cc_file(i))} 字符")
+        return responses
+
+    @staticmethod
+    def _high_medium_defects(parsed: dict, key: str = "defects") -> List[dict]:
+        """从解析结果里挑出 high/medium 缺陷 —— 「什么算缺陷」全流程只此一份。
+
+        各 peer 策略的缺陷数组字段名不同（评审位 ``defects`` / 审计位 ``defects_found``），
+        但过滤阈值是同一个业务口径：low 一律忽略。分散写的话，放宽或收紧阈值时
+        会漏掉某个策略，表现是「同一条 low 缺陷在 solo 通过、在 full 被拦下」。
+        """
+        return [
+            d for d in parsed.get(key, [])
+            if d.get("severity") in ("high", "medium")
+        ]
+
+    def _build_review_checklist_text(self) -> str:
+        """把 ``review_checklist`` 渲染成提示词里的编号清单（含缩进，供各 peer 策略内插）。"""
+        return "\n".join(
+            f"  {i+1}. **{name}**: {desc}"
+            for i, (name, desc) in enumerate(self.review_checklist)
+        )
 
     def _build_read_instruction_text(self, cc_id: int) -> str:
         """构建文件读取指令文本"""

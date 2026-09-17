@@ -10,6 +10,7 @@ Tests for executables/manager.py — Manager 注册与集成
 
 import json
 import os
+import tempfile
 from typing import Any, Optional
 
 import pytest
@@ -104,13 +105,23 @@ class _DualPhaseStub:
 # ============================================================================
 
 class _MockRuntimeGateway:
-    """RuntimeGateway 协议的模拟实现，记录调用历史。"""
+    """RuntimeGateway 协议的模拟实现，记录调用历史。
+
+    提供 ``get_node_workspace``：真实 RuntimeGateway 有这个能力，而 Manager 写
+    ``review_v{N}.md`` 时会先探测它（见 manager.py ``_write_review_output``）。
+    缺了它，Manager 就退回 ``{os.getcwd()}/workspaces/{node_id}``，于是从仓库根跑
+    测试会在仓库里落下 ``workspaces/mgr1/review_v0.md``。指向临时目录即可。
+    """
 
     def __init__(self):
         self.submitted_plans: list[tuple[str, ExecutionPlan]] = []
         self.status_updates: list[tuple[str, NodeStatus, dict]] = []
         self._nodes: dict[str, Node] = {}
         self._children: dict[str, list[Node]] = {}
+        self._workspace = tempfile.mkdtemp(prefix="aicu_mgr_ws_")
+
+    def get_node_workspace(self, node_id: str) -> str:
+        return os.path.join(self._workspace, "workspaces", node_id)
 
     def add_node(self, node: Node) -> None:
         self._nodes[node.id] = node

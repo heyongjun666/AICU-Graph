@@ -87,9 +87,15 @@ def graph():
 
 
 @pytest.fixture
-def runtime():
-    """Runtime fixture with registered test executables."""
-    rt = Runtime()
+def runtime(tmp_path):
+    """Runtime fixture with registered test executables.
+
+    显式给 workspace_root：不传时 Runtime 退回 ``os.getcwd()``，于是
+    ``rt.start()`` 会在当前目录落下 ``events.json`` / ``nodes/`` / ``shared/``。
+    从仓库根跑 pytest 就是把它们丢进仓库（虽已被 .gitignore 挡住，但每次跑都重建）。
+    这里与各测试自建 Runtime 的写法保持一致，统一用 tmp_path。
+    """
+    rt = Runtime(workspace_root=str(tmp_path))
     rt.persistence.clear()
     rt.registry.register("manager", _TestExecutable)
     rt.registry.register("worker", _TestExecutable)

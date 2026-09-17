@@ -92,6 +92,19 @@ def temp_state_file(tmp_path):
     return str(tmp_path / "runtime_state.json")
 
 
+@pytest.fixture(autouse=True)
+def _isolate_cwd(tmp_path, monkeypatch):
+    """把本文件的 cwd 隔离到 tmp_path。
+
+    本文件多处刻意用 ``Runtime()`` / ``Runtime(persistence=...)`` 且不传 workspace_root
+    —— 被测的正是这条默认路径。而 Runtime 内部对 workspace_root 的兜底是
+    ``os.getcwd()``，``rt.start()`` 于是会在当前目录落下 ``events.json`` / ``shared/``；
+    从仓库根跑 pytest 就是把它们丢进仓库（虽被 .gitignore 挡住，但每次跑都重建）。
+    chdir 到 tmp_path 后，那条兜底路径照样被测到，只是落在了临时目录。
+    """
+    monkeypatch.chdir(tmp_path)
+
+
 @pytest.fixture
 def runtime(temp_state_file):
     """Fixture: basic Runtime instance with registered test executables."""

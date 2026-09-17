@@ -70,16 +70,16 @@ class TestFieldPropagation:
         # round-trip 一致
         assert EventMessage.from_dict(data) == msg
 
-    def test_prepare_raws_accepts_objective_without_content(self):
+    def test_prepare_raws_accepts_objective_without_content(self, tmp_path):
         """只写 objective（不写 content）的事件判合法、不拒收（断裂点①）。"""
-        mgr = AgentEventManager(workspace_root=".")
+        mgr = AgentEventManager(workspace_root=str(tmp_path))
         ok, bad = mgr._prepare_event_raws("p", [{"objective": "仅 objective 无 content"}])
         assert len(ok) == 1
         assert bad == []
 
-    def test_prepare_raws_rejects_missing_objective(self):
+    def test_prepare_raws_rejects_missing_objective(self, tmp_path):
         """objective 缺失（且无 content）→ 仍拒收。"""
-        mgr = AgentEventManager(workspace_root=".")
+        mgr = AgentEventManager(workspace_root=str(tmp_path))
         ok, bad = mgr._prepare_event_raws("p", [{"event_id": "evt_x"}])
         assert ok == []
         assert len(bad) == 1
@@ -98,22 +98,29 @@ class TestFieldPropagation:
 
 
 class _RouteNode:
-    def __init__(self, node_id, role, status=NodeStatus.WAITING):
+    def __init__(self, node_id, role, status=NodeStatus.WAITING, workspace_root=None):
         self.id = node_id
         self.exec_type = "worker"
         self.role = role
         self.task = f"{role} task"
-        self.config = {}
+        # 显式给 _workspace_root：agent_events._node_workspace 在节点 config 里取不到它时
+        # 会退回 os.getcwd()，事件投递就会把 event_inbox/ 写进当前目录（仓库根）。
+        self.config = (
+            {"_workspace_root": str(workspace_root), "_workspace_relpath": node_id}
+            if workspace_root else {}
+        )
         self.status = status
         self.parent_id = None
         self.step_ref = role
         self.task_summary = f"{role} summary"
 
 
-def _route_graph() -> Graph:
+def _route_graph(workspace_root) -> Graph:
     graph = Graph()
-    graph.add_node(_RouteNode("producer", "backend", NodeStatus.COMPLETED))
-    graph.add_node(_RouteNode("security", "security"))
+    graph.add_node(
+        _RouteNode("producer", "backend", NodeStatus.COMPLETED, workspace_root)
+    )
+    graph.add_node(_RouteNode("security", "security", workspace_root=workspace_root))
     return graph
 
 
@@ -143,7 +150,7 @@ class TestRouterTrace:
     def test_router_trace_contains_snapshot_and_delivery(self, tmp_path):
         router = _TargetRouter(["security"])
         mgr = AgentEventManager(str(tmp_path), router=router)
-        graph = _route_graph()
+        graph = _route_graph(tmp_path)
         mgr.attach_graph(graph)
 
         ids = mgr.publish_events("producer", [{
@@ -173,7 +180,7 @@ class TestRouterTrace:
         mgr = AgentEventManager(
             str(tmp_path), router=_TargetRouter(error=RuntimeError("router down"))
         )
-        mgr.attach_graph(_route_graph())
+        mgr.attach_graph(_route_graph(tmp_path))
 
         mgr.publish_events("producer", [{
             "event_id": "evt_failed_route",
@@ -193,28 +200,29 @@ class TestObjectiveBudget:
     而是判定过长/超句数后打回，让生产者重写。
     """
 
-    def _mgr(self):
-        return AgentEventManager(workspace_root=".")
+    def _mgr(self, tmp_path):
+        # workspace_root 不写 "."：那样等于把 cwd（从仓库根跑测试时就是仓库）当工作区。
+        return AgentEventManager(workspace_root=str(tmp_path))
 
-    def test_accepts_brief_objective(self):
-        ok, bad = self._mgr()._prepare_event_raws(
+    def test_accepts_brief_objective(self, tmp_path):
+        ok, bad = self._mgr(tmp_path)._prepare_event_raws(
             "p", [{"objective": "本环节产出已完成，需要后续环节节点继续推进。"}],
         )
         assert len(ok) == 1
         assert bad == []
 
-    def test_rejects_objective_over_char_budget(self):
+    def test_rejects_objective_over_char_budget(self, tmp_path):
         """objective 超过 80 字 → 拒收（不截断、不摄入）。"""
         long_obj = "这是超长描述。" * 12  # 每句 7 字 × 12 = 84 字
-        ok, bad = self._mgr()._prepare_event_raws("p", [{"objective": long_obj}])
+        ok, bad = self._mgr(tmp_path)._prepare_event_raws("p", [{"objective": long_obj}])
         assert ok == []
         assert len(bad) == 1
         assert "80" in bad[0]["reason"]
 
-    def test_rejects_objective_over_sentence_budget(self):
+    def test_rejects_objective_over_sentence_budget(self, tmp_path):
         """objective 超过 3 句话（即便总字数很短）→ 拒收。"""
         four_sent = "第一句。第二句。第三句。第四句。"
-        ok, bad = self._mgr()._prepare_event_raws("p", [{"objective": four_sent}])
+        ok, bad = self._mgr(tmp_path)._prepare_event_raws("p", [{"objective": four_sent}])
         assert ok == []
         assert len(bad) == 1
         assert "3" in bad[0]["reason"]

@@ -153,8 +153,11 @@ class TestDynamicPolicy:
         nodes = rt.inject_plan(root, ExecutionPlan(steps=[_step("a", {})]))
         assert _num_ccs(rt, nodes[0].id) is None
 
-    def test_constructor_defaults_are_backward_compatible(self):
+    def test_constructor_defaults_are_backward_compatible(self, tmp_path, monkeypatch):
         """Runtime() 不传参数 = 动态 + 默认 1，旧调用方行为不变。"""
+        # 用的是「一个参数都不传」这条路径，所以不能靠传 workspace_root 隔离：
+        # chdir 到 tmp_path，让 Runtime 内部的 os.getcwd() 兜底落在临时目录。
+        monkeypatch.chdir(tmp_path)
         rt = Runtime()
         try:
             assert rt.dynamic_num_ccs is True

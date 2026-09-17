@@ -40,7 +40,7 @@ from runtime.context import (
     build_review_context,
 )
 from runtime.shared_io import build_dir_index as _build_dir_index
-from runtime.workspace_resolver import _partition_of
+from runtime.workspace_resolver import partition_of
 
 logger = logging.getLogger(__name__)
 
@@ -188,6 +188,15 @@ class Manager(Executable):
                 "Manager.run() failed for node '%s': %s\n%s",
                 ctx.node.id, exc, tb,
             )
+            # 失败路径同样要兜底摄取事件：Manager 在 review 阶段可能已经发布了部分
+            # 协作事件，若只在成功路径 flush，这些事件会滞留在发布目录里再也无人摄取
+            # （scheduler tick 只在有 RUNNING 节点时扫描）。与 worker.py 失败路径对齐。
+            flush = getattr(ctx.runtime, "flush_node_events", None)
+            if callable(flush):
+                try:
+                    flush(ctx.node.id)
+                except Exception:  # noqa: BLE001
+                    pass
             error = ErrorObject.create_manager_execution_error()
             log_entries = [
                 LogEntry(
@@ -1634,7 +1643,7 @@ class Manager(Executable):
                     f"**Status**: {getattr(child.get('status'), 'value', child.get('status'))}"
                 )
             if child.get("shared_workspace"):
-                partition = _partition_of(
+                partition = partition_of(
                     child["shared_workspace"], child.get("output_path") or ""
                 )
                 parts.append(f"**Shared Workspace Partition**: {partition}")
@@ -1832,7 +1841,14 @@ class Manager(Executable):
             review 文件的绝对路径。
         """
         workspace_getter = getattr(ctx.runtime, "get_node_workspace", None)
-        workspace = workspace_getter(ctx.node.id) if callable(workspace_getter) else ctx.config.get("workspace_dir", os.getcwd())
+        # 兜底用 `or` 而不是 dict.get 的默认值：`workspace_dir` **存在但为 None**
+        # （yaml 里写了 `workspace_dir:` 或前端传 null）时，get 的默认值不生效，
+        # 会返回 None，紧接着 os.path.join(None, filename) 直接 TypeError。
+        # 兜底路径与 worker.py 的首次执行保持一致（{cwd}/workspaces/{node_id}）。
+        workspace = workspace_getter(ctx.node.id) if callable(workspace_getter) else (
+            ctx.config.get("workspace_dir")
+            or os.path.join(os.getcwd(), "workspaces", ctx.node.id)
+        )
         filename = f"review_v{iteration_count}.md"
         filepath = os.path.join(workspace, filename)
 

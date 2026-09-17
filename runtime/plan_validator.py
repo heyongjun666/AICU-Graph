@@ -16,10 +16,7 @@ runtime/plan_validator.py — PlanValidator：ExecutionPlan 的确定性结构�
 
 from typing import Optional
 
-from runtime.models import ExecutionPlan
-
-# num_ccs 合法性档位（Manager 决策 7：1=简单 / 2=普通 / 3=重要 / 4=极高风险）
-_VALID_NUM_CCS = (1, 2, 3, 4)
+from runtime.models import NUM_CCS_TIERS, ExecutionPlan
 
 
 def validate_errors(
@@ -51,10 +48,10 @@ def validate_errors(
         # ---- config.num_ccs 合法性（Manager 的资源决策；此处仅做合法性校验） ----
         num_ccs = (step.config or {}).get("num_ccs")
         if num_ccs is not None:
-            if not isinstance(num_ccs, int) or num_ccs not in _VALID_NUM_CCS:
+            if not isinstance(num_ccs, int) or num_ccs not in NUM_CCS_TIERS:
                 errors.append(
                     f"{prefix} '{sid}': config.num_ccs must be an int in "
-                    f"{sorted(_VALID_NUM_CCS)} (got {num_ccs!r})"
+                    f"{sorted(NUM_CCS_TIERS)} (got {num_ccs!r})"
                 )
 
         # ---- exec_type ↔ role 一致性 ----

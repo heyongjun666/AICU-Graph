@@ -621,6 +621,64 @@ class TestWorkerRunFlush:
 
 
 # ============================================================================
+# 12b. Manager.run 失败路径 flush 兜底摄取
+# ============================================================================
+
+class _FailingPublishingStub:
+    """Stub AICU：先往节点 outbox 写一个事件，再抛异常。
+
+    模拟真实场景：Manager 在 review 阶段已经发布了协作事件，随后这一步失败。
+    """
+
+    def __init__(self, outbox: str):
+        self._outbox = outbox
+        self._written = False
+
+    def ask(self, prompt: str):
+        if not self._written:  # _call_aiCU_with_retry 会重试，只发一次事件
+            os.makedirs(self._outbox, exist_ok=True)
+            with open(os.path.join(self._outbox, "stub_evt.json"), "w", encoding="utf-8") as f:
+                json.dump({"content": "api_ready 本环节已就绪"}, f)
+            self._written = True
+        raise RuntimeError("boom")
+
+
+class TestManagerRunFailureFlush:
+    def test_failure_flushes_published_events(self, tmp_path):
+        """Manager 失败路径也要兜底摄取已发布事件。
+
+        回归钉：原先只有成功路径 flush，Manager 在 review 阶段发布后失败时，事件文件
+        会永久滞留在 outbox —— scheduler tick 只在存在 RUNNING 节点时扫描，node 一旦
+        转 FAILED 就再没人来摄取它。与 worker.py 成功/失败两条路径都 flush 对齐。
+        """
+        rt = _make_runtime(tmp_path, {"api_ready": ["frontend"]})
+        root_id = rt.submit_root_manager("app")
+        nodes = rt.inject_plan(root_id, ExecutionPlan(steps=[
+            _step("backend", {"events": {"publish": ["api_ready"]}}),
+            _step("frontend", {"events": {"subscribe": ["api_ready"]}}),
+        ]))
+        frontend = nodes[1]
+        # 停掉后台 tick：本测试只手动驱动 manager.run。理由同 TestWorkerRunFlush。
+        rt.scheduler.stop()
+
+        root = rt.graph.get_node(root_id)
+        outbox = os.path.join(rt.get_node_workspace(root_id), "events")
+        ctx = ExecutableContext(node=root, runtime=rt, config=root.config)
+        mgr = Manager(ctx, aicu_instance=_FailingPublishingStub(outbox))
+
+        assert mgr.run(ctx) == NodeStatus.FAILED
+
+        # 事件已被摄取进全局日志，发布文件已删除
+        events = [e for e in rt.agent_events.list_events() if "api_ready" in e.objective]
+        assert len(events) == 1
+        assert not os.path.exists(os.path.join(outbox, "stub_evt.json"))
+
+        # 并已由 Router 投递到订阅方 inbox
+        inbox = os.path.join(rt.get_node_workspace(frontend.id), "event_inbox")
+        assert os.path.isdir(inbox) and len(os.listdir(inbox)) == 1
+
+
+# ============================================================================
 # 13. Router 决策投递（V3.1 方案三 Node→Node 主链路）
 # ============================================================================
 

@@ -282,7 +282,7 @@ Shared FS（共享分区）是产物单一事实源。
 
 - `resolve_shared_workspace(workspace_root)` = `{workspace_root}/shared`：会话级单一根，所有节点自动挂载。
 - `resolve_partition(node.config)`：读 `_shared_workspace` / `_output_path` → 每节点写分区（`{shared_root}/{output_path}`）。
-- `_partition_of`：**先 realpath 再 commonpath 防目录穿越**，非法路径回退共享根。
+- `partition_of`：**先 realpath 再 commonpath 防目录穿越**，非法路径回退共享根。
 - 纯函数，无 I/O；被 worker 产物归一、Delivery、前端 API 共用。
 
 ### 6.10 CodeGraph 上下文（AICU_CODEGRAPH）
@@ -457,7 +457,7 @@ Shared FS（共享分区）是产物单一事实源。
 | `closed_loop.py` | 闭环台账：`build/write_closed_loop_report`（含 verdict/converged/escalation）、`build/write_deliverable_manifest`、VERDICT 块契约 |
 | `event_bus.py` | **SSE 层事件总线**（`SSEEvent` + 通配符订阅，供 SSEManager/Scheduler 用），与 `agent_events.py`（节点间 Agent 通信总线）是两条独立总线：前者管前端 SSE 推送，后者管 Agent 协作事件 |
 | `persistence.py` | `graph.json` 快照 save/load、graph_version 单调恢复 |
-| `workspace_resolver.py` | 共享工作区解析：`resolve_shared_workspace` / `resolve_partition` / `_partition_of`（realpath+commonpath 防穿越） |
+| `workspace_resolver.py` | 共享工作区解析：`resolve_shared_workspace` / `resolve_partition` / `partition_of`（realpath+commonpath 防穿越） |
 | `roles_manager.py` | 角色配置：扫描 YAML、`list_roles` / `get_role_schema` / `get_role` / `add_role` / `update_role` |
 | `skills_manager.py` | 技能目录扫描：`list_skills` / `get_skill` / `save_skill` |
 | `mcp_manager.py` | MCP server 注册表（仓库根 `mcp_servers.json`）：`load_registry` / `resolve_servers`；`McpServer` 中立表示；相对路径按仓库根解析 |

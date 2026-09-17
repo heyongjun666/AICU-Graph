@@ -33,8 +33,14 @@ def resolve_shared_workspace(workspace_root: str) -> str:
     return os.path.realpath(os.path.join(workspace_root, "shared"))
 
 
-def _partition_of(shared_root: str, output_path: str) -> str:
+def partition_of(shared_root: str, output_path: str) -> str:
     """纯函数：{shared_root}/{output_path}；空 output_path → 共享根本身；防穿越回退共享根。
+
+    与 ``resolve_partition`` 的分工：那个从节点 config 里读键，这个收**显式的**
+    (root, path) 两参数，供手上只有这两个值、拿不出 config dict 的调用方使用
+    （如 Runtime 注入 `_shared_workspace` 时、Manager 渲染子节点的 children_info 时）。
+    本函数是模块公开面的第二半 —— 两处调用方都在别的模块，写成下划线私有名会让
+    「能不能用」变成靠 grep 猜的事。
 
     Args:
         shared_root: 会话共享根。
@@ -73,4 +79,4 @@ def resolve_partition(config: dict) -> str:
     shared_root = config.get("_shared_workspace")
     if not shared_root:
         return ""
-    return _partition_of(shared_root, config.get("_output_path") or "")
+    return partition_of(shared_root, config.get("_output_path") or "")

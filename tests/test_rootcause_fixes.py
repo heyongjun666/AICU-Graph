@@ -320,6 +320,52 @@ class TestWriteReviewOutputContract:
         assert "**Summary**: All good" in text
 
 
+class TestWriteReviewOutputWorkspaceFallback:
+    """无 runtime.get_node_workspace 时的 workspace 兜底分支。
+
+    Gateway 置 `get_node_workspace = None` 让 `callable(...)` 为假，走到 else 分支
+    —— 这是 config.workspace_dir 唯一被读取的路径，原有测试都走 getter 分支没覆盖到。
+    """
+
+    def _ctx(self, tmp_path, node, workspace_dir):
+        gw = _Gateway(str(tmp_path))
+        gw.add_node(node)
+        gw.get_node_workspace = None  # type: ignore[method-assign]
+        return ExecutableContext(node=node, runtime=gw,
+                                 config={"workspace_dir": workspace_dir, "mode": "stub"})
+
+    def test_workspace_dir_none_falls_back_instead_of_typeerror(self, tmp_path, monkeypatch):
+        """回归钉：`workspace_dir` 存在但为 None 时，dict.get 的默认值不生效。
+
+        旧写法 `ctx.config.get("workspace_dir", os.getcwd())` 会返回 None，
+        紧接着 `os.path.join(None, filename)` 直接 TypeError，整个 review 落盘失败。
+        """
+        monkeypatch.chdir(tmp_path)  # 兜底路径基于 cwd，隔离到 tmp_path
+        node = _make_manager()
+        ctx = self._ctx(tmp_path, node, None)
+        mgr = Manager(context=ctx, aicu_instance=_Stub({}))
+
+        path = mgr._write_review_output(
+            ctx, {"audit_passed": True, "summary": "ok"}, {"c1": "..."}, 0,
+        )
+        assert path == os.path.join(str(tmp_path), "workspaces", node.id, "review_v0.md")
+        assert os.path.exists(path)
+
+    def test_workspace_dir_value_still_wins(self, tmp_path):
+        """显式配置的 workspace_dir 仍然生效（兜底不得把它顶掉）。"""
+        node = _make_manager()
+        custom = tmp_path / "custom"
+        custom.mkdir()
+        ctx = self._ctx(tmp_path, node, str(custom))
+        mgr = Manager(context=ctx, aicu_instance=_Stub({}))
+
+        path = mgr._write_review_output(
+            ctx, {"audit_passed": True, "summary": "ok"}, {"c1": "..."}, 0,
+        )
+        assert path == os.path.join(str(custom), "review_v0.md")
+        assert os.path.exists(path)
+
+
 # ============================================================================
 # Fix 2a: submit_fix_plan 补父链回退（回归根因 2 — root 卡死 WAITING）
 # ============================================================================

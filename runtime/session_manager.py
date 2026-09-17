@@ -15,6 +15,7 @@ from typing import Any, Optional
 from executables.registry import ExecutableRegistry
 from runtime.credentials import CredentialStore, set_credential_store
 from runtime.event_bus import SSEEvent
+from runtime.models import NUM_CCS_TIERS
 from runtime.persistence import Persistence
 from runtime.runtime import Runtime
 from runtime.sse_manager import SSEManager
@@ -59,9 +60,11 @@ _GLOBAL_CONFIG_DEFAULTS = {
     "default_num_ccs": 1,
 }
 
-# 单节点 agent（CC）数量的合法区间，与 plan_validator._VALID_NUM_CCS 对齐。
-_MIN_NUM_CCS = 1
-_MAX_NUM_CCS = 4
+# 单节点 agent（CC）数量的合法区间 = plan_validator 校验用的同一份业务档位
+# （models.NUM_CCS_TIERS）。原先这里另写一遍 1/4，靠注释说明「与 plan_validator 对齐」——
+# 改档位时注释不会报错，两边会静默分叉。
+_MIN_NUM_CCS = min(NUM_CCS_TIERS)
+_MAX_NUM_CCS = max(NUM_CCS_TIERS)
 
 
 def _now() -> str:

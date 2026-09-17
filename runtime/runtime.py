@@ -24,6 +24,7 @@ from runtime.event_bus import EventBus, SSEEvent
 from runtime.graph import Graph
 from runtime.models import (
     MAX_TASK_LENGTH,
+    NUM_CCS_TIERS,
     Edge,
     EdgeType,
     ExecutionPlan,
@@ -39,7 +40,7 @@ from runtime.models import (
 from runtime.persistence import Persistence
 from runtime.planner import PlanValidationError, Planner
 from runtime.scheduler import Scheduler
-from runtime.workspace_resolver import _partition_of, resolve_shared_workspace
+from runtime.workspace_resolver import partition_of, resolve_shared_workspace
 
 from runtime.shared_io import FRAMEWORK_DIR_NAMES, mime_type_for, previewable_path
 
@@ -399,7 +400,7 @@ class Runtime(RuntimeGateway, SchedulerDelegate):
         prepared["_output_path"] = output_path
         shared_root = self.get_shared_workspace()
         prepared["_shared_workspace"] = shared_root
-        os.makedirs(_partition_of(shared_root, output_path), exist_ok=True)
+        os.makedirs(partition_of(shared_root, output_path), exist_ok=True)
 
         # ---- Event Bus 配置归一化 ----
         # config.events = { publish: [...], subscribe: [...] }，均为 list[str] 非空字符串。
@@ -420,14 +421,16 @@ class Runtime(RuntimeGateway, SchedulerDelegate):
     def _clamp_num_ccs(value: Optional[int]) -> int:
         """把 num_ccs 收敛到合法区间；None/非法值回退为 1。
 
-        合法性依据 plan_validator._VALID_NUM_CCS = (1, 2, 3, 4)。这里的注入发生在
-        plan 校验之后，属于校验盲区，必须自行兜底：num_ccs=0 会让 AICU 建出零个 CC。
+        区间从 ``models.NUM_CCS_TIERS`` 派生，不写死 1/4：这里的注入发生在 plan 校验
+        之后，属于校验盲区，必须自行兜底（num_ccs=0 会让 AICU 建出零个 CC）；
+        而两处各写一份区间的话，改档位时会漏掉这里 —— 表现是「Manager 按新档位产出、
+        运行时被悄悄压回旧上界」，且不报错。
         """
         try:
             parsed = int(value) if value is not None else 1
         except (TypeError, ValueError):
             parsed = 1
-        return min(4, max(1, parsed))
+        return min(max(NUM_CCS_TIERS), max(min(NUM_CCS_TIERS), parsed))
 
     def _apply_num_ccs_policy(self, config: Optional[dict]) -> dict:
         """开关关闭时把所有节点的 num_ccs 统一钉死为 ``default_num_ccs``。

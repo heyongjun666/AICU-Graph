@@ -64,8 +64,17 @@ MAX_TASK_LENGTH = 5000
 # 有意不同（HTTPException vs ValueError），共用的是集合与错误文案模板。
 CONFIG_WHITELIST = {"num_ccs", "model", "skills", "audit_rounds", "max_iterations"}
 
+# num_ccs 的**宽上界**（构造期兜底，防明显非法值建出 Step）。它与下面的
+# NUM_CCS_TIERS 不是一回事，两档并存是**有意设计**，不要合并：
+# tests/test_plan_validator.py 正是靠「num_ccs=5 能构造成功、再被 validator 判错」成立。
 _MIN_NUM_CCS = 1
 _MAX_NUM_CCS = 10
+
+# num_ccs 的**业务档位**（Manager 决策 7：1=简单 / 2=普通 / 3=重要 / 4=极高风险）。
+# plan 校验、运行时收敛、会话设置三处都读这一份 —— 各写一遍的话，改档位时
+# 漏掉的那处仍在按旧档位截断，表现为「Manager 按新档位产出、运行时悄悄压回 4」。
+NUM_CCS_TIERS = (1, 2, 3, 4)
+
 _MIN_AUDIT_ROUNDS = 0
 _MAX_AUDIT_ROUNDS = 10
 # Node log 最大条目数

@@ -23,6 +23,7 @@ from executables.registry import ExecutableRegistry
 from runtime.event_bus import EventBus, SSEEvent
 from runtime.graph import Graph
 from runtime.models import (
+    MAX_TASK_LENGTH,
     Edge,
     EdgeType,
     ExecutionPlan,
@@ -31,6 +32,9 @@ from runtime.models import (
     Node,
     NodeStatus,
     Step,
+    non_whitelisted_config_keys,
+    non_whitelisted_config_message,
+    task_too_long_message,
 )
 from runtime.persistence import Persistence
 from runtime.planner import PlanValidationError, Planner
@@ -48,8 +52,8 @@ logger = logging.getLogger(__name__)
 MANUAL_CONTINUE_BUDGET = 3
 
 # 节点级 Revise（Manager/Worker 共用）的公共校验常量。
-_REVISE_MAX_TASK_LENGTH = 5000
-_REVISE_ALLOWED_CONFIG = {"num_ccs", "model", "skills", "audit_rounds", "max_iterations"}
+# 上限与白名单本身在 runtime/models.py（HTTP 边界与 scheduler 也读那一份），
+# 这里只保留 Revise 特有的状态集合。
 _REVISABLE_STATUSES = (
     NodeStatus.COMPLETED,
     NodeStatus.FAILED,
@@ -1462,17 +1466,11 @@ class Runtime(RuntimeGateway, SchedulerDelegate):
         注意：须在调用方持有 self._lock 的上下文中调用，与既有
         revise_manager_node 的加锁范围保持一致。
         """
-        if len(task) > _REVISE_MAX_TASK_LENGTH:
-            raise ValueError(
-                f"Task exceeds maximum length of {_REVISE_MAX_TASK_LENGTH} "
-                f"characters (got {len(task)})"
-            )
-        extra = {k for k in (config or {}) if k not in _REVISE_ALLOWED_CONFIG}
+        if len(task) > MAX_TASK_LENGTH:
+            raise ValueError(task_too_long_message(len(task)))
+        extra = non_whitelisted_config_keys(config)
         if extra:
-            raise ValueError(
-                f"Config contains non-whitelisted fields: {sorted(extra)}. "
-                f"Allowed: {sorted(_REVISE_ALLOWED_CONFIG)}"
-            )
+            raise ValueError(non_whitelisted_config_message(extra))
         node = self.graph.get_node(node_id)
         if node is None:
             raise ValueError(f"Node '{node_id}' not found")

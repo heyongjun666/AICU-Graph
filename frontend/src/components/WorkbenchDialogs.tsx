@@ -5,6 +5,7 @@ import { getRoles, getSkills } from '../utils/api';
 import { useAvailableClis } from '../hooks/useAvailableClis';
 import { useI18n, translate } from '../i18n';
 import SearchCheckboxPicker from './SearchCheckboxPicker';
+import { CliOptions } from './CliOptions';
 
 interface NewSessionDialogProps {
   open: boolean;
@@ -242,7 +243,7 @@ export const NewNodeDialog: React.FC<NodeDialogProps> = ({
             setParentId(nextParentId);
             setDependencies((current) => current.filter((id) => id !== nextParentId));
           }}><option value="">{t('dialog.noParent')}</option>{parentCandidates.map((candidate) => <option key={candidate.id} value={candidate.id}>{candidate.label}</option>)}</select></label>
-          <label>{t('dialog.cli')}<select value={cliName} onChange={(event) => setCliName(event.target.value as NodeConfig['cli_name'])}><option value="">{t('settings.autoDetect')}{defaultCli ? ` (${defaultCli})` : ''}</option>{clis.map((cli) => <option key={cli.id} value={cli.id}>{cli.display_name}{cli.installed ? '' : t('settings.notInstalled')}{cli.supports_mcp ? '' : t('settings.mcpNotWired')}</option>)}</select></label>
+          <label>{t('dialog.cli')}<select value={cliName} onChange={(event) => setCliName(event.target.value as NodeConfig['cli_name'])}><CliOptions clis={clis} defaultCli={defaultCli} /></select></label>
         </div>
         <label>{t('dialog.task')}<textarea autoFocus value={task} onChange={(event) => setTask(event.target.value)} rows={5} placeholder={t('dialog.taskPlaceholder')} /></label>
         <div className="node-dialog-section"><div className="node-dialog-section-title">{t('dialog.dependencies')}</div>{candidateStatus === 'loading' && <div className="picker-status">{t('dialog.loadingCandidates')}</div>}{candidateStatus === 'error' && <div className="picker-status is-error">{candidateError || t('dialog.candidatesLoadFailed')}</div>}<SearchCheckboxPicker

@@ -33,8 +33,10 @@ import {
   reviseSessionNode,
   updateSessionNode,
 } from '../utils/api';
+import { formatBytes } from '../utils/format';
 import { useI18n } from '../i18n';
 import { useAvailableClis } from '../hooks/useAvailableClis';
+import { CliOptions } from './CliOptions';
 
 type Tab = 'overview' | 'logs' | 'artifact' | 'events';
 
@@ -52,12 +54,6 @@ const tabs: Array<{ id: Tab; label: string; icon: React.ReactNode }> = [
   { id: 'artifact', label: 'inspector.output', icon: <PackageOpen size={15} /> },
   { id: 'events', label: 'inspector.event', icon: <Zap size={15} /> },
 ];
-
-function formatBytes(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-}
 
 const NodeInspector: React.FC = () => {
   const { t } = useI18n();
@@ -568,7 +564,7 @@ const NodeInspector: React.FC = () => {
       {editing && (
         <div className="inspector-editor">
           <div className="dialog-header"><h2>{t('inspector.editNode')}</h2><button className="icon-button" onClick={() => setEditing(false)}><X size={17} /></button></div>
-          <div className="form-grid two-columns"><label>{t('node.role')}<input value={role} onChange={(event) => setRole(event.target.value)} /></label><label>{t('dialog.cli')}<select value={cliName} onChange={(event) => setCliName(event.target.value as NodeConfig['cli_name'])}><option value="">{t('settings.autoDetect')}{defaultCli ? ` (${defaultCli})` : ''}</option>{clis.map((cli) => <option key={cli.id} value={cli.id}>{cli.display_name}{cli.installed ? '' : t('settings.notInstalled')}{cli.supports_mcp ? '' : t('settings.mcpNotWired')}</option>)}{cliName && !clis.some((cli) => cli.id === cliName) ? <option value={cliName}>{cliName}</option> : null}</select></label></div>
+          <div className="form-grid two-columns"><label>{t('node.role')}<input value={role} onChange={(event) => setRole(event.target.value)} /></label><label>{t('dialog.cli')}<select value={cliName} onChange={(event) => setCliName(event.target.value as NodeConfig['cli_name'])}><CliOptions clis={clis} defaultCli={defaultCli} />{cliName && !clis.some((cli) => cli.id === cliName) ? <option value={cliName}>{cliName}</option> : null}</select></label></div>
           <label>{t('dialog.task')}<textarea value={task} onChange={(event) => setTask(event.target.value)} rows={7} /></label>
           <div className="form-grid two-columns"><label>{t('dialog.model')}<input value={model} onChange={(event) => setModel(event.target.value)} placeholder={t('dialog.useSessionDefault')} /></label><label>{t('dialog.apiKeyEnv')}<input value={apiKeyEnv} onChange={(event) => setApiKeyEnv(event.target.value)} placeholder="ANTHROPIC_API_KEY" /></label><label className="full-field">{t('dialog.apiBaseUrl')}<input value={apiBaseUrl} onChange={(event) => setApiBaseUrl(event.target.value)} /></label><label className="full-field">{t('inspector.skillIds')}<input value={skillIds} onChange={(event) => setSkillIds(event.target.value)} placeholder="skill-one, focused-review" /></label></div>
           <label className="toggle-field"><input type="checkbox" checked={skipPermissions} onChange={(event) => setSkipPermissions(event.target.checked)} /><span>{t('dialog.runWithoutPerms')}</span></label>

@@ -19,6 +19,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from runtime.models import LogLevel
+from runtime.repo_paths import REPO_ROOT
 from runtime.role_pools_manager import RolePoolsManager
 from runtime.roles_manager import RolesManager
 from runtime.server import _sse_stream
@@ -137,7 +138,7 @@ def create_session_app(
 ) -> FastAPI:
     app = FastAPI(title="Execution Graph Workbench API", version="2.0")
     app.add_middleware(LanguageMiddleware)
-    project_root = os.path.dirname(os.path.dirname(__file__))
+    project_root = REPO_ROOT
     roles_manager = roles_manager or RolesManager(os.path.join(project_root, "roles"))
     skills_manager = skills_manager or SkillsManager(
         os.path.join(project_root, "skills"),

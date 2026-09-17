@@ -19,9 +19,6 @@ from runtime.repo_paths import REPO_ROOT, resolve_repo_relative
 # sentinel for "调用方未传此参数"，与 None（可能是有效值，如 output_file=null）区分
 _UNSET = object()
 
-# description 提取最大长度（与 roles_manager.py 保持一致）
-_DESC_MAX_LEN = 80
-
 # Manager 角色的固定「组织构建者」人格骨架：所有 Manager 无条件前置注入，保证用户覆盖
 # role_md 时不会丢失组织节点能力（Identity / Prime Directive / Dynamic Tree Growth /
 # Workflow A-H）。role_md 字段现在只承载「领域角色」部分（如「项目组长，负责组织各成员工作」），

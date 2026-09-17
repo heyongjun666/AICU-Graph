@@ -7,7 +7,6 @@ runtime/server.py — FastAPI HTTP REST API + SSE 端点
 """
 
 import logging
-import os
 import time
 from typing import Any, Optional
 
@@ -15,19 +14,21 @@ from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import PlainTextResponse, StreamingResponse
 from pydantic import BaseModel
 
-from runtime.models import ExecutionPlan, LogLevel, NodeStatus, Step
+from runtime.models import (
+    MAX_TASK_LENGTH,
+    ExecutionPlan,
+    LogLevel,
+    NodeStatus,
+    Step,
+    non_whitelisted_config_keys,
+    non_whitelisted_config_message,
+    task_too_long_message,
+)
+from runtime.repo_paths import REPO_ROOT
 from runtime.roles_manager import RolesManager
 from runtime.sse_manager import SSEManager, format_sse
 
 logger = logging.getLogger(__name__)
-
-# ---------------------------------------------------------------------------
-# 配置白名单
-# ---------------------------------------------------------------------------
-CONFIG_WHITELIST = {"num_ccs", "model", "skills", "audit_rounds", "max_iterations"}
-
-# Task 最大长度（与前端 constants.ts 保持一致）
-_MAX_TASK_LENGTH = 5000
 
 # ---------------------------------------------------------------------------
 # Pydantic 请求模型
@@ -76,23 +77,15 @@ class CreateRoleRequest(BaseModel):
 
 def validate_config_whitelist(config: dict) -> None:
     """校验 config 只包含白名单字段，否则抛 422。"""
-    extra = {k for k in config if k not in CONFIG_WHITELIST}
+    extra = non_whitelisted_config_keys(config)
     if extra:
-        raise HTTPException(
-            status_code=422,
-            detail=f"Config contains non-whitelisted fields: {sorted(extra)}. "
-                   f"Allowed: {sorted(CONFIG_WHITELIST)}",
-        )
+        raise HTTPException(status_code=422, detail=non_whitelisted_config_message(extra))
 
 
 def validate_task_length(task: str) -> None:
     """校验 task 不超最大长度，否则抛 422。"""
-    if len(task) > _MAX_TASK_LENGTH:
-        raise HTTPException(
-            status_code=422,
-            detail=f"Task exceeds maximum length of {_MAX_TASK_LENGTH} characters "
-                   f"(got {len(task)})",
-        )
+    if len(task) > MAX_TASK_LENGTH:
+        raise HTTPException(status_code=422, detail=task_too_long_message(len(task)))
 
 
 # ---------------------------------------------------------------------------
@@ -117,7 +110,7 @@ def create_app(runtime: Any, sse_manager: SSEManager) -> FastAPI:
     app.state.sse_manager = sse_manager
 
     # 角色配置管理器（roles/ 目录相对于项目根）
-    roles_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "roles")
+    roles_dir = str(REPO_ROOT / "roles")
     roles_manager = RolesManager(roles_dir)
 
     # ====================================================================

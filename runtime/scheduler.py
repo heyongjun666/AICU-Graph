@@ -52,7 +52,7 @@ def _shutdown_all_schedulers() -> None:
 
 atexit.register(_shutdown_all_schedulers)
 from runtime.graph import Graph
-from runtime.models import ManagerPhase, Node, NodeStatus, RoutingDecision
+from runtime.models import MAX_TASK_LENGTH, ManagerPhase, Node, NodeStatus, RoutingDecision
 from runtime.state_machine import StateMachine
 
 if TYPE_CHECKING:
@@ -62,9 +62,6 @@ logger = logging.getLogger(__name__)
 
 # Tick 循环间隔（秒）
 _TICK_INTERVAL = 0.5
-
-# Revise 增量任务最大长度（与 runtime/runtime.py 的 _REVISE_MAX_TASK_LENGTH 保持一致）
-_REVISE_MAX_TASK_LENGTH = 5000
 
 # Watchdog 配置
 _MAX_WATCHDOG_RETRIES = 3
@@ -1350,7 +1347,7 @@ class Scheduler:
     ) -> None:
         """Worker 失败自动重试：走 Revise 续跑而非全量重跑。
 
-        构造失败反馈增量任务（截断 ≤ _REVISE_MAX_TASK_LENGTH），调用
+        构造失败反馈增量任务（截断 ≤ MAX_TASK_LENGTH），调用
         runtime.revise_worker_node → _reactivate_reused_worker：
         - 保留 Worker._aicu_cache（resume 原 CC 会话）与磁盘产物
         - 节点转 WAITING + pending_revise=True，携带失败原因增量修复
@@ -1371,8 +1368,8 @@ class Scheduler:
             "请基于已保留的会话与现有产出，针对失败原因修复后继续完成原任务，"
             "不要重头开始。"
         ).format(error=error_message)
-        if len(revise_task) > _REVISE_MAX_TASK_LENGTH:
-            revise_task = revise_task[:_REVISE_MAX_TASK_LENGTH]
+        if len(revise_task) > MAX_TASK_LENGTH:
+            revise_task = revise_task[:MAX_TASK_LENGTH]
 
         revise_fn = getattr(self.runtime_gateway, "revise_worker_node", None)
         if revise_fn is None:

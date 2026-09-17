@@ -40,6 +40,7 @@ import uvicorn
 from executables.manager import Manager
 from executables.registry import ExecutableRegistry
 from executables.worker import Worker
+from runtime.repo_paths import REPO_ROOT
 from runtime.session_manager import SessionManager
 from runtime.session_server import create_session_app
 
@@ -90,7 +91,7 @@ def main():
     registry.register("worker", Worker)
 
     # 2. 恢复并管理所有独立会话 Runtime
-    roles_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "roles")
+    roles_dir = str(REPO_ROOT / "roles")
     session_manager = SessionManager(registry=registry, roles_dir=roles_dir)
 
     # 3. 创建多会话 FastAPI 应用

@@ -19,7 +19,11 @@ from typing import Any, Optional
 
 from executables.base import Executable, ExecutableContext
 from runtime.agent_events import event_queue_dirs
-from runtime.context import build_codegraph_context, notify_artifact_updated
+from runtime.context import (
+    build_codegraph_context,
+    build_codegraph_guidance,
+    notify_artifact_updated,
+)
 from runtime.models import NodeStatus, ErrorObject, LogEntry, LogLevel
 from runtime.workspace_resolver import resolve_partition
 
@@ -507,7 +511,7 @@ class Worker(Executable):
             parts.append(event_inbox_block)
 
         # ----- 代码图谱上下文（CodeGraph 动态块；未启用时退回静态引导） -----
-        cg = codegraph_block or Worker._build_codegraph_guidance()
+        cg = codegraph_block or build_codegraph_guidance()
         if cg:
             parts.append(cg)
 
@@ -537,20 +541,6 @@ class Worker(Executable):
         if not parts:
             return ""
         return "\n\n".join(parts) + "\n\n---\n"
-
-    @staticmethod
-    def _build_codegraph_guidance() -> str:
-        """构建 CodeGraph 引导块（`AICU_CODEGRAPH=1` 才出现，默认关字节级不变；
-        Phase 2 将替换为 Resolver 动态上下文）。"""
-        if os.environ.get("AICU_CODEGRAPH") != "1":
-            return ""
-        return (
-            "## 🔍 代码图谱上下文 (CodeGraph)\n\n"
-            "项目已建立 CodeGraph 代码图谱。跨文件调用链、影响面、符号定义/调用关系、文件结构，\n"
-            "优先用 /codegraph 命令查询（如 `codegraph node <symbol>`、`codegraph callers <symbol>`、\n"
-            "`codegraph impact <symbol>`、`codegraph files`）。\n"
-            "图谱用于定位代码，**仍需用 Read 读取真实文件确认内容**——图谱描述的是结构，不能替代阅读源码语义。"
-        )
 
     @staticmethod
     def _build_shared_workspace_instructions(node: Any) -> str:

@@ -34,7 +34,11 @@ from runtime.closed_loop import (
     write_closed_loop_report,
     write_deliverable_manifest,
 )
-from runtime.context import build_codegraph_context, build_review_context
+from runtime.context import (
+    build_codegraph_context,
+    build_codegraph_guidance,
+    build_review_context,
+)
 from runtime.shared_io import build_dir_index as _build_dir_index
 from runtime.workspace_resolver import _partition_of
 
@@ -1082,7 +1086,7 @@ class Manager(Executable):
         # 共享工作区 / 事件协作 / depends_on 正交等协议均由 roles/Manager/*.yaml 的
         # generate_instruction 注入（aicu 在每次 ask 时统一注入），此处不再重复维护。
         # 代码图谱上下文：Resolver 动态块（AICU_CODEGRAPH=1 且 real 模式）；未启用时退回静态引导。
-        codegraph_block = build_codegraph_context(ctx.node, ctx) or Manager._codegraph_guidance_block()
+        codegraph_block = build_codegraph_context(ctx.node, ctx) or build_codegraph_guidance()
         # B3：被路由重新激活且携带事件上下文时，注入事件上下文供决策。
         # 方案三：协作意图由 Event.objective 承载，Manager 收到事件后自行理解。
         collab_block = self._build_event_context_block(ctx)
@@ -1386,19 +1390,6 @@ class Manager(Executable):
         return "\n".join(lines)
 
     @staticmethod
-    def _codegraph_guidance_block() -> str:
-        """构建 CodeGraph 引导块（`AICU_CODEGRAPH=1` 才出现，默认关字节级不变；
-        Phase 2 将替换为 Resolver 动态上下文）。"""
-        if os.environ.get("AICU_CODEGRAPH") != "1":
-            return ""
-        return (
-            "## 🔍 代码图谱上下文 (CodeGraph)\n\n"
-            "项目已建立 CodeGraph 代码图谱。跨文件调用链、影响面、符号定义/调用关系、文件结构，\n"
-            "优先用 /codegraph 命令查询（如 `codegraph node <symbol>`、`codegraph callers <symbol>`、\n"
-            "`codegraph impact <symbol>`、`codegraph files`）。\n"
-            "图谱用于定位代码，**仍需用 Read 读取真实文件确认内容**——图谱描述的是结构，不能替代阅读源码语义。"
-        )
-    @staticmethod
     def _truncate(text: str, limit: int = 140) -> str:
         """截断文本到指定长度并加省略号."""
         s = (text or "").strip().replace("\n", " ")
@@ -1660,7 +1651,7 @@ class Manager(Executable):
 
         # 子节点代码影响面摘要（CodeGraph 组图，real 模式 + flag 开才注入；未启用时退回静态引导）。
         # 当前 review 完全缺失此信息，纯增量，不影响 `## Review Task` 首行承重契约。
-        codegraph_block = build_review_context(ctx, children_info) or Manager._codegraph_guidance_block()
+        codegraph_block = build_review_context(ctx, children_info) or build_codegraph_guidance()
         if codegraph_block:
             parts.append(codegraph_block)
 

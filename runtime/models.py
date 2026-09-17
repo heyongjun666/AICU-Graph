@@ -55,7 +55,15 @@ class ManagerPhase(str, Enum):
 # Constants for validation
 # ============================================================================
 
-_MAX_TASK_LENGTH = 5000
+# 任务描述长度上限。三个入口共用这个值，但**处理策略有意不同**：HTTP 边界拒 422、
+# Revise 校验抛 ValueError、自动重试构造增量任务时截断。各写一遍数字的话，改上限时
+# 漏掉的那条路径表现是「同一份任务一个入口收、一个入口拒」，且不报错。
+MAX_TASK_LENGTH = 5000
+
+# 节点 config 允许出现的键。同样被 HTTP 边界与 Revise 路径共用；两处抛的异常类型
+# 有意不同（HTTPException vs ValueError），共用的是集合与错误文案模板。
+CONFIG_WHITELIST = {"num_ccs", "model", "skills", "audit_rounds", "max_iterations"}
+
 _MIN_NUM_CCS = 1
 _MAX_NUM_CCS = 10
 _MIN_AUDIT_ROUNDS = 0
@@ -64,6 +72,24 @@ _MAX_AUDIT_ROUNDS = 10
 _MAX_LOG_ENTRIES = 10000
 # 合法的日志级别集合（用于 LogEntry.__post_init__ 校验）
 _VALID_LOG_LEVELS = ("DEBUG", "INFO", "WARN", "ERROR")
+
+
+def non_whitelisted_config_keys(config: Optional[dict]) -> set:
+    """返回 config 里不在 ``CONFIG_WHITELIST`` 中的键。空/None 视作无越界键。"""
+    return {k for k in (config or {}) if k not in CONFIG_WHITELIST}
+
+
+def task_too_long_message(length: int) -> str:
+    """超长 task 的统一文案；调用方各自决定抛哪种异常。"""
+    return f"Task exceeds maximum length of {MAX_TASK_LENGTH} characters (got {length})"
+
+
+def non_whitelisted_config_message(extra: set) -> str:
+    """非法 config 键的统一文案；调用方各自决定抛哪种异常。"""
+    return (
+        f"Config contains non-whitelisted fields: {sorted(extra)}. "
+        f"Allowed: {sorted(CONFIG_WHITELIST)}"
+    )
 
 
 # ============================================================================
@@ -366,14 +392,14 @@ class Step:
     def __post_init__(self):
         """校验字段约束。"""
         # Step.task maxLength=5000 — 超长时截断并标记警告
-        if len(self.task) > _MAX_TASK_LENGTH:
+        if len(self.task) > MAX_TASK_LENGTH:
             warnings.warn(
-                f"Step.task exceeds maximum length of {_MAX_TASK_LENGTH} "
-                f"(got {len(self.task)} characters); truncating to {_MAX_TASK_LENGTH}.",
+                f"Step.task exceeds maximum length of {MAX_TASK_LENGTH} "
+                f"(got {len(self.task)} characters); truncating to {MAX_TASK_LENGTH}.",
                 UserWarning,
                 stacklevel=2,
             )
-            self.task = self.task[:_MAX_TASK_LENGTH]
+            self.task = self.task[:MAX_TASK_LENGTH]
 
         # config.num_ccs 范围 1-10
         num_ccs = self.config.get("num_ccs")

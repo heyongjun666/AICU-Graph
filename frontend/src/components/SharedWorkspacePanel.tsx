@@ -10,6 +10,7 @@ import {
 } from 'lucide-react';
 import { OutputEntry, OutputFile, OutputListing } from '../types';
 import { listSessionShared, readSessionSharedFile } from '../utils/api';
+import { formatBytes } from '../utils/format';
 import { useI18n } from '../i18n';
 
 interface SharedWorkspacePanelProps {
@@ -22,12 +23,6 @@ interface SharedWorkspacePanelProps {
 
 const MIN_WIDTH = 240;
 const MAX_WIDTH = 720;
-
-function formatBytes(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-}
 
 /**
  * SharedWorkspacePanel — 会话级「共享 workspace」停靠面板。

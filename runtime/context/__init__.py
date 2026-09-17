@@ -59,6 +59,27 @@ def notify_artifact_updated(shared_workspace: str) -> None:
         logger.warning("mark_stale failed for %s", shared_workspace, exc_info=True)
 
 
+def build_codegraph_guidance() -> str:
+    """静态 CodeGraph 引导块：告诉节点「有图谱可用、怎么查」。
+
+    与 ``build_codegraph_context`` 的分工：那个是 Resolver 动态裁出的**实际上下文**
+    （依赖产出清单 + 项目图查询结果），这个是它拿不出内容时的**兜底说明**，两者
+    在 Worker/Manager 里都是 ``动态 or 静态`` 的取值关系。放在本模块，是因为
+    「CodeGraph 只通过本模块进 Runtime」——引导文案也是 CodeGraph 的一部分，
+    散在 Executable 里会让改文案漏掉一处，出现两个节点类型说法不一致。
+    flag 关时返回 ""（默认关字节级不变）。
+    """
+    if not _enabled():
+        return ""
+    return (
+        "## 🔍 代码图谱上下文 (CodeGraph)\n\n"
+        "项目已建立 CodeGraph 代码图谱。跨文件调用链、影响面、符号定义/调用关系、文件结构，\n"
+        "优先用 /codegraph 命令查询（如 `codegraph node <symbol>`、`codegraph callers <symbol>`、\n"
+        "`codegraph impact <symbol>`、`codegraph files`）。\n"
+        "图谱用于定位代码，**仍需用 Read 读取真实文件确认内容**——图谱描述的是结构，不能替代阅读源码语义。"
+    )
+
+
 def build_codegraph_context(node, ctx) -> str:
     """Worker/Manager 开工前的代码图谱上下文（Push）。禁用/失败返回 ""。"""
     if not _enabled():
@@ -220,6 +241,7 @@ def _build_project_block(task: str, role: str):
 
 __all__ = [
     "build_codegraph_context",
+    "build_codegraph_guidance",
     "build_review_context",
     "notify_artifact_updated",
     "GroupGraphState",

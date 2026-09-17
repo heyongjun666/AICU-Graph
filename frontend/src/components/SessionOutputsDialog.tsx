@@ -9,18 +9,13 @@ import {
 } from 'lucide-react';
 import { OutputEntry, OutputFile, OutputListing } from '../types';
 import { listSessionShared, readSessionSharedFile } from '../utils/api';
+import { formatBytes } from '../utils/format';
 import { useI18n } from '../i18n';
 
 interface SessionOutputsDialogProps {
   open: boolean;
   sessionId: string | null;
   onClose: () => void;
-}
-
-function formatBytes(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
 /**

@@ -5,10 +5,14 @@
 """
 import pytest
 
+from pathlib import Path
+
 from runtime.mcp_client import McpProbeError, probe_server, probe_servers
 from runtime.mcp_manager import McpServer
 
-ECHO_ARGS = ["tests/mcp_echo_server.py"]
+# 绝对路径：相对写法 "tests/mcp_echo_server.py" 是相对 **cwd** 解析的，
+# 从别的目录跑 pytest 就会变成「找不到文件」，看上去像 MCP 预检坏了。
+ECHO_ARGS = [str(Path(__file__).resolve().parent / "mcp_echo_server.py")]
 
 
 def _echo_server(**overrides) -> McpServer:

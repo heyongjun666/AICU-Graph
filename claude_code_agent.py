@@ -44,7 +44,7 @@ def detect_cli() -> str:
     return detect_default()
 
 
-def _drop_transient(paths: list) -> None:
+def _drop_transient(paths: list, stop=None) -> None:
     """删掉随 CLI 进程起落的临时配置文件（见 ``CliAdapter.mcp_workspace_files``）。
 
     为什么非删不可：这类文件只对「本次 CLI 进程」有意义，留在 workspace 里会被
@@ -55,12 +55,36 @@ def _drop_transient(paths: list) -> None:
     顺手删空目录：``.qwen/`` 这种空壳虽然收文件时看不见（``is_file()`` 会挡掉），
     但会在产物目录里留下没有解释的残迹。``rmdir`` 对非空目录抛 ``OSError``，正好
     用来表达「里面还有别人的东西，别动」—— 所以两种失败都安静吞掉。
+
+    :param stop: 向上删空目录的**边界（不含）**，通常传 workspace 根。配置文件不止
+        一层深时（比如某个 CLI 要 ``<dir>/<sub>/config.json``）只删最内层会剩下
+        ``<dir>/<sub>/`` 和 ``<dir>/`` 两个空壳，而空壳正是这个函数要消灭的东西。
+        **workspace 本身永远不会被删** —— 循环在 ``parent == stop`` 时停下。
+        ``None`` = 调用方没给边界，只删一层（保持老行为）：没有边界还往上爬，
+        等于让一次配置文件的清理波及整条目录链。
+
+        当前接线的 CLI 里没有一个用到多层路径（agy 的 ``.agents/plugins/aicu/`` 是
+        当初写这版的起因，但那一版最终没接 —— 见 AntigravityAdapter），所以这一路
+        对现有 CLI 是行为等价的；留着是因为「配置文件的深度」是 adapter 的自由，
+        而少删一层是个只在产物目录里才看得见的缺陷。
     """
     for path in paths or []:
         try:
             path = Path(path)
             path.unlink(missing_ok=True)
-            path.parent.rmdir()
+            if stop is None:
+                path.parent.rmdir()
+                continue
+            boundary = Path(stop)
+            # stop 不在本文件的目录链上时退化成单层：沿着一条无关的目录链向上 rmdir
+            # 是纯粹的误伤，宁可留着空目录。
+            if boundary not in path.parents:
+                path.parent.rmdir()
+                continue
+            parent = path.parent
+            while parent != boundary:
+                parent.rmdir()
+                parent = parent.parent
         except OSError:
             pass
 
@@ -136,9 +160,14 @@ class ClaudeCodeAgent:
         # 文案刻意说「尚未接入」而不是「不支持」：codex / qwen / agy 这些自己都有 MCP，
         # 只是注入方式各不相同、AICU 还没接线。说成「该 CLI 不支持」是关于 CLI 的假话，
         # 用户会跑去换 CLI，而不是来问我们。
+        #
+        # 具体原因由 adapter 给（``mcp_unwired_reason``）：kimi 为假的原因是**本机装的
+        # 那个版本**没有 mcp 子命令，说成「AICU 还没接线」同样是假话，且指向一个用户
+        # 做不了的动作（等我们接）而不是该做的（升级 kimi）。
         if self.mcp_servers and not self.adapter.supports_mcp:
             raise RuntimeError(
-                f"CLI '{self.cli_name}' 的 MCP 尚未接入 AICU，但本次运行声明了 MCP server。"
+                f"CLI '{self.cli_name}' 的 MCP {self.adapter.mcp_unwired_reason()}，"
+                f"但本次运行声明了 MCP server。"
                 f"请改用已接入 MCP 的 CLI（{', '.join(mcp_enabled_clis())}），"
                 f"或从角色配置中移除 mcp 字段。"
             )
@@ -359,9 +388,12 @@ class ClaudeCodeAgent:
         # 用 Popen + start_new_session=True 创建独立进程组，
         # 超时时用 os.killpg kill 整个进程组，避免 CLI 子进程成为孤儿进程
         #
-        # 少数 CLI（qwen）只能从「cwd 下的项目级配置文件」读 MCP，没法走 argv/env。
-        # 这类文件必须在 Popen 之前写好（CLI 启动时就要读），进程结束后立刻删掉，
-        # 否则会被产物收集当成交付物（见 _drop_transient）。
+        # 少数 CLI（qwen / gemini / cursor / pi / kimi / grok）只能从「cwd 下的项目级
+        # 配置文件」读 MCP，没法走 argv/env。这类文件必须在 Popen 之前写好（CLI 启动
+        # 时就要读），进程结束后立刻删掉，否则会被产物收集当成交付物（见 _drop_transient）。
+        # 名单说的是「这条路怎么走」，不是「现在接没接」：kimi 与 grok 的 supports_mcp
+        # 当前都是 False（版本门禁 / 模型侧没验过），落盘那一步在基类里就被挡掉了。
+        # stop=self.workspace：清空目录时不许爬出本次 CC 的 workspace。
         transient = self.adapter.mcp_workspace_files(self.workspace, self.mcp_servers)
         try:
             proc = subprocess.Popen(
@@ -375,7 +407,7 @@ class ClaudeCodeAgent:
                 start_new_session=True,  # 子进程成为新会话/进程组的组长
             )
         except BaseException:
-            _drop_transient(transient)
+            _drop_transient(transient, stop=self.workspace)
             raise
         self._last_process_pid = proc.pid
         try:
@@ -400,7 +432,7 @@ class ClaudeCodeAgent:
             raise
         finally:
             self._last_process_pid = None
-            _drop_transient(transient)
+            _drop_transient(transient, stop=self.workspace)
 
         if proc.returncode != 0:
             stdout_tail = (stdout or "").strip()

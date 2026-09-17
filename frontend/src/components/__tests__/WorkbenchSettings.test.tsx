@@ -732,8 +732,9 @@ describe('WorkbenchSettings CLI 下拉的 MCP 标注', () => {
   });
 
   it('标注措辞是「未接入」而不是「不支持」', async () => {
-    // codex / qwen / agy 这些 CLI 自己都有 MCP，只是 AICU 还没接线。写「不支持」
-    // 是关于 CLI 的假陈述，用户会跑去换 CLI 而不是来问我们能不能接。
+    // 这个标注说的是 AICU 这边没接线，不是在给 CLI 下结论（kimi / pi 的入口取决于
+    // 本机装的版本，agy 自己是带 MCP 的）。写「不支持」是关于 CLI 的假陈述，
+    // 用户会跑去换 CLI 而不是来问我们能不能接。
     await renderSettings();
     const joined = Object.values(optionLabels()).join('');
     expect(joined).toContain('未接入');

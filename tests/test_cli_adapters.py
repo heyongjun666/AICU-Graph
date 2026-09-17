@@ -1,12 +1,14 @@
 """CLI 适配层单元测试。"""
 
 import json
+import os
 import types
 
 import pytest
 
 import cli_adapters
 from cli_adapters import (
+    AntigravityAdapter,
     ClaudeCodeAdapter,
     CodeBuddyAdapter,
     CodexAdapter,
@@ -791,6 +793,580 @@ class TestQwenMcp:
         assert global_file.read_text(encoding="utf-8") == '{"modelProviders": {"aicu": []}}'
 
 
+class TestGeminiMcpAllowlist:
+    """gemini 的 MCP 注入要**两条路一起走**：项目 settings.json + argv 允许名单。
+
+    少了文件就没有 server 可加载；少了名单则可能被用户级的 ``mcp.allowed`` 挡在门外
+    （那个值是跨作用域取交集，项目级写什么都加不回来）—— 所以两条各测各的。
+    """
+
+    def test_settings_written_into_the_workspace_it_was_given(self, tmp_path):
+        ws = tmp_path / "cc_0"
+        paths = get_adapter("gemini").mcp_workspace_files(ws, _mcp_servers("echo-probe"))
+        assert paths == [ws / ".gemini" / "settings.json"]
+
+    def test_file_shape_is_the_plain_mcpservers_wrapper(self, tmp_path):
+        paths = get_adapter("gemini").mcp_workspace_files(tmp_path, _mcp_servers("echo-probe"))
+        assert json.loads(paths[0].read_text(encoding="utf-8")) == {
+            "mcpServers": {
+                "echo-probe": {"command": "python3", "args": ["/tmp/echo.py"]}
+            }
+        }
+
+    def test_the_allowlist_is_not_written_into_the_file(self, tmp_path):
+        """``mcp.allowed`` 不落盘 —— 它不是「配了就该生效」的那条路。
+
+        getConsolidatedAllowedMcpServers 对每个作用域取值再取**交集**：用户级只要有一份
+        不含我们的名单，项目级怎么补都只会更小。写进去的唯一效果是让人误以为项目文件
+        能自证其说，从而在排查时看错地方。真正生效的是 --allowed-mcp-server-names。
+        """
+        paths = get_adapter("gemini").mcp_workspace_files(tmp_path, _mcp_servers("a"))
+        assert "allowed" not in paths[0].read_text(encoding="utf-8")
+
+    def test_each_server_gets_its_own_flag(self):
+        """逐个给 flag，不拼逗号 —— server 名里可能有逗号，拼串会被切错。"""
+        flags = get_adapter("gemini").mcp_flags(_mcp_servers("a", "b"))
+        assert flags == [
+            "--allowed-mcp-server-names", "a",
+            "--allowed-mcp-server-names", "b",
+        ]
+
+    def test_no_mcp_no_flags(self):
+        assert get_adapter("gemini").mcp_flags([]) == []
+
+    def test_base_command_is_untouched_by_mcp(self):
+        """gemini 的注入全在 mcp_flags 上，``build_base_command`` 逐字节不变。
+
+        （这家的 mcp 不需要提前排进 argv，与 codex 的 ``-c`` 相反。）
+        """
+        adapter = get_adapter("gemini")
+        kwargs = dict(model="gemini-2.5-pro", skip_permissions=True, enable_project_skills=True)
+        assert adapter.build_base_command(**kwargs, mcp_servers=None) == [
+            "gemini", "--model", "gemini-2.5-pro", "--yolo", "--skip-trust"
+        ]
+        assert adapter.build_base_command(**kwargs, mcp_servers=_mcp_servers("a")) == [
+            "gemini", "--model", "gemini-2.5-pro", "--yolo", "--skip-trust"
+        ]
+
+
+class TestCursorApproveMcps:
+    """cursor 的项目级 MCP 需要显式批准，而 AICU 跑无头、没人点。"""
+
+    def test_mcp_json_written_into_the_workspace_it_was_given(self, tmp_path):
+        ws = tmp_path / "cc_0"
+        paths = get_adapter("cursor").mcp_workspace_files(ws, _mcp_servers("echo-probe"))
+        assert paths == [ws / ".cursor" / "mcp.json"]
+
+    def test_file_shape_is_the_plain_mcpservers_wrapper(self, tmp_path):
+        paths = get_adapter("cursor").mcp_workspace_files(tmp_path, _mcp_servers("echo-probe"))
+        assert json.loads(paths[0].read_text(encoding="utf-8")) == {
+            "mcpServers": {
+                "echo-probe": {"command": "python3", "args": ["/tmp/echo.py"]}
+            }
+        }
+
+    def test_approve_mcps_appears_only_when_mcp_is_present(self):
+        adapter = get_adapter("cursor")
+        kwargs = dict(model="gpt-5", skip_permissions=False, enable_project_skills=False)
+        # 无 mcp 时与改动前逐字节相同 —— 老版本 agent 不认这个 flag，普通运行不该受影响
+        assert adapter.build_base_command(**kwargs, mcp_servers=None) == ["agent", "--model", "gpt-5"]
+        assert adapter.build_base_command(**kwargs, mcp_servers=[]) == ["agent", "--model", "gpt-5"]
+        assert adapter.build_base_command(**kwargs, mcp_servers=_mcp_servers("a")) == [
+            "agent", "--model", "gpt-5", "--approve-mcps"
+        ]
+
+    def test_skip_permissions_still_adds_nothing(self):
+        """``--approve-mcps`` 不是免审批 flag 的马甲，别把它接到 skip_permissions 上。
+
+        cursor 官方页没有 skip-permissions 类 flag，加了会让命令直接报错；而
+        --approve-mcps 只管 MCP 服务器批准这一件事（`agent --help`：「Automatically
+        approve all MCP servers」）。两者混接就会在有 mcp 时凭空多出一个免审批语义。
+        """
+        adapter = get_adapter("cursor")
+        cmd = adapter.build_base_command(
+            model=None, skip_permissions=True, enable_project_skills=False
+        )
+        assert cmd == ["agent"]
+
+
+# 走「项目级配置文件」这条路的 CLI，按 (id, 相对 workspace 的路径) 参数化。
+#
+# 这几家的落盘内容**逐字节同形**（都是 {"mcpServers": {name: {command, args, env?}}}），
+# 差别只有路径 —— 所以形状断言共用一份：哪天某一家悄悄分叉，共享的用例会先红，
+# 而不是各自绿着、实际已经写坏。
+# 不在这里的：grok 是 TOML、antigravity 不接 MCP（各自另有说明）。
+_PROJECT_FILE_CLIS = [
+    ("gemini", (".gemini", "settings.json")),
+    ("cursor", (".cursor", "mcp.json")),
+    ("pi", (".pi", "mcp.json")),
+]
+
+
+class TestProjectFileMcp:
+    """共同的路径/形状/不落盘三条性质，逐家参数化验一遍。"""
+
+    @pytest.fixture(autouse=True)
+    def _pi_gate_open(self, monkeypatch):
+        """pi 的 supports_mcp 要看本机装没装扩展，这里统一当作装了。
+
+        本类问的是「路径拼对了没、内容形状对不对」，与本机装了什么无关；不拨这一下，
+        用例的结论就会跟着开发机走（装了扩展绿、没装红，而产线代码两种情况下都对）。
+        门禁本身另有用例守。
+        """
+        monkeypatch.setattr(cli_adapters, "_mcp_capability", lambda *a, **k: True)
+
+    @pytest.mark.parametrize("cli_id,parts", _PROJECT_FILE_CLIS)
+    def test_written_to_the_project_path_that_cli_documents(self, tmp_path, cli_id, parts):
+        """必须落在**本次 CC 的 cwd**（这些路径都是相对 cwd 解析的），且逐段对上。"""
+        ws = tmp_path / "cc_0"
+        paths = get_adapter(cli_id).mcp_workspace_files(ws, _mcp_servers("echo-probe"))
+        assert paths == [ws.joinpath(*parts)]
+
+    @pytest.mark.parametrize("cli_id,parts", _PROJECT_FILE_CLIS)
+    def test_shape_is_the_plain_mcpservers_wrapper(self, tmp_path, cli_id, parts):
+        paths = get_adapter(cli_id).mcp_workspace_files(tmp_path, _mcp_servers("echo-probe"))
+        assert json.loads(paths[0].read_text(encoding="utf-8")) == {
+            "mcpServers": {
+                "echo-probe": {"command": "python3", "args": ["/tmp/echo.py"]}
+            }
+        }
+
+    @pytest.mark.parametrize("cli_id,parts", _PROJECT_FILE_CLIS)
+    def test_env_key_only_appears_when_there_is_one(self, tmp_path, cli_id, parts):
+        """没 env 就别写 ``env`` 键 —— 写个空对象是另一种意思。"""
+        paths = get_adapter(cli_id).mcp_workspace_files(tmp_path, _mcp_servers("a"))
+        entry = json.loads(paths[0].read_text(encoding="utf-8"))["mcpServers"]["a"]
+        assert "env" not in entry
+
+    @pytest.mark.parametrize("cli_id,parts", _PROJECT_FILE_CLIS)
+    def test_env_round_trips_when_present(self, tmp_path, cli_id, parts):
+        paths = get_adapter(cli_id).mcp_workspace_files(
+            tmp_path, _mcp_servers("a", env={"K": "v"})
+        )
+        entry = json.loads(paths[0].read_text(encoding="utf-8"))["mcpServers"]["a"]
+        assert entry["env"] == {"K": "v"}
+
+    @pytest.mark.parametrize("cli_id,parts", _PROJECT_FILE_CLIS)
+    def test_no_declaration_writes_nothing_at_all(self, tmp_path, cli_id, parts):
+        """没配 mcp 时连目录都不该建 —— 免得在产物目录里留下空壳。"""
+        adapter = get_adapter(cli_id)
+        assert adapter.mcp_workspace_files(tmp_path, None) == []
+        assert adapter.mcp_workspace_files(tmp_path, []) == []
+        assert not tmp_path.joinpath(*parts[:-1]).exists()
+
+
+class TestGrokToml:
+    """grok 是这批里唯一读 TOML 的，形状与转义都得逐字节对。
+
+    注意本类问的是**序列化本身对不对**，与「现在接没接线」是两件事：grok 的
+    ``supports_mcp`` 当前是 False（模型侧没验过，见 GrokAdapter），而基类的落盘函数
+    会先看这个开关，所以这里统一把它拨开。不拨的话下面每一条都会拿到空列表，
+    红的是「开关关了」而不是「TOML 写错了」，等于白测。
+    """
+
+    @pytest.fixture(autouse=True)
+    def _gate_open(self, monkeypatch):
+        monkeypatch.setattr(cli_adapters.GrokAdapter, "supports_mcp", True)
+
+    def _text(self, tmp_path, servers) -> str:
+        paths = get_adapter("grok").mcp_workspace_files(tmp_path, servers)
+        assert paths == [tmp_path / ".grok" / "config.toml"]
+        return paths[0].read_text(encoding="utf-8")
+
+    def test_matches_the_shape_in_groks_bundled_manual(self, tmp_path):
+        """``~/.grok/docs/user-guide/07-mcp-servers.md`` 里就是这个形状。
+
+        自己编一套的风险是「看着对、grok 不认」，而这种失败在无头模式下不报错，
+        只表现为工具不存在。
+        """
+        assert self._text(tmp_path, _mcp_servers("echo-probe")) == (
+            "[mcp_servers.echo-probe]\n"
+            'command = "python3"\n'
+            'args = ["/tmp/echo.py"]\n'
+        )
+
+    def test_env_is_an_inline_table(self, tmp_path):
+        """行内表而不是子表：写成 ``[mcp_servers.x.env]`` 之后父表就不能再补键了。"""
+        text = self._text(tmp_path, _mcp_servers("a", env={"K": "v", "K2": "w"}))
+        assert 'env = { K = "v", K2 = "w" }\n' in text
+
+    def test_no_env_no_line(self, tmp_path):
+        assert "env" not in self._text(tmp_path, _mcp_servers("a"))
+
+    def test_empty_args_stay_an_empty_array(self, tmp_path):
+        """``args = []`` 而不是省略这一行：grok 的 command 是必填、args 可选，
+        但省略和「空数组」在排查时看不出区别，写全了省得下次对着配置猜。"""
+        servers = [McpServer(name="a", command="python3", args=[])]
+        assert 'args = []\n' in self._text(tmp_path, servers)
+
+    def test_servers_are_separated_by_a_blank_line(self, tmp_path):
+        """两个块之间必须有空行，否则第二段的 ``[mcp_servers.b]`` 表头会紧贴上一段的
+        最后一个键，人眼读不了 —— TOML 本身不在乎，但这份文件是要给人看的。"""
+        text = self._text(tmp_path, _mcp_servers("a", "b"))
+        assert 'args = ["/tmp/echo.py"]\n\n[mcp_servers.b]\n' in text
+
+    @pytest.mark.parametrize(
+        "raw,expected",
+        [
+            ("plain", "plain"),
+            ('qu"ote', 'qu\\"ote'),
+            ("back\\slash", "back\\\\slash"),
+            ("new\nline", "new\\nline"),
+            ("cr\rhere", "cr\\rhere"),
+            ("tab\there", "tab\\there"),
+            ("nul\x00byte", "nul\\u0000byte"),
+            # DEL 是这条用例的重点：JSON 默认**不**转义它，而 TOML 里它是非法字面字符。
+            # 照抄 json.dumps 的转义表就会在这里写出一份 grok 解析不了的配置。
+            ("del\x7fchar", "del\\u007Fchar"),
+            # 非 ASCII 必须原样：\uXXXX 对 astral 字符要写成代理对，而代理对是非法 TOML。
+            ("中文", "中文"),
+            ("emoji 😀", "emoji 😀"),
+        ],
+    )
+    def test_string_escaping(self, raw, expected):
+        assert cli_adapters._toml_string(raw) == '"' + expected + '"'
+
+    @pytest.mark.parametrize(
+        "name,expected",
+        [
+            ("plain", "plain"),
+            ("with-dash_1", "with-dash_1"),
+            # 带点的名字不加引号会被拆成嵌套表 mcp_servers → my → server，
+            # grok 于是找不到这个 server，且不会有任何报错。
+            ("my.server", '"my.server"'),
+            ("with space", '"with space"'),
+            ("中文名", '"中文名"'),
+            # 尾随换行：``^...$`` 的 ``$`` 也匹配「结尾换行之前」，所以旧写法会把它
+            # 判成裸键、把换行原样吐进表名 —— 生成的 TOML 整份解析失败，同文件里
+            # 别的 server 一起丢。这类名字在 ``mcp_servers.json`` 里写作 "abc\n"。
+            ("abc\n", '"abc\\n"'),
+            ("\n", '"\\n"'),
+        ],
+    )
+    def test_table_keys_are_quoted_when_they_have_to_be(self, name, expected):
+        assert cli_adapters._toml_key(name) == expected
+
+    def test_dotted_server_name_does_not_become_a_nested_table(self, tmp_path):
+        assert '[mcp_servers."my.server"]\n' in self._text(tmp_path, _mcp_servers("my.server"))
+
+    def test_round_trips_through_a_real_toml_parser(self, tmp_path):
+        """用真 TOML 解析器验结构（只用于校验，不给运行时加依赖）。"""
+        tomllib = pytest.importorskip("tomllib")
+        servers = [
+            McpServer(name="plain", command="python3", args=["/tmp/echo.py"]),
+            McpServer(name="my.server", command="npx", args=["-y", "a b"], env={"K": "v"}),
+            # 名字里带尾随换行：裸键会把这行拆掉，整份文档解析失败 —— 同文件里上面
+            # 两个 server 也一起丢。这条比 ``_toml_key`` 的单测更贴近真实后果。
+            McpServer(name="tail\n", command="python3", args=[], env={"K\n": "v"}),
+        ]
+        assert tomllib.loads(self._text(tmp_path, servers)) == {
+            "mcp_servers": {
+                "plain": {"command": "python3", "args": ["/tmp/echo.py"]},
+                "my.server": {"command": "npx", "args": ["-y", "a b"], "env": {"K": "v"}},
+                "tail\n": {"command": "python3", "args": [], "env": {"K\n": "v"}},
+            }
+        }
+
+    def test_control_characters_survive_a_real_parser(self, tmp_path):
+        """最容易写坏的一类：DEL 没转义、代理对写法，解析器都会直接拒绝。"""
+        tomllib = pytest.importorskip("tomllib")
+        servers = [McpServer(name="x", command="c\x7fd\x00e", args=["\n", "😀"])]
+        data = tomllib.loads(self._text(tmp_path, servers))
+        assert data["mcp_servers"]["x"]["command"] == "c\x7fd\x00e"
+        assert data["mcp_servers"]["x"]["args"] == ["\n", "😀"]
+
+
+class TestGrokAndAntigravityAdapters:
+    """这两家从 GenericExecAdapter 的**实例**升格成了子类，flag 行为必须一字不差。"""
+
+    def test_still_generic_exec_adapters(self):
+        assert isinstance(get_adapter("antigravity"), GenericExecAdapter)
+        assert isinstance(get_adapter("grok"), GenericExecAdapter)
+
+    @pytest.mark.parametrize(
+        "cli_id,command,key_env",
+        [("antigravity", "agy", "GEMINI_API_KEY"), ("grok", "grok", "XAI_API_KEY")],
+    )
+    def test_identity_unchanged(self, cli_id, command, key_env):
+        adapter = get_adapter(cli_id)
+        assert adapter.command == command
+        assert adapter.api_key_env == key_env
+
+    @pytest.mark.parametrize("cli_id", ["antigravity"])
+    def test_base_command_identical_to_before_the_upgrade(self, cli_id):
+        """升格前 GenericExecAdapter 只产出 ``[command, --model, <m>]``（免审批不加）。
+
+        grok 不在这条里：它后来按实测补了 ``--always-approve``（见
+        ``TestGrokHeadlessContract``），flag 形状是有意改过的。
+        """
+        adapter = get_adapter(cli_id)
+        assert adapter.build_base_command(
+            model="m", skip_permissions=True, enable_project_skills=True
+        ) == [adapter.command, "--model", "m"]
+
+    def test_grok_trusts_the_folder_only_when_mcp_is_present(self, monkeypatch):
+        """没有 mcp 就不加 --trust：它会把当前目录**持久化**进 grok 的信任库，
+        为一次普通运行留下这条记录没有理由。"""
+        monkeypatch.setattr(cli_adapters.GrokAdapter, "supports_mcp", True)
+        adapter = get_adapter("grok")
+        kwargs = dict(model=None, skip_permissions=False, enable_project_skills=False)
+        assert adapter.build_base_command(**kwargs, mcp_servers=None) == ["grok"]
+        assert adapter.build_base_command(**kwargs, mcp_servers=[]) == ["grok"]
+        assert adapter.build_base_command(**kwargs, mcp_servers=_mcp_servers("a")) == [
+            "grok", "--trust"
+        ]
+
+    def test_grok_never_trusts_a_folder_it_is_not_wiring(self, monkeypatch):
+        """接线关掉时一个 --trust 都不许加。
+
+        --trust 会把**当前目录持久化**写进 grok 的信任库，而这时基类根本不会落盘
+        配置文件 —— 白留一条记录，什么都换不来。产线上这条靠 claude_code_agent 的
+        守卫挡在前面（角色声明 mcp 落到未接线的 adapter 上会直接报错），但那个守卫
+        在别处，这里守的是 adapter 自己也得自洽。
+        """
+        monkeypatch.setattr(cli_adapters.GrokAdapter, "supports_mcp", False)
+        adapter = get_adapter("grok")
+        assert adapter.build_base_command(
+            model=None, skip_permissions=False, enable_project_skills=False,
+            mcp_servers=_mcp_servers("a"),
+        ) == ["grok"]
+
+    def test_grok_writes_toml_not_json(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(cli_adapters.GrokAdapter, "supports_mcp", True)
+        paths = get_adapter("grok").mcp_workspace_files(tmp_path, _mcp_servers("a"))
+        assert paths[0].read_text(encoding="utf-8").startswith("[mcp_servers.a]")
+
+    def test_grok_gate_is_closed_by_default(self, tmp_path):
+        """常量 False，且关掉之后四个注入口子一个都不产出东西。
+
+        与 AntigravityAdapter 那条同类：作用是「别好心加回来」—— 哪天有人看到
+        ``grok mcp doctor`` 通了就把开关拨回 True，先红一次，回去读 docstring 里
+        「还差模型侧端到端」那一段。
+        """
+        adapter = get_adapter("grok")
+        assert adapter.supports_mcp is False
+        assert adapter.mcp_workspace_files(tmp_path, _mcp_servers("a")) == []
+        assert adapter.mcp_flags(_mcp_servers("a")) == []
+        assert not (tmp_path / ".grok").exists()
+
+    def test_antigravity_writes_nothing(self, tmp_path):
+        """实测项目级插件不生效，所以这里必须一个文件都不写（见 AntigravityAdapter）。
+
+        这条用例的作用是「别好心加回来」：哪天有人看到 agy 文档说支持项目级插件、
+        顺手补上注入，先红一次，回去读那个 docstring 里的 A/B 结论。
+        """
+        adapter = get_adapter("antigravity")
+        assert adapter.mcp_workspace_files(tmp_path, _mcp_servers("a")) == []
+        assert adapter.mcp_flags(_mcp_servers("a")) == []
+        assert not (tmp_path / ".agents").exists()
+
+
+class TestGrokHeadlessContract:
+    """grok 的 headless 接口（1.0.5 实测）。
+
+    原先 grok 用的是 GenericExecAdapter 那套「常见约定」默认值，而真机上：
+    ``--json`` 这个参数**不存在**（``grok --json -p hi`` → exit 2
+    ``unexpected argument``），裸位置参数进的是交互式 TUI，输出的键名也全是另一套。
+    这一类的失败很难在生产里被发现 —— 报错在 stderr、进程没崩、上层只看到「空回复」。
+    """
+
+    def test_headless_uses_the_single_prompt_flag(self):
+        """``-p/--single`` 才是无头入口；裸位置参数是 TUI 的初始提问。"""
+        assert get_adapter("grok").prompt_args("你好") == (["-p", "你好"], False)
+
+    def test_output_format_is_a_two_token_flag(self):
+        adapter = get_adapter("grok")
+        assert adapter.print_flags(streaming=False) == ["--output-format", "json"]
+        assert adapter.print_flags(streaming=True) == ["--output-format", "streaming-json"]
+
+    def test_the_generic_json_flag_is_never_emitted(self):
+        """``--json`` 是基类默认值，在 grok 上会被参数解析器直接拒掉 —— 别让它回来。"""
+        adapter = get_adapter("grok")
+        for streaming in (False, True):
+            assert "--json" not in adapter.print_flags(streaming=streaming)
+
+    def test_always_approve_follows_skip_permissions(self):
+        adapter = get_adapter("grok")
+        kwargs = dict(model=None, enable_project_skills=False)
+        assert adapter.build_base_command(**kwargs, skip_permissions=True) == [
+            "grok", "--always-approve"
+        ]
+        assert adapter.build_base_command(**kwargs, skip_permissions=False) == ["grok"]
+
+    def test_parses_the_single_json_object(self):
+        raw = json.dumps({
+            "text": "答案在这里",
+            "stopReason": "end_turn",
+            "sessionId": "abc123",
+            "requestId": "xyz789",
+        })
+        parsed = get_adapter("grok").parse_result(raw)
+        assert parsed["result"] == "答案在这里"
+        # 驼峰 sessionId：丢了它 --resume 就永远拿不到会话，多轮对话会静默退化
+        assert parsed["session_id"] == "abc123"
+
+    def test_parses_the_streaming_ndjson(self):
+        """streaming-json 的正文散在若干 text 事件里，会话 id 只在末条 end 上。"""
+        raw = "\n".join([
+            json.dumps({"type": "thought", "data": "想想"}),
+            json.dumps({"type": "text", "data": "前半"}),
+            json.dumps({"type": "text", "data": "后半"}),
+            json.dumps({"type": "end", "stopReason": "end_turn", "sessionId": "s-1"}),
+        ])
+        parsed = get_adapter("grok").parse_result(raw)
+        assert parsed["result"] == "前半后半"
+        assert parsed["session_id"] == "s-1"
+
+    def test_surfaces_the_error_object(self):
+        """失败时 grok 的收尾是 {"type":"error","message":...}，不能把整段原始 JSON 当回复。"""
+        raw = json.dumps({"type": "error", "message": "Not signed in."})
+        parsed = get_adapter("grok").parse_result(raw)
+        assert parsed["result"] == "Not signed in."
+        assert parsed["errors"] == ["Not signed in."]
+
+    def test_non_json_output_falls_back_to_text(self):
+        assert get_adapter("grok").parse_result("就是一段纯文本") is None
+
+    def test_stream_event_reads_the_data_key(self):
+        """正文的键叫 ``data``，而 ``type`` 的值才叫 ``text`` —— 基类正好反着找。"""
+        adapter = get_adapter("grok")
+        assert adapter.format_stream_event(
+            json.dumps({"type": "text", "data": "片段"})
+        ) == "片段"
+        assert adapter.format_stream_event(
+            json.dumps({"type": "end", "sessionId": "s"})
+        ) == ""
+        assert adapter.format_stream_event(
+            json.dumps({"type": "error", "message": "boom"})
+        ) == "[grok error] boom"
+        # 非 JSON 行（启动日志、panic）原样显示
+        assert adapter.format_stream_event("starting up") == "starting up"
+
+
+class TestKimiMcpGate:
+    """kimi 的 MCP 入口是**版本相关**的，所以 supports_mcp 得探本机二进制，不能写常量。
+
+    这里一律用 PATH 上的假 kimi 脚本，不碰本机真装的那个 —— 否则用例的结论会跟着
+    开发机走（本机 0.43.1 没有 mcp 子命令，2.0.0 有）。
+    """
+
+    @pytest.fixture(autouse=True)
+    def _clean_cache(self):
+        """探测结果按二进制路径缓存，跨用例复用 —— 每个用例都得从干净状态开始。"""
+        cli_adapters._MCP_CAPABILITY.clear()
+        yield
+        cli_adapters._MCP_CAPABILITY.clear()
+
+    def _fake_kimi(self, tmp_path, monkeypatch, help_text, *, log=None):
+        """在 PATH 上放一个只会打印 help_text 的 kimi，并把 AICU 指向它。"""
+        script = tmp_path / "kimi"
+        body = "#!/bin/sh\n"
+        if log is not None:
+            body += f"echo run >> {log}\n"
+        body += f"cat <<'EOF'\n{help_text}\nEOF\n"
+        script.write_text(body, encoding="utf-8")
+        script.chmod(0o755)
+        monkeypatch.setenv("PATH", f"{tmp_path}:{os.environ['PATH']}")
+        return str(script)
+
+    # 0.43.1 的 --help 实测：Commands 段里没有 mcp（其余行照抄，确保不是在真空里匹配）
+    _HELP_WITHOUT_MCP = (
+        "Usage: kimi [options] [command]\n"
+        "\n"
+        "Commands:\n"
+        "  provider                      Manage LLM providers non-interactively.\n"
+        "  session                       Manage sessions non-interactively.\n"
+        "  doctor                        Validate Kimi Code configuration files.\n"
+    )
+    # 假设 2.0.0 补上了这个子命令；形状照 0.43.1 已有行的样子写
+    _HELP_WITH_MCP = (
+        "Usage: kimi [options] [command]\n"
+        "\n"
+        "Commands:\n"
+        "  provider                      Manage LLM providers non-interactively.\n"
+        "  mcp                           Manage MCP servers.\n"
+        "  doctor                        Validate Kimi Code configuration files.\n"
+    )
+
+    def test_gate_closed_when_there_is_no_mcp_subcommand(self, tmp_path, monkeypatch):
+        self._fake_kimi(tmp_path, monkeypatch, self._HELP_WITHOUT_MCP)
+        assert get_adapter("kimi").supports_mcp is False
+
+    def test_gate_open_when_the_subcommand_is_listed(self, tmp_path, monkeypatch):
+        self._fake_kimi(tmp_path, monkeypatch, self._HELP_WITH_MCP)
+        assert get_adapter("kimi").supports_mcp is True
+
+    def test_prose_mentioning_mcp_does_not_open_the_gate(self, tmp_path, monkeypatch):
+        """帮助正文里出现「MCP」不算有入口 —— 只认 Commands 段行首那个 token。
+
+        这条区分是必要的：真按子串匹配的话，任何在描述里提一句 MCP 的版本都会被判成
+        「有入口」，于是 AICU 落一份那个版本其实读不了的文件，正是门禁要防的静默失效。
+        """
+        help_text = (
+            "Usage: kimi [options] [command]\n"
+            "\n"
+            "Options:\n"
+            "  --mcp-config <path>           Path to an MCP configuration file.\n"
+            "\n"
+            "Commands:\n"
+            "  doctor                        Validate config, including MCP servers.\n"
+        )
+        self._fake_kimi(tmp_path, monkeypatch, help_text)
+        assert get_adapter("kimi").supports_mcp is False
+
+    def test_probe_result_is_cached_per_binary(self, tmp_path, monkeypatch):
+        """探一次就够 —— 这个属性会被 Web 请求线程反复读，每次都起子进程太贵。"""
+        log = tmp_path / "runs.log"
+        self._fake_kimi(tmp_path, monkeypatch, self._HELP_WITH_MCP, log=log)
+        adapter = get_adapter("kimi")
+        for _ in range(3):
+            assert adapter.supports_mcp is True
+        assert log.read_text(encoding="utf-8").count("run") == 1
+
+    def test_a_missing_binary_is_not_capable(self, tmp_path, monkeypatch):
+        """二进制不在 / 探不动 —— 一律判否（宁可报错说没接线，也别写个死文件）。"""
+        monkeypatch.setenv("PATH", str(tmp_path))
+        assert get_adapter("kimi").supports_mcp is False
+
+    def test_gate_decides_whether_the_config_file_is_written(self, tmp_path, monkeypatch):
+        """门禁不是一个报告用的字段，它真的挡在落盘前面。"""
+        adapter = get_adapter("kimi")
+        # 每轮一个干净 workspace：关着的那轮要断言「连目录都没建」，
+        # 跟开着的那轮共用目录就分不清是谁建的。
+        for capable in (True, False):
+            ws = tmp_path / ("open" if capable else "closed")
+            monkeypatch.setattr(cli_adapters, "_mcp_capability", lambda *a, **k: capable)
+            paths = adapter.mcp_workspace_files(ws, _mcp_servers("echo-probe"))
+            assert bool(paths) is capable
+            assert (ws / ".kimi-code").exists() is capable
+
+
+class TestProbeStdoutRobustness:
+    """``_probe_stdout`` 是两条门禁（kimi / pi）共用的底座，它自己的失败面得守住。
+
+    设计意图通篇是「探测不出来就判否」—— 二进制不在、超时都返回 None。唯一的例外曾是
+    解码：默认严格解码遇到非 UTF-8 字节抛 ``UnicodeDecodeError``，而它既不是 OSError
+    也不是 SubprocessError，会一路穿到 ``/v1/config``（设置页打不开）。
+    """
+
+    def _binary(self, tmp_path, body: str) -> str:
+        script = tmp_path / "noisy"
+        script.write_text("#!/bin/sh\n" + body, encoding="utf-8")
+        script.chmod(0o755)
+        return str(script)
+
+    def test_non_utf8_output_does_not_escape(self, tmp_path):
+        """CLI 往输出里混了坏字节：既不崩，也不是整段丢掉。"""
+        binary = self._binary(tmp_path, 'printf "\\377\\376"; echo " mcp: Manage MCP servers."\n')
+        output = cli_adapters._probe_stdout([binary])
+        assert output is not None, "坏字节不该让探测抛异常"
+        # 替换解码之后，坏字节后面的内容照样能判 —— 否则等于因为一个字节丢掉整段 help
+        assert "mcp" in output
+
+    def test_a_missing_binary_still_returns_none(self, tmp_path):
+        assert cli_adapters._probe_stdout([str(tmp_path / "definitely-not-here")]) is None
+
+
 class TestPiAdapter:
     def test_base_command_model_and_approve(self):
         adapter = get_adapter("pi")
@@ -1068,8 +1644,8 @@ class TestKnownModels:
             assert by_id[cli_id]["models"] == self.ALL, f"{cli_id} 模型清单不完整"
         assert "models" in by_id["grok"]
         assert by_id["claude"]["priority"] < by_id["codex"]["priority"]
-        # 所有 CLI 都要给出非空清单
-        for cli_id in ["claude", "codex", "kimi", "antigravity", "grok"]:
+        # 所有 CLI 都要给出非空清单（antigravity 现在在隐藏名单里，见下一条用例）
+        for cli_id in ["claude", "codex", "kimi", "grok"]:
             assert by_id[cli_id]["models"], f"{cli_id} 模型清单为空"
 
     def test_list_clis_exposes_supports_mcp(self):
@@ -1077,41 +1653,72 @@ class TestKnownModels:
 
         硬编码的代价是同一份事实维护两遍：将来接一个新 CLI，后端接了、前端没改，
         用户看到的就是一句和实际不符的标注。
+
+        这里只列**常量**为真的 CLI。pi / kimi 压根不是常量，它们的值取决于本机装了
+        什么，另有用例专门守（见下一条）；antigravity 则是常量 False，但它现在在隐藏
+        名单里，取不到 by_id，所以改为直接问 adapter。
         """
-        by_id = {item["id"]: item for item in cli_adapters.list_clis()}
-        assert all("supports_mcp" in item for item in cli_adapters.list_clis())
+        items = cli_adapters.list_clis()
+        assert all("supports_mcp" in item for item in items)
+        by_id = {item["id"]: item for item in items}
         for cli_id in ("internal", "claude", "codebuddy", "codex", "opencode", "qwen"):
             assert by_id[cli_id]["supports_mcp"] is True, cli_id
-        # antigravity 在这一列不是「CLI 没有 MCP」，而是「AICU 注入不了」：agy 只认全局
-        # 的 ~/.gemini/config/mcp_config.json，没有项目级作用域，写下去并发节点会互相
-        # 覆盖、还会污染用户自己的环境。其余几个是 CLI 自身没有 MCP。
-        for cli_id in ("kimi", "pi", "grok", "antigravity"):
-            assert by_id[cli_id]["supports_mcp"] is False, cli_id
+        # grok 是常量 False，且它在下拉里（不在隐藏名单），所以取得到 by_id。
+        # 为什么关：CLI 侧验过（``grok mcp doctor`` 握手 OK、认出 1 个工具），模型侧
+        # 没验过（本机没有 XAI_API_KEY，走不到模型那一步），而本仓库「已接入」的口径是
+        # 端到端跑通。实现与单测都留着，见 GrokAdapter 的 docstring。
+        assert by_id["grok"]["supports_mcp"] is False
+        # 隐藏项不进下拉，所以取不到上面那份 by_id —— 但「隐藏」管的是可见性，
+        # 不是能力，它们的接线该为真还是为真。
+        for cli_id in ("gemini", "cursor"):
+            assert cli_id not in by_id
+            assert get_adapter(cli_id).supports_mcp is True
+        # antigravity 反过来：隐藏，且确实没接（见 AntigravityAdapter 的 eligibility 结论）。
+        assert "antigravity" not in by_id
+        assert get_adapter("antigravity").supports_mcp is False
+
+    @pytest.mark.parametrize("cli_id", ["pi", "kimi"])
+    def test_capability_gated_clis_report_whatever_the_probe_says(self, monkeypatch, cli_id):
+        """pi / kimi 的 MCP 入口要看**本机这个二进制**，所以不能在这儿钉死一个值。
+
+        钉死等于让用例的结论跟着开发机走：装了扩展的机器上它红、没装的机器上它绿，
+        而两种情况下产线代码都是对的。这里把门禁拨到两边，断言列表如实反映结果 ——
+        这才是这个字段的契约（「告诉前端能不能用」），而不是「永远是某个值」。
+        """
+        for value in (True, False):
+            monkeypatch.setattr(cli_adapters, "_mcp_capability", lambda *a, **k: value)
+            by_id = {item["id"]: item for item in cli_adapters.list_clis()}
+            assert by_id[cli_id]["supports_mcp"] is value, (cli_id, value)
 
     def test_hidden_clis_absent_from_list_but_adapters_kept(self):
         """摘出下拉的 CLI：列表里没有，但 adapter 必须保留。
 
         adapter 留着 —— 将来官方支持了（gemini），或用户有账号并登录了（cursor），
-        把 id 从 _HIDDEN_CLI_IDS 里删掉即可放回，所以这里同时断言
-        「列表里没有」和「get_adapter 仍取得到」。
+        或换到 Antigravity 可用的地区（antigravity），把 id 从 _HIDDEN_CLI_IDS 里
+        删掉即可放回，所以这里同时断言「列表里没有」和「get_adapter 仍取得到」。
 
         gemini：官方只支持 Google 自家模型/端点。
         cursor：Cursor 私有协议 + 需 Cursor 账号，接不了别家模型（见 cli_adapters 注释）。
+        antigravity：登录被 eligibility 拒（账号/地区级，见同上）。
         """
         hidden = cli_adapters._HIDDEN_CLI_IDS
-        assert hidden == ("gemini", "cursor")
+        assert hidden == ("gemini", "cursor", "antigravity")
         listed = {item["id"] for item in cli_adapters.list_clis()}
         assert listed.isdisjoint(hidden)
         assert isinstance(get_adapter("gemini"), GeminiAdapter)
         assert isinstance(get_adapter("cursor"), CursorAdapter)
+        assert isinstance(get_adapter("antigravity"), AntigravityAdapter)
 
     def test_hidden_clis_do_not_perturb_priority(self):
         """priority 取 _ADAPTERS 下标而非结果下标，隐藏项不影响其余 CLI 的相对优先级。"""
         index = {a.id: i for i, a in enumerate(cli_adapters._ADAPTERS)}
         for item in cli_adapters.list_clis():
             assert item["priority"] == index[item["id"]]
+        # grok 在 _ADAPTERS 里排在三个隐藏项之后，但它的 priority 仍是原始下标 ——
+        # 这里拿它当「隐藏项没把后面的人往前挤」的样本。
         by_id = {item["id"]: item for item in cli_adapters.list_clis()}
-        assert by_id["claude"]["priority"] < by_id["antigravity"]["priority"]
+        assert by_id["claude"]["priority"] < by_id["grok"]["priority"]
+        assert by_id["grok"]["priority"] == index["grok"]
 
     def test_load_known_models_missing_file_returns_empty(self, monkeypatch, tmp_path):
         monkeypatch.setattr(cli_adapters, "_MODELS_FILE", tmp_path / "missing.json")
@@ -1297,45 +1904,69 @@ class TestMcpSupportFlag:
     （``managed_slot`` 早就有这么一条守护，见 TestManagedSlot，这条是补上缺的那个。）
     """
 
-    def test_declared_support_actually_injects(self, tmp_path):
-        def injected(adapter, tmp_path) -> bool:
-            servers = _mcp_servers("guard-probe")
-            base = dict(model=None, skip_permissions=False, enable_project_skills=False)
-            if adapter.mcp_flags(servers):
-                return True
-            if adapter.build_env(
-                {}, api_base_url=None, api_key_env=None, mcp_servers=servers
-            ) != adapter.build_env({}, api_base_url=None, api_key_env=None):
-                return True
-            if adapter.mcp_workspace_files(tmp_path, servers):
-                return True
-            return (
-                adapter.build_base_command(**base, mcp_servers=servers)
-                != adapter.build_base_command(**base)
-            )
+    @pytest.fixture(params=[True, False])
+    def capability(self, monkeypatch, request):
+        """把 kimi / pi 的能力门禁拨到两边，两条不变量各跑两遍。
 
+        不拨这一下，用例的**覆盖面跟着开发机走**：装了 pi-mcp-adapter 的机器上 pi 是
+        True、会被正向那条查到；没装的机器上它是 False、正向那条直接 continue 掉，
+        等于什么都没验。两种情况下用例都是绿的，但守到的东西不一样 —— 这类隐式依赖
+        仓库里已经清过一次，别再加回来。拨到两边之后，两个分支在哪台机器上都跑到。
+        """
+        monkeypatch.setattr(cli_adapters, "_mcp_capability", lambda *a, **k: request.param)
+
+    @staticmethod
+    def _injects_anything(adapter, tmp_path) -> bool:
+        """四个注入口子挨个问一遍，任何一个产出东西就算「注入了」。
+
+        正向与反向两条不变量共用它 —— 只查一半口子的话，一个
+        ``supports_mcp=False`` 却从 ``build_base_command`` / ``build_env`` 偷偷注入的
+        adapter 会在两条用例之间溜过去。
+        """
+        servers = _mcp_servers("guard-probe")
+        base = dict(model=None, skip_permissions=False, enable_project_skills=False)
+        if adapter.mcp_flags(servers):
+            return True
+        if adapter.build_env(
+            {}, api_base_url=None, api_key_env=None, mcp_servers=servers
+        ) != adapter.build_env({}, api_base_url=None, api_key_env=None):
+            return True
+        if adapter.mcp_workspace_files(tmp_path, servers):
+            return True
+        return (
+            adapter.build_base_command(**base, mcp_servers=servers)
+            != adapter.build_base_command(**base)
+        )
+
+    def test_declared_support_actually_injects(self, tmp_path, capability):
         for adapter in cli_adapters._ADAPTERS:
             if adapter.supports_mcp:
-                assert injected(adapter, tmp_path), (
-                    f"{adapter.id} 声明了 supports_mcp=True，但四种注入口子都不产出任何东西"
-                    f" —— 角色配了 mcp 会静默失效"
+                assert self._injects_anything(adapter, tmp_path), (
+                    f"{adapter.id}（门禁={capability}）声明了 supports_mcp=True，"
+                    f"但四种注入口子都不产出任何东西 —— 角色配了 mcp 会静默失效"
                 )
 
-    def test_undeclared_support_never_injects(self, tmp_path):
+    def test_undeclared_support_never_injects(self, tmp_path, capability):
         """反过来也要守：没声明的 CLI 不得偷偷注入（否则前端标了「未接入」却在用）。"""
         for adapter in cli_adapters._ADAPTERS:
             if adapter.supports_mcp:
                 continue
-            assert adapter.mcp_flags(_mcp_servers("guard-probe")) == [], adapter.id
-            assert adapter.mcp_workspace_files(tmp_path, _mcp_servers("guard-probe")) == [], adapter.id
+            assert not self._injects_anything(adapter, tmp_path), (
+                f"{adapter.id} 的 supports_mcp 是 False（门禁={capability}），"
+                f"但有口子仍在注入 —— 前端会标「MCP 未接入」，实际却在用"
+            )
 
     def test_hidden_clis_are_not_claimed_as_wired(self):
         """下拉看不见的 CLI 若被算进「已接入」名单，报错文案会推荐一个用户选不到的项。"""
         assert not set(cli_adapters.mcp_enabled_clis()) & set(cli_adapters._HIDDEN_CLI_IDS)
 
     def test_wired_list_is_derived_from_adapters(self):
+        # 两个条件都要体现：既要是 adapter 自己声明的（不是写死的名单），也要能被用户
+        # 在下拉里选到（隐藏的 gemini / cursor 不算，见上一条）。
         assert set(cli_adapters.mcp_enabled_clis()) == {
-            a.id for a in cli_adapters._ADAPTERS if a.supports_mcp
+            a.id
+            for a in cli_adapters._ADAPTERS
+            if a.supports_mcp and a.id not in cli_adapters._HIDDEN_CLI_IDS
         }
 
 
@@ -1355,8 +1986,18 @@ class TestMcpWiringGuard:
     @pytest.fixture(autouse=True)
     def _pretend_installed(self, monkeypatch):
         """本类只关心「声明了 mcp 但 CLI 没接线」这一条，别被本机装没装挡住。"""
-        for adapter_cls in (KimiAdapter, PiAdapter, OpenCodeAdapter):
+        for adapter_cls in (KimiAdapter, PiAdapter, OpenCodeAdapter, AntigravityAdapter):
             monkeypatch.setattr(adapter_cls, "is_installed", lambda self: True)
+
+    @pytest.fixture(autouse=True)
+    def _pin_the_gate_closed(self, monkeypatch):
+        """把能力门禁钉成 False，否则这条用例的结论跟着开发机走。
+
+        kimi / pi 的 ``supports_mcp`` 是探本机二进制问出来的：装了带 mcp 命令的 kimi
+        或装了 pi-mcp-adapter 的机器上，它们**本来就不该**报错 —— 那时这条用例会红，
+        而产线代码是对的。门禁本身另有用例守（TestKimiMcpGate / 上面那条参数化）。
+        """
+        monkeypatch.setattr(cli_adapters, "_mcp_capability", lambda *a, **k: False)
 
     def test_unwired_cli_raises(self, tmp_path):
         with pytest.raises(RuntimeError) as excinfo:
@@ -1368,12 +2009,33 @@ class TestMcpWiringGuard:
 
         agy 自己就有 MCP，只是它只认全局配置文件、AICU 注入不了。说成「不支持」是关于
         CLI 的假陈述 —— 用户会跑去除错或换 CLI，而不是来问我们能不能接。
+
+        这里用 antigravity（常量 False）而不是 kimi：kimi 的文案已经被它自己覆盖成
+        「版本没有入口」了，那句话里本来就不该出现「尚未接入」。
+        """
+        with pytest.raises(RuntimeError) as excinfo:
+            self._build(tmp_path, "antigravity", _mcp_servers("echo-probe"))
+        message = str(excinfo.value)
+        assert "尚未接入" in message
+        assert "不支持 MCP" not in message
+
+    def test_unwired_reason_is_asked_of_the_adapter(self, tmp_path):
+        """原因短语由 adapter 提供，不是守卫里写死的一句 —— kimi 的成因是版本。
+
+        写死的话，一个「升级 kimi 就能解决」的场景会被告知「AICU 还没接线」，
+        用户于是去做一个错误的动作：等，或者换 CLI。
         """
         with pytest.raises(RuntimeError) as excinfo:
             self._build(tmp_path, "kimi", _mcp_servers("echo-probe"))
         message = str(excinfo.value)
-        assert "尚未接入" in message
-        assert "不支持 MCP" not in message
+        assert "版本" in message
+        assert "升级" in message
+
+    def test_every_adapter_can_answer_the_reason_question(self):
+        """钩子必须所有 adapter 都能答 —— 守卫在**每条**未接线路径上都会问它一遍。"""
+        for adapter in cli_adapters._ADAPTERS:
+            reason = adapter.mcp_unwired_reason()
+            assert isinstance(reason, str) and reason
 
     def test_message_recommends_a_cli_that_actually_works(self, tmp_path):
         """推荐的替代品必须真的在已接线名单里，且从 adapter 派生而非写死。"""
@@ -1925,7 +2587,7 @@ class TestCrossVendorEndpoint:
         assert checked >= 7, f"只校验到 {checked} 条预设，覆盖不足"
 
     def test_every_preset_targets_a_visible_cli(self):
-        """预设的 cli_name 必须是一个真实出现在 CLI 下拉里的 id。
+        """**可选的**预设，其 cli_name 必须是一个真实出现在 CLI 下拉里的 id。
 
         google 预设曾经指向 ``cli_name: "gemini"``，而 gemini 在 ``_HIDDEN_CLI_IDS``
         里、``list_clis()`` 根本不下发它。前端 ``selectedCli`` 于是解析不到，模型候选
@@ -1934,13 +2596,29 @@ class TestCrossVendorEndpoint:
 
         上面那条 preset↔协议表一致性用例抓不到它：protocol 为 ``"native"`` 的预设
         （gemini / antigravity / grok）在那里被 ``continue`` 跳过了。
+
+        ``available: false`` 的跳过 —— 前端两处（provider 下拉、``selectedCli`` 解析）
+        都用 ``preset.available !== false`` 过滤，这类预设用户根本选不到，也就无从
+        触发上面那条退化。**当前被跳过的是 google 与 xai 两条**（两个 Google 系 CLI 都
+        不可用；grok 是认证那条路没实测），所以下面那个下限恰好压线 —— 再加一条
+        ``available: false`` 就该顺手把它调小或改成别的守法的断言，别让它变成抱怨。
+
+        已知缺口：xai 预置指向的 grok 眼下在 CLI 下拉里是可见的，纯属巧合（它没被
+        隐藏，只是 MCP 关了）。哪天按 GrokAdapter docstring 说的把 grok 藏起来，这条
+        用例仍会绿 —— 它挡的是「预设指向不可见的 CLI」，而 xai 这条被 ``continue``
+        跳过了，等于没在守。
         """
         visible = {cli["id"] for cli in cli_adapters.list_clis()}
+        checked = 0
         for preset in cli_adapters.list_provider_presets():
+            if preset.get("available") is False:
+                continue
             assert preset.get("cli_name") in visible, (
                 f"{preset['id']} 预设指向 CLI {preset.get('cli_name')!r}，它不在 CLI 下拉里"
                 f"（可见的有 {sorted(visible)}）"
             )
+            checked += 1
+        assert checked >= 7, f"只校验到 {checked} 条可选预设，覆盖不足"
 
     def test_vendor_models_are_all_in_catalog(self):
         """VENDOR_MODELS 里的代表模型必须真的在 cli_models.json 的 all 列表里。

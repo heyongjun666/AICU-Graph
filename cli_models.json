@@ -133,8 +133,8 @@
       "api_base_url": null,
       "api_key_env": "GEMINI_API_KEY",
       "wire_api": "native",
-      "available": true,
-      "note": "使用 Antigravity 原生 CLI；自定义 Base URL 当前不支持"
+      "available": false,
+      "note": "暂不启用：两个 Google 系 CLI 都用不了 —— antigravity 登录时被 eligibility 拒（「not available in your location」，账号/地区级），gemini 只支持 Google 自家端点且已从下拉里隐藏。保留条目是为了换到可用地区的账号后，把 available 改回 true 即可放回"
     },
     {
       "id": "xai",
@@ -146,7 +146,7 @@
       "api_key_env": "XAI_API_KEY",
       "wire_api": "chat",
       "available": false,
-      "note": "当前 grok adapter 的无头参数和认证方式未经实测，暂不启用；注意这只挡 grok CLI 本身，grok-* 模型仍可被 claude / codex 选用"
+      "note": "暂不启用：无头 flags 已按 1.0.5 逐条核实并接入（见 GrokAdapter），但认证这条路仍未实测 —— 本机没有 XAI_API_KEY，跑不到模型那一步。有 key 之后把它改成 true 即可；注意这只挡 grok CLI 本身，grok-* 模型仍可被 claude / codex 选用"
     },
     {
       "id": "zhipu",

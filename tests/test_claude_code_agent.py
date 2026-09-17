@@ -16,6 +16,7 @@ from claude_code_agent import (
     ModelImageInputError,
     is_model_image_input_error,
     ClaudeCodeAgent,
+    _drop_transient,
 )
 from runtime.mcp_manager import McpServer
 from aicu import AICU
@@ -52,11 +53,17 @@ class _FakeProc:
 # CC 写的代码文件复制进最优方案目录、并出现在 _INDEX.md 的文件清单里。
 
 
-class TestTransientMcpFiles:
-    def _agent(self, tmp_path, servers) -> ClaudeCodeAgent:
+class _TransientMcpAgentFixture:
+    """落盘/清理这条生命周期的公共脚手架，qwen 那组与逐 adapter 那组共用。
+
+    抽出来是因为两组要防的坑一模一样，尤其是 ``_isolated_home``：少一次隔离，
+    跑一次测试就会动到开发机真实的 CLI 配置。
+    """
+
+    def _agent(self, tmp_path, servers, cli_name="qwen") -> ClaudeCodeAgent:
         return ClaudeCodeAgent(
             workspace_path=str(tmp_path / "ws"),
-            cli_name="qwen",
+            cli_name=cli_name,
             mcp_servers=servers,
         )
 
@@ -67,12 +74,12 @@ class TestTransientMcpFiles:
 
     @pytest.fixture(autouse=True)
     def _isolated_home(self, monkeypatch, tmp_path):
-        """把 ``Path.home()`` 指到临时目录 —— 否则本类会改用户真实的 qwen 配置。
+        """把 ``Path.home()`` 指到临时目录 —— 否则本类会改用户真实的 CLI 配置。
 
-        qwen 是托管槽 CLI：``ClaudeCodeAgent.__init__`` 会调 ``adapter.provision()``
-        （claude_code_agent.py），而本类建的 agent 没有自定义端点，于是走到
-        ``_release_qwen_config()`` —— 它会去 ``~/.qwen/settings.json`` 里删掉
-        ``modelProviders.aicu`` / ``providerProtocol.aicu``。
+        qwen / pi 是托管槽 CLI：``ClaudeCodeAgent.__init__`` 会调 ``adapter.provision()``
+        （claude_code_agent.py），而本类建的 agent 没有自定义端点，于是走到各自的
+        ``_release_*_config()`` —— 它们会去 ``~/.qwen/settings.json``、``~/.pi/agent/
+        models.json`` 里删掉 AICU 写的槽位。
 
         这不是假想：本类最初没加这道隔离，跑一次测试就把开发机真实的 qwen 托管槽
         条目清掉了（用户自己的 ``hooks`` 等其它键不受影响，但 AICU 上次写的模型
@@ -83,21 +90,94 @@ class TestTransientMcpFiles:
         monkeypatch.setattr(cli_adapters.Path, "home", lambda: tmp_path / "home")
 
     @pytest.fixture(autouse=True)
-    def _qwen_counts_as_installed(self, monkeypatch):
-        """本类只关心 ``.qwen/`` 配置文件的生死，不关心 qwen 二进制在不在本机。
+    def _cli_counts_as_installed(self, monkeypatch):
+        """本类只关心配置文件的生死，不关心 CLI 二进制在不在本机。
 
         显式传 ``cli_name`` 时 ``ClaudeCodeAgent`` 会额外查一次 ``is_installed()``
-        （claude_code_agent.py 的「显式指定」分支），CI runner 上没装 qwen 就在构造期
+        （claude_code_agent.py 的「显式指定」分支），CI runner 上没装这些 CLI 就在构造期
         抛错 —— 而本类测的是 ``provision()`` 写文件、收尾删文件，与二进制在不在无关。
 
         为什么不放进 tests/conftest.py 的全局 fixture：那里钉的是自动探测路径
-        （``detect_cli``），而这四个用例走的是显式指定路径。更关键的是
+        （``detect_cli``），而这些用例走的是显式指定路径。更关键的是
         ``is_installed`` 一旦全局为真，``test_cli_adapters.py::TestDetect`` 的三个
         用例就失去意义了 —— 它们正是靠 ``shutil.which`` 的假实现来验证优先级排序和
         「都没装则抛错」的。所以在本类内收窄。
         """
         monkeypatch.setattr(cli_adapters.CliAdapter, "is_installed", lambda self: True)
 
+
+class TestDropTransient:
+    """``_drop_transient`` 的边界语义 —— 它删的是别人的目录树，越界就是误伤。
+
+    逐 adapter 的端到端生命周期在上面两组用例里；这一组直接把 stop 的各种取值喂给它，
+    因为「多层路径」这条分支现在没有任何 adapter 走到（见该函数 docstring），
+    没有一组端到端用例会覆盖它。
+    """
+
+    def test_single_level_by_default(self, tmp_path):
+        """``stop=None`` = 老行为：只删自己那层目录。"""
+        config = tmp_path / "a" / "b" / "c.json"
+        config.parent.mkdir(parents=True)
+        config.write_text("x", encoding="utf-8")
+
+        _drop_transient([config])
+
+        assert not config.exists()
+        assert not config.parent.exists()
+        assert (tmp_path / "a").exists(), "没给边界时不该往上爬"
+
+    def test_walks_up_to_but_not_past_the_boundary(self, tmp_path):
+        """多层路径要一路删到 workspace 为止 —— 而 workspace 本身必须活着。"""
+        ws = tmp_path / "ws"
+        config = ws / ".agents" / "plugins" / "aicu" / "mcp_config.json"
+        config.parent.mkdir(parents=True)
+        config.write_text("x", encoding="utf-8")
+
+        _drop_transient([config], stop=ws)
+
+        assert not config.exists()
+        assert not (ws / ".agents").exists(), "三层空壳都该消失"
+        assert ws.exists(), "删过界就是把 CC 的工作目录端掉了"
+
+    def test_a_busy_directory_stops_the_walk(self, tmp_path):
+        """中间某层还有别人的东西时，那一层和它上面的都留下。"""
+        ws = tmp_path / "ws"
+        config = ws / "a" / "b" / "c.json"
+        config.parent.mkdir(parents=True)
+        config.write_text("x", encoding="utf-8")
+        (ws / "a" / "keep.txt").write_text("别删我", encoding="utf-8")
+
+        _drop_transient([config], stop=ws)
+
+        assert not config.exists()
+        assert not (ws / "a" / "b").exists()
+        assert (ws / "a" / "keep.txt").read_text(encoding="utf-8") == "别删我"
+
+    def test_a_boundary_off_the_path_degrades_to_one_level(self, tmp_path):
+        """stop 不在这条目录链上时只删一层 —— 沿着无关目录链往上 rmdir 是纯粹的误伤。"""
+        config = tmp_path / "outside" / "c.json"
+        config.parent.mkdir(parents=True)
+        config.write_text("x", encoding="utf-8")
+        unrelated = tmp_path / "ws"
+        unrelated.mkdir()
+
+        _drop_transient([config], stop=unrelated)
+
+        assert not config.exists()
+        assert not config.parent.exists()
+        assert unrelated.exists()
+
+    def test_missing_file_is_not_an_error(self, tmp_path):
+        """adapter 没落盘（比如能力门禁关着）时列表可能是空的或指向不存在的路径。"""
+        ws = tmp_path / "ws"
+        ws.mkdir()
+        _drop_transient([], stop=ws)
+        _drop_transient(None, stop=ws)
+        _drop_transient([ws / "nope" / "x.json"], stop=ws)
+        assert ws.exists()
+
+
+class TestTransientMcpFiles(_TransientMcpAgentFixture):
     def test_config_exists_while_the_cli_runs_then_is_gone(self, tmp_path, monkeypatch):
         """文件必须在 Popen 之前就位（CLI 启动时读），且 chat() 返回后不留在盘上。"""
         seen = {}
@@ -150,6 +230,104 @@ class TestTransientMcpFiles:
 
         assert (qwen_dir / "user-notes.txt").read_text(encoding="utf-8") == "别删我"
         assert not (qwen_dir / "settings.json").exists()
+
+
+# 走「项目级配置文件」这条路的 CLI 全在里面，含 qwen 这个原有实现。
+# 路径逐段列出而不是只写文件名：`_drop_transient` 的 stop 边界是 workspace 根，
+# 段数写错的 adapter 会在这里现形。
+_TRANSIENT_CONFIG_CLIS = [
+    ("qwen", (".qwen", "settings.json")),
+    ("gemini", (".gemini", "settings.json")),
+    ("cursor", (".cursor", "mcp.json")),
+    ("pi", (".pi", "mcp.json")),
+    ("kimi", (".kimi-code", "mcp.json")),
+    ("grok", (".grok", "config.toml")),
+]
+
+
+class TestTransientMcpFilesPerAdapter(_TransientMcpAgentFixture):
+    """同一套生命周期逐家验一遍：写盘 → CLI 运行期间在位 → chat() 返回后连目录都不剩。
+
+    上一条 qwen 的用例证明的是**这套机制**成立；这一组证明的是**每家都挂在这套机制上**：
+    漏接一个 adapter 的返回路径、或某家的路径多一层少一层，只有逐家跑才会现形。
+    """
+
+    @pytest.fixture(autouse=True)
+    def _gate_open(self, monkeypatch):
+        """kimi / pi 的 supports_mcp 是探本机二进制问出来的，grok 的当前是常量 False。
+
+        这些用例问的是「文件生命周期」，与开发机上装没装扩展/新版本、以及某家接没接线
+        无关 —— 不拨这一下，用例的结论就跟着开发机走（grok 那几条还会因为压根不落盘
+        而在第一行断言上红）。门禁本身另有用例守。
+        """
+        monkeypatch.setattr(cli_adapters, "_mcp_capability", lambda *a, **k: True)
+        monkeypatch.setattr(cli_adapters.GrokAdapter, "supports_mcp", True)
+
+    @pytest.mark.parametrize("cli_id,parts", _TRANSIENT_CONFIG_CLIS)
+    def test_config_lives_exactly_as_long_as_the_cli_process(
+        self, tmp_path, monkeypatch, cli_id, parts
+    ):
+        seen = {}
+
+        def fake_popen(argv, **kwargs):
+            seen["during"] = (tmp_path / "ws").joinpath(*parts).exists()
+            return _FakeProc(argv, **kwargs)
+
+        monkeypatch.setattr("claude_code_agent.subprocess.Popen", fake_popen)
+        self._agent(tmp_path, _mcp_servers("echo-probe"), cli_name=cli_id).chat("hi")
+
+        assert seen["during"], f"{cli_id}: Popen 时配置还没写 —— CLI 根本读不到"
+        assert not (tmp_path / "ws").joinpath(*parts).exists(), cli_id
+        assert not (tmp_path / "ws").joinpath(*parts[:-1]).exists(), (
+            f"{cli_id}: 文件删了但空目录留下了"
+        )
+
+    @pytest.mark.parametrize("cli_id,parts", _TRANSIENT_CONFIG_CLIS)
+    def test_cleaned_up_when_the_process_fails_to_start(
+        self, tmp_path, monkeypatch, cli_id, parts
+    ):
+        def fake_popen(argv, **kwargs):
+            raise FileNotFoundError(f"{cli_id} 没装")
+
+        monkeypatch.setattr("claude_code_agent.subprocess.Popen", fake_popen)
+        with pytest.raises(FileNotFoundError):
+            self._agent(tmp_path, _mcp_servers("echo-probe"), cli_name=cli_id).chat("hi")
+
+        assert not (tmp_path / "ws").joinpath(*parts[:-1]).exists(), cli_id
+
+    @pytest.mark.parametrize("cli_id,parts", _TRANSIENT_CONFIG_CLIS)
+    def test_an_unrelated_file_in_the_same_dir_survives(
+        self, tmp_path, monkeypatch, cli_id, parts
+    ):
+        """删空目录的循环不能端掉别人的东西 —— 非空时 rmdir 会抛，正好停下。"""
+        monkeypatch.setattr(
+            "claude_code_agent.subprocess.Popen",
+            lambda argv, **kwargs: _FakeProc(argv, **kwargs),
+        )
+        ours = (tmp_path / "ws").joinpath(*parts[:-1])
+        ours.mkdir(parents=True)
+        (ours / "user-notes.txt").write_text("别删我", encoding="utf-8")
+
+        self._agent(tmp_path, _mcp_servers("echo-probe"), cli_name=cli_id).chat("hi")
+
+        assert (ours / "user-notes.txt").read_text(encoding="utf-8") == "别删我", cli_id
+        assert not (tmp_path / "ws").joinpath(*parts).exists(), cli_id
+
+    @pytest.mark.parametrize("cli_id,parts", [("kimi", (".kimi-code", "mcp.json")),
+                                              ("pi", (".pi", "mcp.json"))])
+    def test_gate_closed_refuses_before_writing_anything(
+        self, tmp_path, monkeypatch, cli_id, parts
+    ):
+        """门禁判否时不是「悄悄写一个不生效的文件」，而是在建 CC 这一步就报错。
+
+        这正是 supports_mcp 那条原则的落点：宁可报错说没接线，也不要写一个不生效的
+        配置还让用户以为配好了。所以这里断言两件事 —— 报错，且盘上什么都没多出来。
+        """
+        monkeypatch.setattr(cli_adapters, "_mcp_capability", lambda *a, **k: False)
+        with pytest.raises(RuntimeError, match="MCP"):
+            self._agent(tmp_path, _mcp_servers("echo-probe"), cli_name=cli_id)
+        assert not (tmp_path / "ws").joinpath(*parts[:-1]).exists(), cli_id
+
 
 
 # ---- is_model_image_input_error ----

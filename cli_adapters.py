@@ -11,18 +11,25 @@ claude_code_agent.ClaudeCodeAgent 编排逻辑调用。
   - 建环境变量：build_env()
   - 解析：format_stream_event() / parse_result()
     （parse_result 结果统一归一化为 {result, session_id, subtype, errors}）
+  - MCP 下发：mcp_flags() / mcp_workspace_files() / build_env()，四个钩子里选用得上的
+    （见 CliAdapter.supports_mcp 那一段的说明）
 
 新增一个 CLI 只需新增一个 adapter（或一条 GenericExecAdapter spec），
 不触碰 ClaudeCodeAgent 的编排逻辑（子进程/流式/超时/续接/重试）。
 
 各 CLI 的已知模型清单（供前端下拉候选）集中维护在 cli_models.json。
 
-flags 依据（截至 2026-08）：
+flags 依据（截至 2026-08；MCP 那一侧的核实情况另见各 adapter 的 docstring）：
   - claude：Claude Code 协议
   - kimi：官方命令参考 https://moonshotai.github.io/kimi-cli/en/reference/kimi-command
   - qwen：官方文档 https://qwenlm.github.io/qwen-code-docs（headless 页）已核实
   - opencode / pi / codebuddy / gemini / cursor：官方文档已核实（见各 adapter docstring）
-  - codex / antigravity / grok：最佳猜测（未实测）
+  - codex：最佳猜测（未实测）
+  - antigravity：登录被 eligibility 拒（账号/地区级），已从下拉隐藏（见 AntigravityAdapter）
+  - grok：headless 那套已对 1.0.5 逐条核实（``-p`` / ``--output-format`` / 输出形状，
+    见 GrokAdapter）；MCP 的实现与 CLI 侧（配置认不认、握手通不通）也核实过，但**模型侧
+    没验过**（本机没有 XAI_API_KEY），所以 ``supports_mcp`` 当前是 False —— 以 GrokAdapter
+    的 docstring 为准，别照这一行判断
 """
 
 import json
@@ -30,6 +37,7 @@ import os
 import re
 import shutil
 import subprocess
+import threading
 from pathlib import Path
 from typing import Optional
 
@@ -109,7 +117,8 @@ _CLI_NATIVE: dict[str, tuple] = {
     # 又能在 known_models 里把异族模型滤掉（下拉不再列连不上的模型）。
     #   gemini / antigravity：只说 Gemini 原生 generateContent，不是 OpenAI Chat，
     #     指向别家端点没有任何意义；
-    #   grok：二进制在本机缺失、无头 flags 与认证方式均未实测，adapter 未接线。
+    #   grok：保守取 native —— 本机没有 XAI_API_KEY，改道这条路没验过。真要试，
+    #     入口是它自己的 --xai-api-base-url（换的是 xAI API 的后端，未必换成别家协议）。
     "gemini": ("google", "native"),
     "antigravity": ("google", "native"),
     "grok": ("xai", "native"),
@@ -843,12 +852,22 @@ class CliAdapter:
 
     # 本 CLI 能不能接收 AICU 下发的 MCP server 配置。
     #   False（默认）—— **AICU 还没为这个 CLI 接入 MCP**。注意这不等于「该 CLI 不支持
-    #     MCP」：agy 自己就有 MCP，只是它只认全局配置文件、注入不了、尚未接线。
-    #     两者混为一谈会让用户在界面和报错里读到一句关于 CLI 的假话，然后跑去换 CLI。
+    #     MCP」：agy 自己就有 MCP，只是它只认全局配置文件、注入不了，所以至今未接线
+    #     （实测过程见 AntigravityAdapter）。两者混为一谈会让用户在界面和报错里读到
+    #     一句关于 CLI 的假话，然后跑去换 CLI。
     #     角色如果声明了 mcp 而落到这类 CLI 上，AICU 会直接报错而不是静默忽略 ——
     #     skill 就吃过这个亏：软链对所有 CLI 照建，非 claude 系 CLI 上那是死文件，
     #     建了但永远不生效。
+    #   子类可以把它改成 @property：kimi / pi 的答案是「看本机装的那个二进制」，
+    #     没法用一个类属性写死（见 _mcp_capability）。
     supports_mcp = False
+
+    # 项目级 MCP 配置文件的路径，**相对 CC 的 workspace 逐段给出**。
+    #   None（默认）—— 这个 CLI 不走「落盘项目文件」这条路。
+    #   (".gemini", "settings.json") 这样 —— 基类的 mcp_workspace_files 照此写盘。
+    # 只描述路径；内容由 _mcp_workspace_payload 决定。需要往一处写**多个**文件、
+    # 或路径不由 workspace 直接决定的 CLI，自己覆盖 mcp_workspace_files 即可。
+    mcp_workspace_config: Optional[tuple] = None
 
     def mcp_flags(self, mcp_servers: list) -> list:
         """argv 形式的 MCP 注入，追加在命令末尾（默认不注入，返回空）。
@@ -877,11 +896,48 @@ class CliAdapter:
         最优方案目录、并出现在 ``_INDEX.md`` 的文件清单里。文件名与内容是 adapter 的
         事，何时写、何时删是调用方的事（见 claude_code_agent.py 的 ``_drop_transient``）。
 
+        也考虑过把这些目录加进 ``NONCODE_DIRS`` 再加一道防线，**结论是不加**：
+        收集发生在同一个进程、``chat()`` 返回之后，而 ``_drop_transient`` 挂在
+        ``finally`` 上 —— 能让它不执行的场景（AICU 自己被 SIGKILL）同样不会走到收集，
+        这道防线挡不住任何真实情况。反过来，往 ``NONCODE_DIRS`` 里加 ``.cursor`` /
+        ``.gemini`` 会顺手改变「用户项目里恰好有同名目录时收不收」这个已有行为。
+
         之所以能按节点隔离：每个 CC 有独立 workspace（``workspace/cc_<i>``），而 CLI
         子进程的 cwd 就是它，所以项目级文件天然一 CC 一份，不会互相覆盖，也不碰用户
         自己的全局配置。
+
+        实现：声明了 ``mcp_workspace_config`` 的 adapter 走这版通用实现（写一份
+        ``_mcp_workspace_payload``，路径按那个元组拼）。gemini / cursor / pi / kimi
+        四家的落盘内容同形，差异只有路径 —— 与其抄四遍，不如把差异收敛成一个类属性。
+        grok 走这条路但换 TOML（覆盖 payload），qwen 连路径容器都不一样、自己整个覆盖。
+        没声明的一律不落盘。
         """
-        return []
+        # ``supports_mcp`` 这一条不能省：像 kimi 那样「配置路径写死、但本机装的那个
+        # 版本到底认不认」要由能力门禁决定的 CLI，少了它就会在未声明支持的情况下偷偷
+        # 落盘 —— TestMcpSupportFlag.test_undeclared_support_never_injects 正是守这个。
+        if not mcp_servers or not self.mcp_workspace_config or not self.supports_mcp:
+            return []
+        path = Path(workspace).joinpath(*self.mcp_workspace_config)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(self._mcp_workspace_payload(mcp_servers), encoding="utf-8")
+        return [path]
+
+    def _mcp_workspace_payload(self, mcp_servers: list) -> str:
+        """写进 ``mcp_workspace_config`` 那个文件的字节内容。
+
+        默认 = 四家共用的 ``mcpServers`` JSON。grok 覆盖它返回 TOML（见 GrokAdapter）。
+        """
+        return _mcp_servers_project_json(mcp_servers)
+
+    def mcp_unwired_reason(self) -> str:
+        """``supports_mcp`` 为假时，一个能直接嵌进 ``"CLI 'x' 的 MCP ___，但……"``
+        这句话里的**原因短语**。
+
+        默认是「尚未接入 AICU」—— 绝大多数情况下这是实话。kimi 覆盖它，因为那边为假
+        的原因是**本机装的那个版本**没有可用的 MCP 入口，说成 AICU 没接线同样是关于
+        CLI 的假话，而且把用户指向一个他做不了的动作（等我们接）而不是该做的（升级）。
+        """
+        return "尚未接入 AICU"
 
     # ---- 环境变量 ----
 
@@ -963,6 +1019,215 @@ def _cc_mcp_json(servers: list) -> str:
             entry["env"] = dict(server.env)
         entries[server.name] = entry
     return json.dumps({"mcpServers": entries}, ensure_ascii=False)
+
+
+def _mcp_servers_project_json(servers: list) -> str:
+    """项目级 ``mcpServers`` 配置文件的内容（gemini / cursor / pi / kimi 同形）。
+
+    形状与 ``_cc_mcp_json`` 一样是 ``command`` 字符串 + ``args`` 数组 + 可选 ``env``，
+    差别只在渲染：这里是**落盘给 CLI 解析的文件**，所以缩进 2 空格并带尾换行（与
+    ``_mcp_servers_settings_json`` 的落盘风格一致）。
+
+    为什么另起一份而不是复用/参数化上面那两个：
+
+      - 不复用 ``_cc_mcp_json``：它绑在 claude 系的 argv 路径上（``--mcp-config=<紧凑
+        JSON>``），改它等于动那四家已经接好的 CLI，而这一批的前提是「现有行为一个
+        字节都不变」。
+      - 不参数化 qwen 的 ``trust``：``trust: true`` 是 qwen 自己的无头批准语义
+        （见 ``_mcp_servers_settings_json`` 的说明）。gemini 也有 ``trust`` 字段，但
+        含义完全不同（"trusted servers may gain additional capabilities"，不是批准
+        门禁）；cursor / pi / kimi 根本没有这个键。合并只会让某一方多写一个自己
+        不认识或不期望的字段。
+
+    四家同形是**核实过的事实**（各自的官方文档或发行包），不是「看着像」——
+    所以这里共用一份是诚实的；哪天某一家分叉，就照 ``_opencode_config_content`` 的
+    先例给它单独写一份。grok 走的是同一个钩子但内容是 TOML，另行渲染。
+    """
+    entries: dict = {}
+    for server in servers:
+        entry: dict = {"command": server.command, "args": list(server.args)}
+        if server.env:
+            entry["env"] = dict(server.env)
+        entries[server.name] = entry
+    return json.dumps({"mcpServers": entries}, ensure_ascii=False, indent=2) + "\n"
+
+
+# ---- grok 的 TOML 发射 ---------------------------------------------------------
+#
+# grok 读的是 TOML（``.grok/config.toml``），仓库里没有 TOML 库，codex 那份也是手写
+# 正则（见 :func:`_codex_mcp_args`），这里同样手写 —— 要写的形状是固定的，不需要
+# 通用序列化器。
+#
+# **不能拿 json.dumps 冒充 TOML**：两者的转义规则不重合，而差集正好是会被静默吞掉的
+# 那一类 ——
+#   - U+007F(DEL)：JSON 允许直接写在字符串里（json.dumps 默认就不转义它），TOML 里
+#     它是非法字面字符，只能写成 ``\u007F``；
+#   - 代理对：JSON 那种 ``😀`` 写法在 TOML 里非法，所以非 ASCII 一律原样
+#     输出，一个 ``\u`` 都不发。
+# 用 fullmatch 而不是 ``^...$``：Python 的 ``$`` 也匹配「结尾换行之前」，于是名字里
+# 带尾随 ``\n`` 时（``mcp_servers.json`` 里写 ``"echo-probe\n"``）会被判成裸键、把换行
+# 原样吐进表名，整份 TOML 解析失败 —— 而且是**同文件里其它 server 一起丢**，
+# grok 那边只表现为「工具不存在」。``\Z``/fullmatch 没有这个缺口。
+_TOML_BARE_KEY = re.compile(r"[A-Za-z0-9_-]+\Z")
+_TOML_ESCAPES = {
+    "\\": "\\\\", '"': '\\"', "\n": "\\n", "\r": "\\r", "\t": "\\t", "\b": "\\b", "\f": "\\f",
+}
+
+
+def _toml_string(value: str) -> str:
+    """渲染一个 TOML 基本字符串（含两侧引号）。"""
+    out = []
+    for ch in value:
+        escaped = _TOML_ESCAPES.get(ch)
+        if escaped is not None:
+            out.append(escaped)
+        elif ch < "\x20" or ch == "\x7f":
+            # 其余控制符 + DEL：TOML 只认 \uXXXX 形式
+            out.append("\\u%04X" % ord(ch))
+        else:
+            out.append(ch)
+    return '"' + "".join(out) + '"'
+
+
+def _toml_key(key: str) -> str:
+    """表名/键名：裸键只在 ``[A-Za-z0-9_-]+`` 时安全，其余一律加引号。
+
+    加引号不是洁癖：server 名里的 ``.`` 会让 ``[mcp_servers.my.server]`` 被解析成
+    三层嵌套表（mcp_servers → my → server），而不是一个叫 ``"my.server"`` 的 server。
+    grok 那边于是找不到它，而且不会有任何报错 —— 正是要避免的那种静默失败。
+    """
+    return key if _TOML_BARE_KEY.match(key) else _toml_string(key)
+
+
+def _grok_mcp_toml(servers: list) -> str:
+    """grok ``.grok/config.toml`` 里的 ``[mcp_servers.<name>]`` 段。
+
+    形状取自 grok 自带的用户手册（``~/.grok/docs/user-guide/07-mcp-servers.md``，
+    由二进制解出）：
+
+        [mcp_servers.github]
+        command = "npx"
+        args = ["-y", "@modelcontextprotocol/server-github"]
+        env = { GITHUB_PERSONAL_ACCESS_TOKEN = "ghp_xxx" }
+
+    ``env`` 用**行内表**，与手册一致。这不只是抄格式：写成子表
+    ``[mcp_servers.x.env]`` 之后父表就不能再补键，顺序写错即非法。
+    env 的值直接写解析好的字面量，**不套 grok 自己的 ``${VAR}`` 插值** ——
+    那会让 grok 再查一次环境变量，而 AICU 给的已经是解析好的值。
+    """
+    lines: list = []
+    for server in servers:
+        lines.append(f"[mcp_servers.{_toml_key(server.name)}]")
+        lines.append(f"command = {_toml_string(server.command)}")
+        lines.append("args = [" + ", ".join(_toml_string(a) for a in server.args) + "]")
+        if server.env:
+            pairs = ", ".join(
+                f"{_toml_key(k)} = {_toml_string(v)}" for k, v in server.env.items()
+            )
+            lines.append(f"env = {{ {pairs} }}")
+        lines.append("")
+    return "\n".join(lines)
+
+
+# ---- MCP 能力探测：supports_mcp 得先问本机二进制才能回答的 CLI -------------------
+#
+# 多数 adapter 的 ``supports_mcp`` 是个常量：AICU 接线了就是 True。但有两家的 MCP
+# 入口**取决于本机装的那个版本/扩展**，写常量会说假话：
+#
+#   pi   —— pi 本体没有 MCP。0.84.2 的 ``dist/`` 里 ``mcpServers`` 命中数为 0，
+#           配置是由外部扩展 pi-mcp-adapter 读的（``pi install npm:pi-mcp-adapter``）。
+#           扩展没装时 ``.pi/mcp.json`` 是个死文件。
+#   kimi —— 引擎里有 MCP，但项目级配置被 workspace trust 门禁挡着，而 trust 只能由
+#           交互式 TUI 授予（见 ``KimiAdapter.mcp_unwired_reason``）。
+#
+# 门禁判否时的对外表现与「还没接线」完全一致（守卫照常报错、前端标未接入）——
+# 这正是 ``supports_mcp`` 注释里那条原则：**宁可报错说没接线，也不要写一个不生效的
+# 文件还让用户以为配好了。**
+_MCP_CAPABILITY: dict = {}
+_MCP_CAPABILITY_LOCK = threading.Lock()
+
+
+def _probe_stdout(argv: list, timeout: int = 15) -> Optional[str]:
+    """跑一条探测命令并把 stdout+stderr 一起返回；跑不起来一律返回 None。
+
+    两条流合并是有意的：CLI 报「不认这个子命令」时走 stderr 还是 stdout 各家不同
+    （kimi 0.43.1 的 ``unknown command 'mcp'`` 就未必在 stdout），而探测要问的问题
+    只有一个 ——「这段输出里有没有那个东西」。
+
+    ``errors="replace"`` 不能省：默认的严格解码遇到非 UTF-8 字节会抛
+    ``UnicodeDecodeError``，而它**既不是 OSError 也不是 SubprocessError**，会直接穿过
+    下面的 except、再穿过 ``_mcp_capability`` 与 ``supports_mcp`` 一路冒到
+    ``/v1/config`` 上去（设置页打不开）。探测的设计是「探不出来就判否」，不该有一条
+    路径是「探不出来就炸」；换成替换解码还有个好处：CLI 只是往 help 里混了一个坏字节
+    时，剩下的输出照样能判。
+    """
+    try:
+        proc = subprocess.run(
+            argv, capture_output=True, text=True,
+            encoding="utf-8", errors="replace", timeout=timeout,
+        )
+    except (OSError, subprocess.SubprocessError):
+        # 二进制不在、没权限、卡住超时 —— 一律当作「探测不出来」，也就是判否
+        return None
+    return (proc.stdout or "") + (proc.stderr or "")
+
+
+def _mcp_capability(command: str, probe) -> bool:
+    """跑一次 ``probe`` 并按**解析后的二进制路径**缓存结果。
+
+    键取路径而不是命令名：同一个 CLI 完全可能装着多个版本（npm 全局一份、nvm 或
+    项目本地又一份），按名字缓存会把 A 版本上探到的结果用到 B 版本上 —— 而这两个
+    版本的 MCP 能力差异正是要区分的东西。
+
+    加锁是必需的：``mcp_enabled_clis()`` 会在 Web 请求线程里挨个读这些属性，
+    而首次访问要起子进程。
+    """
+    path = shutil.which(command) or command
+    with _MCP_CAPABILITY_LOCK:
+        if path not in _MCP_CAPABILITY:
+            _MCP_CAPABILITY[path] = probe(path)
+        return _MCP_CAPABILITY[path]
+
+
+def _probe_pi_mcp(command: str) -> bool:
+    """``pi list`` 里有没有 pi-mcp-adapter —— 有扩展才谈得上收 MCP 配置。
+
+    查的是**全局**安装（``pi list`` 不带 ``-l`` 读全局设置）。项目级安装对 AICU 没有
+    意义：每次运行的 workspace 都是新生成的，装在里面的扩展下次就没了。
+    """
+    output = _probe_stdout([command, "list"])
+    return output is not None and "pi-mcp-adapter" in output
+
+
+# ``kimi --help`` 的 Commands 段里，一行行形如 ``  <名字>[|别名] [options] ... 说明``。
+# 只认行首（缩进后）那个 token，不认正文里出现的 mcp —— 否则将来帮助文案里提一句
+# MCP 就会把没有子命令的版本判成有。
+_KIMI_MCP_COMMAND = re.compile(r"^\s+mcp(?:\||\s|\[|$)", re.MULTILINE)
+
+
+def _probe_kimi_mcp(command: str) -> bool:
+    """``kimi`` 暴露了 ``mcp`` 子命令没有 —— 有入口才谈得上收 MCP 配置。
+
+    问的是**有没有入口**，不是「能不能用」：0.43.1 实测 ``kimi mcp list`` 回
+    ``unknown command 'mcp'. See 'kimi --help'.``（stderr，退出码 1），该版本的
+    ``--help`` Commands 段里也没有它。
+
+    为什么查 ``--help`` 而不是直接跑 ``kimi mcp list``：后者在有这个子命令的版本上
+    会**真的去读配置**（读 ~/.kimi-code 与 cwd），而这份配置里可能有需要起子进程、
+    需要联网、乃至需要等认证的 server —— 一旦挂住就撞上超时，被当成「没有入口」，
+    正好把唯一能判真的情形误判成假。``--help`` 只打印一份静态帮助，没有这些副作用。
+
+    **这道门禁的已知局限**：kimi 引擎里的 MCP 加载还要过 workspace trust，而 trust
+    只能由交互式 TUI 授予（``-p`` 走不到那个提示）。所以即使这里判真、即使
+    ``.kimi-code/mcp.json`` 写得再对，无头运行时项目级 server 仍可能被静默 gated 掉。
+    探到真只是「这个版本有入口」，不等于「这条路走得通」—— 升级后实测确认之前，
+    这道门禁给的是**必要非充分**信号。
+
+    （Kimi 平台侧另有一条 MCP 路 —— 托管智能体的远程 MCP，只收 ``type: "url"``，
+    与 AICU 的 stdio 下发对不上，刻意没接；见 ``KimiAdapter`` docstring 里的说明。）
+    """
+    output = _probe_stdout([command, "--help"])
+    return output is not None and _KIMI_MCP_COMMAND.search(output) is not None
 
 
 def _mcp_servers_settings_json(servers: list) -> str:
@@ -1159,6 +1424,38 @@ class CodeBuddyAdapter(ClaudeCodeAdapter):
     认证 env（官方文档核实）：
       - CODEBUDDY_API_KEY：API 密钥，用于模型接口调用，非交互模式 (-p) 下始终使用
       - CODEBUDDY_AUTH_TOKEN：平台认证令牌，用于所有平台接口调用
+
+    **MCP 这条路默认走不通**（2026-09-17/18 端到端实测 + 旁路判据复核）—— 除非用户在
+    自己的 codebuddy settings 里放行那一层壳（见本节末）。codebuddy 把
+    **每一个** MCP 工具调用都包在自己的 ``DeferExecuteTool`` 里走，而父类放行的
+    ``mcp__<server>`` 是 server 级通配，覆盖不到那层壳。三条证据：
+
+      1. ``probe_echo`` 被拒，codebuddy 原样报出 ``Permission to use DeferExecuteTool
+         has been denied because this tool requires approval but permission prompts are
+         not available in non-interactive mode``。
+      2. 把 ``DeferExecuteTool`` 补进 ``--allowedTools`` **无效** —— 拒绝照旧。codebuddy
+         自己的报错就写了出路只有两条：``-y`` / ``--permission-mode bypassPermissions``，
+         或把 ``DeferExecuteTool`` 写进 settings 的 ``permissions.allow``。
+         ``--allowedTools`` 不在这两条路里。
+      3. 探针 server 侧挂旁路调用日志（只有 server 进程写得进去、模型伪造不了）后，
+         上述 argv 下 ``tools/call`` **一次都没发生**。
+
+    第 3 条是必需的，因为「产物里有没有 ``probe_echo: AICU-MCP-PROBE-7f3a``」这个判据
+    **可被伪造**：工具名就叫 probe_echo、描述写着「回显传入的 text」、输入串又写在任务
+    提示词里，模型不调工具也能把这一行编出来。中途确实观测到过一次「产物对」的假通过，
+    改用旁路日志后即告消失 —— 本适配器相关的旧结论若与本节冲突，以本节为准。
+
+    所以此处**刻意不加任何额外 flag**：``-y`` 那类会把这个适配器变成比 claude 危险一档
+    的形态（审批整个关掉），而 AICU 的立场是宁可报错说没接线，也不下发一份永不生效的
+    配置。要用 codebuddy + MCP，得由用户在 settings 里自行 ``permissions.allow``。
+
+    **``supports_mcp`` 仍是 True（继承自父类），这是有意的**，与上面「默认走不通」不矛盾：
+    挡路的是 codebuddy 自己的权限层，而那一层是**用户可配置的**。放行过的用户这里就该
+    是 True —— AICU 照常下发 ``--mcp-config``，链路是通的。真按「默认不通」关成 False，
+    反而是把这类用户的可用配置一起废掉，而且 ``mcp_workspace_files`` 的守卫会让配置
+    根本不落盘，从「可能被拒」退化成「一定不生效」。代价是：没放行的用户会看到
+    ``supports_mcp=True``、下拉不标「未接入」，实际调用却被拒 —— 这个取舍记在这里，
+    等 codebuddy 哪天把 ``DeferExecuteTool`` 挪出审批层再回头收掉。
     """
 
     api_key_env = "CODEBUDDY_API_KEY"
@@ -1444,6 +1741,22 @@ class KimiAdapter(CliAdapter):
         会直接 Node 崩溃（栈底是 AgentActivityView.dispose），0.43.1 只是干净地报
         「Model "X" is not configured in config.toml」。改道时不传 ``--model``
         正好绕开 0.38.0 那个崩溃（2026-09-16 两份二进制各跑一次实测）。
+
+    **MCP：托管智能体那条路是刻意不适配的**（2026-09-17 核过官方文档
+    ``platform.kimi.com/docs/hosted-agents/mcp``）。Kimi 平台侧确实有 MCP，但那属于
+    「托管智能体」（hosted agents），跟本 CLI 是两个产品 —— 那边 MCP 是
+    ``POST /v1/agents`` 请求体里的 ``mcp_servers``，全篇没有任何配置文件路径，也没有
+    ``kimi mcp`` 这类子命令。三处对不上，所以不接：
+
+      - **形状**：每项只支持 ``type: "url"``（远程 MCP），没有 ``command`` / ``args`` /
+        ``env`` 的位置；而 AICU 下发的是 stdio（``_mcp_servers_project_json``）。
+      - **位置**：托管智能体跑在 Kimi 云端（请求体里的 ``environment_id`` / ``vault_id``），
+        够不到本机 localhost 的 server —— 而端到端判据恰恰就是本机 echo server 吐的
+        ``probe_echo: AICU-MCP-PROBE-7f3a``。
+      - **形态**：接它等于新增一类 HTTP 后端，与 AICU「起子进程 + 往 workspace 写项目级
+        配置文件」的 adapter 模型不是一回事，不是改一行的事。
+
+    本 CLI 自己那条 MCP 路径的局限见 ``_probe_kimi_mcp``（版本门禁 + workspace trust）。
     """
 
     id = "kimi"
@@ -1465,6 +1778,32 @@ class KimiAdapter(CliAdapter):
     #   「Range of max_tokens should be [1, 65536]」）；deepseek / zhipu / moonshot
     #   收 131072 都是 200，故没有它们的行。
     _CONTEXT_LIMIT_BY_VENDOR = {"aliyun": 65536}
+
+    # kimi 的项目级 MCP 配置文件，位置从 0.43.1 与 2.0.0 两份 bundle 逐字核实：
+    # ``resolveMcpJsonPaths`` 里的 project 一路就是 ``<cwd>/.kimi-code/mcp.json``，
+    # key 是 ``mcpServers``（与 gemini/cursor/pi 同形，故走基类的通用实现）。
+    #
+    # 路径写死，但**本次落不落盘由下面的门禁说了算** —— 基类 mcp_workspace_files 里
+    # ``not self.supports_mcp`` 那一条就是为它准备的。
+    mcp_workspace_config = (".kimi-code", "mcp.json")
+
+    @property
+    def supports_mcp(self) -> bool:
+        """kimi 的 MCP 入口取决于**本机装的那个版本**有没有 ``mcp`` 子命令。
+
+        0.43.1（本机 ``~/.kimi-code/bin/kimi``）的 ``--help`` 里没有这个子命令；
+        2.0.0 才有。所以这里不能写常量：写 True，老版本上会落一份谁也读不了的文件；
+        写 False，新版本上会让一个已经能用的通道一直报「未接入」。
+        """
+        return _mcp_capability(self.command, _probe_kimi_mcp)
+
+    def mcp_unwired_reason(self) -> str:
+        """报错文案得说真话：这里为假的**原因**是版本，不是 AICU 没接线。
+
+        基类默认那句「尚未接入 AICU」在这个分支上是关于 CLI 的假话 —— 用户读到它
+        只会以为换个 CLI 就好了，而实际要做的动作是升级 kimi。
+        """
+        return "在当前安装的 kimi 版本上没有可用入口（该版本未暴露 mcp 子命令，升级后重试）"
 
     def model_arg(self, model: Optional[str], *, api_base_url: Optional[str]) -> Optional[str]:
         """改道时恒为 None —— 模型由 ``KIMI_MODEL_NAME`` 承担，命令行上不能出现 ``--model``。
@@ -1806,10 +2145,14 @@ class QwenAdapter(CliAdapter):
 
 
 class GenericExecAdapter(CliAdapter):
-    """通用 exec 风格 CLI 适配器（Qwen / Antigravity / Grok 等）。
+    """通用 exec 风格 CLI 适配器（Antigravity / Grok 等）。
 
-    这些 CLI 未在本环境安装、flags 未经实测，按常见约定做最佳猜测；
-    新增工具只需传入一条 spec，后续拿到厂商文档再精修。
+    这些 CLI 的 headless 约定各不相同，缺省值只是**起点**：直接拿来用会写出
+    「看着对、实际起不来」的命令（grok 的 ``--json`` 就是这么栽的，见 GrokAdapter）。
+    拿到厂商文档或实测机会，就该升格成子类逐条钉死。
+
+    antigravity 是现在唯一还直接用它缺省值的实例，而它没被接线 —— 见
+    AntigravityAdapter（账号/地区不可用）。
     """
 
     def __init__(
@@ -2061,6 +2404,22 @@ class PiAdapter(CliAdapter):
     # 多厂商 CLI，无单一认证 env；sk 注入按模型厂商走 api_key_env_for_model 映射
     api_key_env = None
 
+    # pi 本体没有 MCP：0.84.2 的 dist/ 里 `mcpServers` 命中数为 0，配置文件是外部
+    # 扩展 pi-mcp-adapter 读的。所以这里不能写常量 True —— 扩展没装时我们写下去的
+    # .pi/mcp.json 是个死文件，而角色那边只会看到「工具不见了」。
+    @property
+    def supports_mcp(self) -> bool:
+        return _mcp_capability(self.command, _probe_pi_mcp)
+
+    # pi 的项目级 MCP 配置。配置文件优先级（pi-mcp-adapter README）：
+    # 全局 ~/.config/mcp/mcp.json > <Pi agent dir>/mcp.json > .mcp.json > .pi/mcp.json，
+    # 越靠后优先级越高 —— 选 .pi/mcp.json 是因为它压得住用户可能已有的 .mcp.json，
+    # 而 .mcp.json 是**通用**文件名，很可能被别的工具占用。
+    #
+    # 注意这不是「多写一份以防万一」：pi 的 MCP 说明里 .pi/mcp.json 就是 Pi 自己的
+    # 项目层（`/mcp disable` 写的也是它）。
+    mcp_workspace_config = (".pi", "mcp.json")
+
     def api_key_env_for_model(self, model: Optional[str]) -> Optional[str]:
         return api_key_env_for_vendor(vendor_of_model(model))
 
@@ -2198,6 +2557,31 @@ class GeminiAdapter(CliAdapter):
     command = "gemini"
     api_key_env = "GEMINI_API_KEY"
 
+    supports_mcp = True
+    # 项目级设置文件（gemini 的 getWorkspaceSettingsPath() = <project>/.gemini/settings.json）。
+    # 走基类的通用实现即可 —— 内容就是标准的 {"mcpServers": {...}}。
+    mcp_workspace_config = (".gemini", "settings.json")
+
+    def mcp_flags(self, mcp_servers: list) -> list:
+        """把本次下发的 server 名逐个塞进允许名单。
+
+        为什么不写进项目 settings.json 的 ``mcp.allowed``：那个值是**各作用域取交集**
+        （getConsolidatedAllowedMcpServers：任何作用域没定义就是 undefined，定义了就取
+        交集）。而唯一会被名单挡住的场景，恰恰是「用户级 ~/.gemini/settings.json 已经有
+        一份不含我们的名单」—— 交集只会更小，项目级怎么写都加不回来，写了等于没写。
+
+        ``--allowed-mcp-server-names`` 不同：命令行一给就直接覆盖 allowed 与 excluded。
+        代价是本次运行里用户自己配的其它 MCP server 会被挡掉 —— 对一次 AICU 无头运行是
+        可接受的，因为角色要的就是这几个 server，而且**挡掉比静默失效好**：被 exc 挡掉
+        时 agent 拿不到工具、绕路或报一个与 MCP 无关的错，正是预检要消除的那类失败。
+        """
+        flags: list = []
+        for server in mcp_servers:
+            # gemini 的 flag 声明是 nargs:1 + coerceCommaSeparated，重复给或逗号分隔都收。
+            # 逐个给而不拼逗号：server 名里可能有逗号，拼串会被切错。
+            flags.extend(["--allowed-mcp-server-names", server.name])
+        return flags
+
     def build_base_command(
         self, *, model: Optional[str], skip_permissions: bool, enable_project_skills: bool,
         mcp_servers: Optional[list] = None,
@@ -2293,6 +2677,11 @@ class CursorAdapter(CliAdapter):
     # agent 是通用命令名，可能被无关工具占用：--help 含 cursor 才是 Cursor CLI
     install_probe = (["--help"], ["cursor"], [])
 
+    supports_mcp = True
+    # 项目级 MCP 配置（官方文档：project-specific tools 放 <project>/.cursor/mcp.json，
+    # 全局那份在 ~/.cursor/mcp.json）。内容就是标准的 {"mcpServers": {...}}。
+    mcp_workspace_config = (".cursor", "mcp.json")
+
     def build_base_command(
         self, *, model: Optional[str], skip_permissions: bool, enable_project_skills: bool,
         mcp_servers: Optional[list] = None,
@@ -2301,6 +2690,14 @@ class CursorAdapter(CliAdapter):
         if model:
             cmd.extend(["--model", model])
         # 免审批 flag 官方未列出，保守不加（避免命令报错）
+        #
+        # 但这**不**包括 --approve-mcps：它跟免审批无关，是 MCP 专属的批准开关
+        # （`agent --help` 实测存在：「Automatically approve all MCP servers」）。
+        # 项目级 .cursor/mcp.json 里的 server 默认要人工过一遍（`agent mcp enable` 才进
+        # 已批准名单），而 AICU 跑无头、没人点批准 —— 不加等于下发一个永远不生效的工具。
+        # 只在真有 mcp 时加：老版本 agent 不认这个 flag 时，普通运行不受影响。
+        if mcp_servers:
+            cmd.append("--approve-mcps")
         return cmd
 
     def print_flags(self, streaming: bool) -> list:
@@ -2325,6 +2722,208 @@ class CursorAdapter(CliAdapter):
         return {"result": text, "session_id": None, "subtype": None, "errors": []}
 
 
+class AntigravityAdapter(GenericExecAdapter):
+    """Antigravity CLI（``agy``）。**MCP 未接入**，下面是实测结论，别再试一遍。
+
+    原先只是 ``GenericExecAdapter`` 的一个实例（flags 未经实测，按常见约定猜测），
+    升格为类只是为了让「为什么没接 MCP」这件事有个落脚的 docstring，
+    **构造参数逐字照抄，行为与升格前完全一致**。
+
+    本机 1.2.3 实测（隔离 HOME + 隔离 workspace，每条都是 A/B 对照）：
+
+      - 官方文档写的 ``<workspace>/.agents/mcp_config.json`` 在 1.2.3 的二进制里
+        **一次都没出现**（``strings agy | grep -c`` 得 0）。真实存在的只有
+        ``~/.gemini/config/mcp_config.json``（全局）和 ``plugins/<name>/``（插件）。
+      - 插件目录**放在 workspace 里不生效**。同样两个文件
+        （``plugin.json`` + ``mcp_config.json``），放在 ``$HOME/.gemini/config/plugins/aicu/``
+        时 agy 会把 server 真拉起来（``$HOME/.gemini/antigravity-cli/mcp/aicu_probe/
+        probe_echo.json`` 缓存了工具 schema，那是完成 ``tools/list`` 握手才可能有的），
+        放在 ``<workspace>/.agents/plugins/aicu/`` 时**什么都不发生** —— 连 mcp/ 目录
+        都不建。``agy plugin validate`` 对两者都回 ``[ok]``，所以**不能用 validate
+        当验收手段**：它只证明格式合法，不证明会被加载。
+      - 全局那条路 AICU 走不了：并发节点会互相覆盖，还会污染用户自己的 agy 配置。
+        也没有可重定位的配置根（没有 ``ANTIGRAVITY_HOME`` 之类的 env；只有 HOME
+        能搬，而那会把用户的登录态一起搬走）。
+
+    留了一条没验到的岔路：项目级插件也许要等**认证之后**、工作区真正打开时才会被发现
+    （agy 有 ``--project`` / ``~/.gemini/config/projects/`` 这套概念）。**这条路 2026-09-17
+    走死了 —— 不是没验，是登不进去**：人工在终端里跑 ``agy -p hi``，把浏览器给的授权码
+    粘回同一个进程（PKCE 要求 verifier 与码在同一个进程里，这一步本身是对的），
+    token 也换回来了，最后卡在 eligibility：
+
+        error: Eligibility check failed: Your current account is not eligible for
+        Antigravity, because it is not currently available in your location.
+
+    这是**账号/地区级**的拒绝，跟授权码、网络、配置都无关，换多少次码都一样。
+    结论：这台机器上 agy 根本没法参与 AICU 的无头编排，所以就算接上也验不了。
+    哪天换一个 Antigravity 可用地区的账号，先跑
+    ``strings agy | grep -c '.agents/plugins'`` 再决定要不要重新考虑这条路。
+    """
+
+    def __init__(self):
+        super().__init__("antigravity", "Antigravity", "agy", api_key_env="GEMINI_API_KEY")
+
+
+class GrokAdapter(GenericExecAdapter):
+    """Grok CLI（``grok``，@xai-official/grok）。
+
+    原先只是 ``GenericExecAdapter`` 的一个实例；这里补了两块 —— headless flags
+    与 MCP 注入 —— 两块的依据都是本机 1.0.5 实测或二进制里自带的那份用户手册。
+
+    **headless flags**（``--json`` 那条是实测出来的：``grok --json -p hi`` 直接
+    ``error: unexpected argument '--json' found``，exit 2，命令根本起不来）：
+
+      - 无头入口是 ``-p/--single``。裸位置参数 ``grok "提问"`` 在 ``--help`` 里写作
+        ``[PROMPT] Initial prompt for the interactive session`` —— 那是**交互式 TUI**
+        的初始提问，无 TTY 时实测 ``Error: Device not configured (os error 6)``。
+      - 输出格式是 ``--output-format plain|json|streaming-json|streaming-messages-json``，
+        没有 ``--json`` 这种单段写法。两种要用的形状：
+
+        ``json`` —— 单个对象，字段 ``text`` / ``stopReason`` / ``sessionId`` /
+        ``requestId``；失败时是 ``{"type":"error","message":...}``。
+
+        ``streaming-json`` —— NDJSON，每行一个 ``type`` 标签对象；正文是若干条
+        ``{"type":"text","data":...}``，``sessionId`` 只在**末条** ``{"type":"end"}`` 上。
+
+        两者都不是基类认的形状，所以 ``parse_result`` 与 ``format_stream_event``
+        都覆盖了：基类找顶层 ``result``/``output`` 之类的键、找 ``session_id``
+        （grok 是驼峰 ``sessionId``），照抄的后果是「回复成了整段原始 JSON」+
+        「``--resume`` 永远拿不到会话 id、多轮对话静默退化成每次全新会话」。
+      - 免审批是 ``--always-approve``（``--help`` 里明列；``--yolo`` 是它的别名，
+        官方 headless 示例两种写法都有）。
+
+    **MCP：实现留着了，但当前不接线**（``supports_mcp = False``）。走项目级
+    ``.grok/config.toml`` 的 ``[mcp_servers.<name>]``，实测过这些：
+
+      - ``grok mcp list`` 在该目录下认出了项目层的 server（标注 ``(project)``），
+        且从 cwd 一直向上找到 git 根都会找 —— **没有 git 仓库的普通目录也认**。
+      - 但**光有配置文件不够**：``grok mcp doctor`` 报
+        ``✗ folder untrusted (repo-local (project-scoped) server not started for an
+        untrusted folder)``。AICU 每次跑的都是全新目录，从来不在信任库里，
+        所以不额外加 flag 的话就是「写了一份永远不生效的配置」。
+      - 加 ``--trust`` 之后同一份配置变成 ``✓ server started / ✓ handshake OK /
+        ✓ 1 tools discovered``。``--trust`` 没列在 ``grok --help`` 里（隐藏 flag），
+        但 ``grok --trust --version`` 能过解析 —— 别照 binary 里的字符串猜名字。
+        （``--trust-folder`` 是它的**别名**，本机 1.0.5 实测同样能过解析、也能带 ``=``
+        取值；先前误记成「会报 unexpected argument」，此处已更正。要判断一个新拼写
+        认不认，拿 ``--zzzz`` 做对照组 —— clap 对不认识的参数是严格报错的。）
+
+    **为什么验到这个程度还不接线**：上面验的是**CLI 这一侧**（配置认不认、server 起没起、
+    握手通不通）。再往上一层 —— 模型真的去调那个工具、把回显写进产物 —— **没测过**，因为
+    本机没有 ``XAI_API_KEY``（``provider_presets`` 里 xai 那条 ``available: false`` 正是
+    这个原因），认证那条路根本走不到模型。而这个仓库对「MCP 已接入」的口径是
+    **端到端跑通**（见 ``tests/mcp_echo_server.py`` 的说明），不是「配置写得对」。
+
+    所以按 kimi 同一套处理：**实现与单测都留着，先把 ``supports_mcp`` 关掉**。
+    关掉之后它在 ``mcp_enabled_clis()`` 里消失、前端标「（MCP 未接入）」、角色声明到
+    它身上时守卫照常报错 —— 宁可报错说没接线，也不下发一份没人验证过的配置。
+    等有 key 后跑通一次端到端，把下面这行改回 ``True`` 即可。
+    """
+
+    def __init__(self):
+        super().__init__(
+            "grok", "Grok Build", "grok", api_key_env="XAI_API_KEY",
+            prompt_flag="-p",
+            # 基类那个单段式的 --json 在 grok 上不存在，真正的开关在 print_flags
+            # 覆盖里（--output-format 是两段）。留 None 免得有人以为它还用得上。
+            json_flag=None,
+        )
+
+    # 见类 docstring：CLI 侧验过（doctor 握手 OK），模型侧没验过（本机无 XAI_API_KEY）。
+    # 端到端跑通后改回 True 即可，实现与单测都在。
+    supports_mcp = False
+    mcp_workspace_config = (".grok", "config.toml")
+
+    def _mcp_workspace_payload(self, mcp_servers: list) -> str:
+        return _grok_mcp_toml(mcp_servers)
+
+    def build_base_command(
+        self, *, model: Optional[str], skip_permissions: bool, enable_project_skills: bool,
+        mcp_servers: Optional[list] = None,
+    ) -> list:
+        cmd = super().build_base_command(
+            model=model,
+            skip_permissions=skip_permissions,
+            enable_project_skills=enable_project_skills,
+            mcp_servers=mcp_servers,
+        )
+        # 免审批：headless 下没人能点确认，与 qwen / gemini 的 --yolo 同义
+        # （官方文档：--always-approve 别名 --yolo，等同 --permission-mode
+        # bypassPermissions）。
+        if skip_permissions:
+            cmd.append("--always-approve")
+        # 只在真有 mcp 时加：没有下发的 server 就没人需要这份信任，而 --trust 会把
+        # 当前目录写进 grok 的信任库（持久化），没有理由为一次普通运行留下这条记录。
+        # supports_mcp 那一半是必需的：关掉接线时基类不会落盘配置文件，此时再加 --trust
+        # 就是白往 grok 的信任库里写一条记录，换不来任何东西。
+        if mcp_servers and self.supports_mcp:
+            cmd.append("--trust")
+        return cmd
+
+    def print_flags(self, streaming: bool) -> list:
+        """无头输出格式 —— 基类默认的 ``--json`` 对 grok 是个不存在的参数（实测 exit 2）。"""
+        return ["--output-format", "streaming-json" if streaming else "json"]
+
+    def format_stream_event(self, line: str) -> str:
+        """``streaming-json`` 每行是 ``{"type": ..., "data"/"message": ...}``。
+
+        基类找的是顶层字符串键 ``content``/``text``/``message``/``output``，对 grok
+        一条都命中不了（正文那个键叫 ``data``，而 ``type`` 的值才叫 ``text``），
+        照抄基类的结果是流式全程空白。
+        """
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            return line  # 非 JSON 的原始输出（启动日志、panic）照常显示
+        if not isinstance(event, dict):
+            return ""
+        kind = event.get("type")
+        if kind == "text":
+            data = event.get("data")
+            return data if isinstance(data, str) else ""
+        if kind == "error":
+            # 错误得让人看见：grok 的失败收尾就是 {"type":"error","message":...}
+            message = event.get("message")
+            return f"[grok error] {message}" if message else ""
+        # thought / tool_call / tool_call_update / usage / plan / end：没有可展示的正文
+        return ""
+
+    def parse_result(self, raw: str) -> Optional[dict]:
+        """归一化 ``json``（单对象）与 ``streaming-json``（NDJSON）两种输出。
+
+        取不到任何 JSON 事件时返回 None，由调用方按纯文本兜底。
+        """
+        events = _result_events(raw)
+        if not events:
+            return None
+        last = events[-1]
+        if last.get("type") == "error":
+            message = last.get("message")
+            if isinstance(message, str) and message:
+                return {
+                    "result": message,
+                    "session_id": last.get("sessionId") or last.get("session_id"),
+                    "subtype": last.get("subtype"),
+                    "errors": [message],
+                }
+        chunks = [
+            event["data"]
+            for event in events
+            if event.get("type") == "text" and isinstance(event.get("data"), str)
+        ]
+        text = last.get("text")
+        # streaming-json 的末条是 {"type":"end"}，正文只能靠上面拼；
+        # json 的末条就是结果对象本身，正文在 text。
+        result = text if isinstance(text, str) and text else "".join(chunks) or raw.strip()
+        return {
+            "result": result,
+            # 驼峰 sessionId：基类找的是 session_id / conversation_id，两个都不是它。
+            "session_id": last.get("sessionId") or last.get("session_id"),
+            "subtype": last.get("subtype"),
+            "errors": _coerce_errors(last.get("errors")),
+        }
+
+
 # 从设置页的 CLI 下拉里隐藏的 CLI。adapter 与探测逻辑一律保留，只是不出现在列表里，
 # 将来官方支持了把 id 从这里删掉即可放回。
 #
@@ -2347,11 +2946,21 @@ class CursorAdapter(CliAdapter):
 #         设置页根本没有可填的 key 位。
 #     结论：与 gemini 同类——既接不了别家模型，也没法在设置页配起来。
 #     若将来有人有 Cursor 账号并想用它：跑 `agent login`，把 id 从这里删掉即可放回。
-_HIDDEN_CLI_IDS = ("gemini", "cursor")
+#
+#   antigravity：**登不进去，不是「没试过」**。2026-09-17 人工在终端跑 `agy -p hi`，
+#     把浏览器给的授权码粘回同一个进程（PKCE 要求 verifier 与码同进程，这步是对的），
+#     token 都换回来了，最后卡在 eligibility：
+#       error: Eligibility check failed: Your current account is not eligible for
+#       Antigravity, because it is not currently available in your location.
+#     这是账号/地区级的拒绝，跟码、网络、配置都无关 —— 换号之前怎么试都一样，
+#     用户手动开 agy 也进不去。它也因此接不了 MCP（项目级插件那条路没法验，
+#     见 AntigravityAdapter）。同理，`google` 预设在 cli_models.json 里已置
+#     `available: false`（两个 Google 系 CLI 都不可用，那个预设没有落脚点）。
+_HIDDEN_CLI_IDS = ("gemini", "cursor", "antigravity")
 
 
 # 优先级顺序即默认选择顺序（internal > claude > codebuddy > codex > kimi > qwen > opencode > pi > antigravity > grok）。
-# 表里保留 gemini / cursor 以维持既有下标不变，但这两项在 _HIDDEN_CLI_IDS 里，不进下拉。
+# 表里保留 gemini / cursor / antigravity 以维持既有下标不变，但这三项在 _HIDDEN_CLI_IDS 里，不进下拉。
 _ADAPTERS: list[CliAdapter] = [
     ClaudeCodeAdapter("internal", "Internal", "internal"),
     ClaudeCodeAdapter("claude", "Claude Code", "claude"),
@@ -2365,9 +2974,10 @@ _ADAPTERS: list[CliAdapter] = [
     GeminiAdapter(),
     CursorAdapter(),
     # Antigravity 官方安装命令名为 agy，内部 adapter id 保持 antigravity 兼容已有配置。
-    GenericExecAdapter("antigravity", "Antigravity", "agy", api_key_env="GEMINI_API_KEY"),
-    # Grok：官方 README 确认命令名为 grok、认证走浏览器（非简单 API key env）；无头 flags 未公开
-    GenericExecAdapter("grok", "Grok Build", "grok", api_key_env="XAI_API_KEY"),
+    AntigravityAdapter(),
+    # Grok：官方 README 确认命令名为 grok、认证走浏览器（非简单 API key env）；
+    # 无头 flags 未公开，best-guess 部分随类定义（见 GrokAdapter）。
+    GrokAdapter(),
 ]
 
 
@@ -2385,12 +2995,21 @@ def detect_installed() -> list[str]:
 
 
 def mcp_enabled_clis() -> list[str]:
-    """已接入 MCP 下发的 CLI id（按注册顺序）。
+    """已接入 MCP 下发、**且用户在下拉里选得到**的 CLI id（按注册顺序）。
 
     报错文案要用它告诉用户「换成哪个 CLI 才行」。**必须从 adapter 派生**：写死一份
     名单就等于把同一份事实维护两遍，接一个新 CLI 时漏改的那一处会变成一句假话。
+
+    ``_HIDDEN_CLI_IDS`` 要一并滤掉：gemini / cursor 现在是支持 MCP 的，但它们在设置页
+    的下拉里不出现 —— 报错里推荐一个用户根本选不到的 CLI，等于把人指进死胡同。
+    （antigravity 也在隐藏名单里，但它本来就没接 MCP，滤不滤都一样；它们自己的
+    adapter 仍然可用，显式指定 cli_name 时照常生效。）
     """
-    return [adapter.id for adapter in _ADAPTERS if adapter.supports_mcp]
+    return [
+        adapter.id
+        for adapter in _ADAPTERS
+        if adapter.supports_mcp and adapter.id not in _HIDDEN_CLI_IDS
+    ]
 
 
 def detect_default() -> str:

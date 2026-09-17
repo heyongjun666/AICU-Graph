@@ -120,8 +120,9 @@ export const zh: Dict = {
   'settings.cli': 'CLI',
   'settings.autoDetect': '自动检测',
   'settings.notInstalled': '（未安装）',
-  // 措辞刻意是「未接入」而不是「不支持」：codex / qwen / agy 这些 CLI 自己都有 MCP，
-  // 只是 AICU 还没接线。写「不支持」是关于 CLI 的假话，用户会去换 CLI 而不是来问我们。
+  // 措辞刻意是「未接入」而不是「不支持」：这个标注是在说 AICU 这边，不是在给 CLI
+  // 下结论（kimi / pi 的入口取决于本机装的那个版本，agy 自己是有 MCP 的）。
+  // 写「不支持」是关于 CLI 的假话，用户会去换 CLI 而不是来问我们能不能接。
   'settings.mcpNotWired': '（MCP 未接入）',
   'settings.model': '模型',
   'settings.selectOrTypeModel': '选择或输入模型',

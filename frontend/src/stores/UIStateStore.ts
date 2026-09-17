@@ -4,15 +4,13 @@
 // ============================================================================
 
 import { create } from 'zustand';
-import { ModalType, SSEClientStatus, ExportPhase, Toast } from '../types';
+import { SSEClientStatus, Toast } from '../types';
 
 // ============================================================================
 // 状态接口
 // ============================================================================
 
 interface UIState {
-  /** 弹窗可见性记录 */
-  modals: Record<ModalType, boolean>;
   /** Toast 列表 */
   toasts: Toast[];
   /** 是否显示依赖边 */
@@ -25,12 +23,6 @@ interface UIState {
   highContrastMode: boolean;
   /** SSE 客户端状态 */
   clientStatus: SSEClientStatus;
-  /** 导出阶段 */
-  exportPhase: ExportPhase;
-  /** 当前任务文本（用于提交弹窗回显） */
-  currentTaskText: string;
-  /** 全局搜索关键词 */
-  globalSearchKeyword: string;
   /** 界面语言 */
   language: 'zh' | 'en';
 }
@@ -40,15 +32,6 @@ interface UIState {
 // ============================================================================
 
 interface UIActions {
-  /** 打开弹窗 */
-  openModal: (type: ModalType) => void;
-  /** 关闭弹窗 */
-  closeModal: (type: ModalType) => void;
-  /** 切换弹窗 */
-  toggleModal: (type: ModalType) => void;
-  /** 关闭所有弹窗 */
-  closeAllModals: () => void;
-
   /** 添加 Toast */
   addToast: (toast: Omit<Toast, 'id'>) => void;
   /** 移除 Toast */
@@ -71,15 +54,6 @@ interface UIActions {
 
   /** 设置客户端状态 */
   setClientStatus: (status: SSEClientStatus) => void;
-
-  /** 设置导出阶段 */
-  setExportPhase: (phase: ExportPhase) => void;
-
-  /** 设置当前任务文本 */
-  setCurrentTaskText: (text: string) => void;
-
-  /** 设置全局搜索关键词 */
-  setGlobalSearchKeyword: (keyword: string) => void;
 
   /** 设置界面语言 */
   setLanguage: (language: 'zh' | 'en') => void;
@@ -117,24 +91,12 @@ function readCachedLanguage(): 'zh' | 'en' {
 }
 
 const initialState: UIState = {
-  modals: {
-    [ModalType.SubmitTask]: false,
-    [ModalType.EditTask]: false,
-    [ModalType.Export]: false,
-    [ModalType.GlobalLogSearch]: false,
-    [ModalType.RecoveryGuide]: false,
-    [ModalType.StopConfirm]: false,
-    [ModalType.NodeDetail]: false,
-  },
   toasts: [],
   showDependencyEdges: true,
   performanceMode: false,
   colorBlindMode: false,
   highContrastMode: false,
   clientStatus: SSEClientStatus.Disconnected,
-  exportPhase: ExportPhase.Idle,
-  currentTaskText: '',
-  globalSearchKeyword: '',
   language: readCachedLanguage(),
 };
 
@@ -144,30 +106,6 @@ const initialState: UIState = {
 
 export const useUIStateStore = create<UIStateStore>((set) => ({
   ...initialState,
-
-  // ---- 弹窗操作 ----
-  openModal: (type: ModalType) =>
-    set((state) => ({
-      modals: { ...state.modals, [type]: true },
-    })),
-
-  closeModal: (type: ModalType) =>
-    set((state) => ({
-      modals: { ...state.modals, [type]: false },
-    })),
-
-  toggleModal: (type: ModalType) =>
-    set((state) => ({
-      modals: { ...state.modals, [type]: !state.modals[type] },
-    })),
-
-  closeAllModals: () =>
-    set((state) => {
-      const closed = Object.fromEntries(
-        Object.keys(state.modals).map((key) => [key, false]),
-      ) as Record<ModalType, boolean>;
-      return { modals: closed };
-    }),
 
   // ---- Toast 操作 ----
   addToast: (toast: Omit<Toast, 'id'>) =>
@@ -200,15 +138,6 @@ export const useUIStateStore = create<UIStateStore>((set) => ({
 
   // ---- 连接状态 ----
   setClientStatus: (status: SSEClientStatus) => set({ clientStatus: status }),
-
-  // ---- 导出状态 ----
-  setExportPhase: (phase: ExportPhase) => set({ exportPhase: phase }),
-
-  // ---- 任务文本 ----
-  setCurrentTaskText: (text: string) => set({ currentTaskText: text }),
-
-  // ---- 搜索 ----
-  setGlobalSearchKeyword: (keyword: string) => set({ globalSearchKeyword: keyword }),
 
   // ---- 语言 ----
   setLanguage: (language: 'zh' | 'en') => {

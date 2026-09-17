@@ -51,26 +51,6 @@ export enum SSEClientStatus {
   Disconnected = 'Disconnected',
 }
 
-/** 导出阶段 */
-export enum ExportPhase {
-  Idle = 'Idle',
-  Collecting = 'Collecting',
-  Packing = 'Packing',
-  Downloading = 'Downloading',
-  Done = 'Done',
-}
-
-/** 弹窗类型（共 7 种） */
-export enum ModalType {
-  SubmitTask = 'SubmitTask',
-  EditTask = 'EditTask',
-  Export = 'Export',
-  GlobalLogSearch = 'GlobalLogSearch',
-  RecoveryGuide = 'RecoveryGuide',
-  StopConfirm = 'StopConfirm',
-  NodeDetail = 'NodeDetail',
-}
-
 // ============================================================================
 // 数据接口
 // ============================================================================

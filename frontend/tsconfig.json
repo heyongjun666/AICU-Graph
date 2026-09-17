@@ -18,6 +18,6 @@
     "forceConsistentCasingInFileNames": true
   },
   "include": ["src"],
-  "exclude": ["src/blog", "src/**/__tests__", "src/**/*.test.ts", "src/**/*.test.tsx"],
+  "exclude": ["src/**/__tests__", "src/**/*.test.ts", "src/**/*.test.tsx"],
   "references": [{ "path": "./tsconfig.node.json" }]
 }

@@ -535,7 +535,6 @@ Shared FS（共享分区）是产物单一事实源。
 | `frontend/src/components/mdeditor/` | Markdown 编辑器（编辑/预览/图片上传/自动保存） |
 | `frontend/src/utils/` `dagreLayout.ts` `eventBuffer.ts` `layoutCache.ts` `api.ts` | 布局/事件缓冲/API 工具 |
 | `frontend/src/hooks/` | `useGraphOptimizations` |
-| `frontend/src/infra/` | 前端基础设施 API 与运行时接口 |
 
 ---
 

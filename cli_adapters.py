@@ -36,7 +36,6 @@ from typing import Optional
 from runtime.credentials import (
     api_key_env_for_vendor,
     resolve_internal_username,
-    resolve_sk_for_model,
     vendor_of_model,
 )
 
@@ -729,6 +728,25 @@ def _extract_event_text(event: dict) -> str:
     if isinstance(part, dict):
         return _extract_event_text(part)
     return ""
+
+
+def _format_json_event(line: str, extract=_extract_event_text) -> str:
+    """把一行 JSONL 事件渲染成可见文本（OpenCode / Pi / Gemini 等同形 CLI）。
+
+    两种回退语义故意不对称，缺一不可：
+      - 解析不出 JSON → **原样返回该行**，非 JSONL 的原始输出（启动日志、报错）仍能显示；
+      - 解析出来但不是对象 → 返回空串，这种行没有可展示的正文，返回原文只会刷屏。
+
+    ``extract`` 由各 CLI 给：Pi 需要 ``_assistant_text``（它的 ``--mode json`` 会把
+    用户消息也回显，通用提取器会把提问当成回复），其余用默认的通用提取器。
+    """
+    try:
+        event = json.loads(line)
+    except json.JSONDecodeError:
+        return line
+    if not isinstance(event, dict):
+        return ""
+    return extract(event)
 
 
 def _extract_session_id(event: dict) -> Optional[str]:
@@ -1975,13 +1993,7 @@ class OpenCodeAdapter(CliAdapter):
         return ([prompt], False)
 
     def format_stream_event(self, line: str) -> str:
-        try:
-            event = json.loads(line)
-        except json.JSONDecodeError:
-            return line
-        if not isinstance(event, dict):
-            return ""
-        return _extract_event_text(event)
+        return _format_json_event(line)
 
     def parse_result(self, raw: str) -> Optional[dict]:
         text = raw.strip()
@@ -2117,13 +2129,7 @@ class PiAdapter(CliAdapter):
         return _extract_event_text(event)
 
     def format_stream_event(self, line: str) -> str:
-        try:
-            event = json.loads(line)
-        except json.JSONDecodeError:
-            return line
-        if not isinstance(event, dict):
-            return ""
-        return self._assistant_text(event)
+        return _format_json_event(line, self._assistant_text)
 
     def parse_result(self, raw: str) -> Optional[dict]:
         text = raw.strip()
@@ -2242,13 +2248,7 @@ class GeminiAdapter(CliAdapter):
         return env
 
     def format_stream_event(self, line: str) -> str:
-        try:
-            event = json.loads(line)
-        except json.JSONDecodeError:
-            return line
-        if not isinstance(event, dict):
-            return ""
-        return _extract_event_text(event)
+        return _format_json_event(line)
 
     def parse_result(self, raw: str) -> Optional[dict]:
         text = raw.strip()

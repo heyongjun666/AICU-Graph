@@ -326,11 +326,31 @@ class ErrorObject:
 
 
 # ============================================================================
+# JSON 序列化混入
+# ============================================================================
+
+class _JsonSerializable:
+    """给 dataclass 提供统一的 ``to_json`` 口径。
+
+    LogEntry / ExecutionPlan / Node / Edge 此前各写一份逐字相同的 ``to_json``。
+    散着写的话，将来要改序列化口径（换 ``ensure_ascii``、加字段过滤、换 default）
+    得同时改四处，漏一处就多一种落盘格式。
+
+    只并 ``to_json``，不并 ``from_json``：反序列化各自要重建 Step 列表、把 str
+    还原成枚举，那些差异是真实的，不是重复。
+    """
+
+    def to_json(self) -> str:
+        """序列化为 JSON 字符串。"""
+        return json.dumps(asdict(self), default=_json_serialize, ensure_ascii=False)
+
+
+# ============================================================================
 # LogEntry
 # ============================================================================
 
 @dataclass
-class LogEntry:
+class LogEntry(_JsonSerializable):
     """日志条目。
 
     字段:
@@ -356,10 +376,6 @@ class LogEntry:
                     f"Invalid log level: {self.level}. "
                     f"Must be one of {_VALID_LOG_LEVELS}"
                 )
-
-    def to_json(self) -> str:
-        """序列化为 JSON 字符串。"""
-        return json.dumps(asdict(self), default=_json_serialize, ensure_ascii=False)
 
 
 # ============================================================================
@@ -422,17 +438,13 @@ class Step:
 
 
 @dataclass
-class ExecutionPlan:
+class ExecutionPlan(_JsonSerializable):
     """逻辑执行计划（Manager 的输出协议）。
 
     字段:
         steps: 逻辑步骤列表。
     """
     steps: list[Step] = field(default_factory=list)
-
-    def to_json(self) -> str:
-        """序列化为 JSON 字符串。"""
-        return json.dumps(asdict(self), default=_json_serialize, ensure_ascii=False)
 
     @classmethod
     def from_json(cls, json_str: str) -> "ExecutionPlan":
@@ -458,7 +470,7 @@ class ExecutionPlan:
 # ============================================================================
 
 @dataclass
-class Node:
+class Node(_JsonSerializable):
     """Graph 的唯一节点存储单元。
 
     只保存不可推导字段。children/dependencies/dependents 全部由 Edge 反查。
@@ -565,10 +577,6 @@ class Node:
         """
         self.status = new_status
 
-    def to_json(self) -> str:
-        """序列化为 JSON 字符串。"""
-        return json.dumps(asdict(self), default=_json_serialize, ensure_ascii=False)
-
     @classmethod
     def from_json(cls, json_str: str) -> "Node":
         """从 JSON 字符串反序列化。"""
@@ -649,7 +657,7 @@ class Node:
 # ============================================================================
 
 @dataclass
-class Edge:
+class Edge(_JsonSerializable):
     """Graph 的关系存储单元。
 
     字段:
@@ -672,10 +680,6 @@ class Edge:
                     f"Invalid edge type: '{self.type}'. "
                     f"Must be one of {[t.value for t in EdgeType]}"
                 )
-
-    def to_json(self) -> str:
-        """序列化为 JSON 字符串。"""
-        return json.dumps(asdict(self), default=_json_serialize, ensure_ascii=False)
 
     @classmethod
     def from_json(cls, json_str: str) -> "Edge":

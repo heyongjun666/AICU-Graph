@@ -59,6 +59,18 @@ class Planner:
     # Public API
     # ================================================================
 
+    def _validate_or_raise(self, plan: ExecutionPlan, parent_node_id: str) -> None:
+        """图变更前的确定性校验：父节点关系 + 计划本身，不通过则抛 ``PlanValidationError``。
+
+        两条建图入口（``translate`` / ``translate_revision``）都必须先过这一关——
+        校验失败时不能留下半个图。抽成一处是为了让「任何图变更前拦截」这个不变量
+        只有一份，将来加第三条入口也不会漏掉。
+        """
+        self._graph.validate_parent(None, parent_node_id)
+        errors = self.validate_plan(plan)
+        if errors:
+            raise PlanValidationError(errors)
+
     def translate(
         self,
         plan: ExecutionPlan,
@@ -87,10 +99,7 @@ class Planner:
             PlanValidationError: 校验失败，Graph 不会被修改。
         """
         # 1. 校验父节点关系和计划；在分配 ID 或写图前完成全部确定性检查。
-        self._graph.validate_parent(None, parent_node_id)
-        errors = self.validate_plan(plan)
-        if errors:
-            raise PlanValidationError(errors)
+        self._validate_or_raise(plan, parent_node_id)
 
         # 2. 分配 UUID
         step_to_uuid: dict[str, str] = {}
@@ -174,10 +183,7 @@ class Planner:
             PlanValidationError: 校验失败，Graph 不会被修改。
         """
         # 1. 校验父节点关系和计划（任何图变更前拦截）。
-        self._graph.validate_parent(None, parent_node_id)
-        errors = self.validate_plan(plan)
-        if errors:
-            raise PlanValidationError(errors)
+        self._validate_or_raise(plan, parent_node_id)
 
         # 2. 分配 UUID：复用 step → 既有子节点 id；新 step → uuid4()
         step_to_uuid: dict[str, str] = {}

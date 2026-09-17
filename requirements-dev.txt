@@ -1,0 +1,15 @@
+# 开发/测试专用依赖。
+#
+# 运行测试：pip install -r requirements-dev.txt
+#   python3 -m pytest      —— 单元与集成测试（见 pytest.ini 的 testpaths）
+#   python3 run_tests.py   —— 历史自测套件，只用标准库
+#
+# 生产依赖从 requirements.txt 继承，此处不重复列（改版本只改那一处）。
+
+-r requirements.txt
+
+pytest>=8.0.0
+
+# fastapi.testclient 依赖 httpx；不装的话 tests/ 里所有用到 TestClient 的文件
+# 会在 import 阶段就失败，看起来像「测试坏了」而不是「少装了一个包」。
+httpx>=0.27.0

@@ -157,6 +157,27 @@ http://localhost:8080
 
 After startup, open the workbench or use the REST API to create sessions and submit tasks. For CLI installation, credential configuration, API details, and troubleshooting, see [docs/INSTALL.md](docs/INSTALL.md).
 
+## Testing
+
+There are three suites, and none of them subsumes another — a green `run_tests.py` says nothing about the pytest suite, and vice versa.
+
+| Suite | Command | Cases |
+|---|---|---|
+| Core primitives (self-contained runner, stdlib only) | `python3 run_tests.py` | 144 |
+| Full pytest suite | `python3 -m pytest` | 1609 |
+| Frontend (vitest + Testing Library) | `cd frontend && npm test` | 297 |
+
+Install the test dependencies first:
+
+```bash
+pip install -r requirements-dev.txt
+cd frontend && npm ci
+```
+
+`pytest.ini` deliberately pins discovery to `tests/` and `runtime/`. Without it, a bare `pytest` from the repository root wanders into `runtime_sessions/` and collects tests belonging to whatever project AICU was last run against, so "green locally" and "green in CI" would not be the same set. See [docs/ARCHITECTURE.md §10.7](docs/ARCHITECTURE.md#107-测试体系两套后端--一套前端) for what each suite covers and how to run a single file.
+
+CI (`.github/workflows/ci.yml`) runs exactly these three commands as three independent jobs on every push and pull request.
+
 ## Documentation
 
 - [Installation, configuration, and startup](docs/INSTALL.md)

@@ -1,0 +1,82 @@
+name: CI
+
+# 每次 push 与 PR 都跑。三个 job 互不依赖，谁红了就是谁红了，不用顺着日志翻。
+#
+# 本地等价命令（跑之前先 pip install -r requirements-dev.txt）：
+#   python3 -m pytest           → backend-pytest
+#   python3 run_tests.py        → backend-selftest
+#   cd frontend && npx tsc --noEmit && npm test   → frontend
+#
+# 注意 backend-pytest 必须从仓库根跑：pytest.ini 的 testpaths 与 conftest.py 的
+# sys.path 注入都依赖仓库根作为 cwd。
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  backend-pytest:
+    name: 后端 · pytest
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+
+      - name: 安装依赖
+        run: pip install -r requirements-dev.txt
+
+      # 收集数由 pytest.ini 的 testpaths 钉死为 1609（tests/ 1598 + runtime 11）。
+      # 数字对不上说明有测试被漏收或误收，先看那个文件，别急着改这里。
+      - name: 运行测试
+        run: python -m pytest -q
+
+  backend-selftest:
+    name: 后端 · run_tests.py
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      # 这套自带 runner，不用 pytest，但需要生产依赖（它会 import runtime.*）。
+      - name: 安装依赖
+        run: pip install -r requirements.txt
+
+      # 失败时脚本自身 sys.exit(1)，无需在此检查输出文本。
+      - name: 运行自带测试套件
+        run: python run_tests.py
+
+  frontend:
+    name: 前端 · 类型检查 + 测试
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      # 用 ci 而非 install：严格按 lock 文件装，避免 CI 上悄悄升版本。
+      - name: 安装依赖
+        run: npm ci
+
+      # 放在测试前：类型错误比测试失败更好定位，先让它先报。
+      - name: 类型检查
+        run: npx tsc --noEmit
+
+      - name: 运行测试
+        run: npm test

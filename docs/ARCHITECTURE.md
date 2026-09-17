@@ -38,7 +38,7 @@
   - [10.4 runtime/context/](#104-runtimecontext)
   - [10.5 executables/](#105-executables)
   - [10.6 roles/（数据驱动配置）](#106-roles数据驱动配置)
-  - [10.7 tests/ 与根级测试脚本](#107-tests-与根级测试脚本)
+  - [10.7 测试体系（两套后端 + 一套前端）](#107-测试体系两套后端--一套前端)
   - [10.8 frontend/（Vite+React 工作台）](#108-frontendvite-react-工作台)
 - [十一、新手修改指南：想改 X → 读 Y](#十一新手修改指南想改-x--读-y)
 - [十二、环境变量与功能开关总表](#十二环境变量与功能开关总表)
@@ -503,7 +503,46 @@ Shared FS（共享分区）是产物单一事实源。
 | `roles/Worker/acceptance.yaml` `architecture.yaml` `code.yaml` `data_analysis.yaml` `deploy.yaml` `dev_lead.yaml` `dev_member.yaml` `document.yaml` `grill.yaml` `incremental_plan.yaml` `prototype.yaml` `requirements.yaml` `test.yaml` | 具体 Worker 角色 |
 | `roles/system_role/default.yaml` `roles/system_role/router.yaml` | 系统级角色配置 |
 
-### 10.7 tests/ 与根级测试脚本
+### 10.7 测试体系（两套后端 + 一套前端）
+
+仓库里有 **两套互不替代的后端测试**，外加一套前端测试。不知道这层关系的人容易误判：`run_tests.py` 全绿**不代表** pytest 那套也绿（反之亦然），两边的用例集合几乎不重叠。
+
+| 体系 | 位置 | 怎么跑 | 规模 | 依赖 |
+|---|---|---|---|---|
+| **pytest 套件** | `tests/` + `runtime/test_sse_push.py` | `python3 -m pytest` | 1609 | `requirements-dev.txt` |
+| **自带测试套件** | `run_tests.py`（单文件） | `python3 run_tests.py` | 144 | `requirements.txt`（不需要 pytest） |
+| **前端测试** | `frontend/src/**/*.test.tsx` | `cd frontend && npm test` | 297 | `npm ci` |
+
+**分工：**
+
+- **`run_tests.py` —— 核心原语的确定性套件。** 自带 runner（不用 pytest），只用标准库，执行后产出 `test_report.md`。9 个分组全部落在「不碰网络、不碰真实 CLI，最多只读写本地临时目录」的确定性逻辑层：`TestModels`(30) / `TestGraph`(25) / `TestStateMachine`(30) / `TestPlanner`(20) / `TestPersistence`(10) / `TestEventBus`(10) / `TestSSEManager`(6) / `TestExecutableRegistry`(3) / `TestIntegration`(10)。改动这层原语时，它是最快的第一道闸；加用例直接写在文件里，不需要改任何配置。
+- **`tests/` —— 覆盖面更宽、粒度更细的 pytest 套件。** 用 `conftest.py` 的 fixture 与显式 fake 顶替真实 CLI，覆盖 FastAPI app（`server` / `session_server`）、Scheduler 重试、Router 生命周期、Event Bus 投递语义、Manager/Worker 协作、共享工作区、CLI 适配器等。需要额外装 pytest 与 httpx。
+- **前端 —— vitest + Testing Library**，跑在 jsdom 里；`npx tsc --noEmit` 另做一遍全量类型检查。
+
+**`pytest.ini` 把测试发现范围钉死为 `testpaths = tests runtime`。** 不钉的话，从仓库根裸跑 `pytest` 会漫游进 `runtime_sessions/`——那是 AICU 自己的会话工作区，里面可能带着被测项目自己的 `test_*.py`，会让「本地跑过」和「CI 跑过」不是同一个集合。`norecursedirs` 另外挡住 `nodes/` `workspaces/` 等运行时数据目录。
+
+**只跑单文件 / 单个用例：**
+
+```bash
+python3 -m pytest tests/test_planner.py              # 单文件
+python3 -m pytest tests/test_planner.py -k num_ccs   # 按名字筛
+python3 -m pytest -x                                 # 第一个失败就停
+cd frontend && npx vitest run src/components/__tests__/NodeInspector.test.tsx
+```
+
+#### 与 CI 的对应关系
+
+`.github/workflows/ci.yml` 三个 job 互不依赖，与上表一一对应：
+
+| CI job | 本地等价命令 |
+|---|---|
+| `backend-pytest` | `python3 -m pytest -q` |
+| `backend-selftest` | `python3 run_tests.py` |
+| `frontend` | `cd frontend && npm ci && npx tsc --noEmit && npm test` |
+
+提交前把这三条各跑一遍，就等于预跑了一遍 CI。
+
+#### 文件清单
 
 | 文件 | 职责 |
 |---|---|
@@ -654,13 +693,14 @@ Shared FS（共享分区）是产物单一事实源。
 
 | 症状/问题 | 排查入口 |
 |---|---|
-| 测试挂了但不确定改动影响面 | 先跑 `python3 run_tests.py`，再按需运行 `pytest tests/ -x` |
+| 测试挂了但不确定改动影响面 | 先跑 `python3 run_tests.py`（核心原语，快），再按需 `python3 -m pytest tests/ -x` |
+| 想跑完整测试 / 想知道两套测试的关系 | 见 §10.7 测试体系 |
 | 事件没到达目标节点 | 看 `runtime/agent_events.py` 的 `_route_locked`/`_deliver`；检查 `runtime/router.py`（Router 是否返回目标、目标 node_id 是否正确） |
 | 节点没被重激活 | 看 `runtime/scheduler.py` 的 `_process_reactivation_events`；确认事件已投递到目标 inbox 且目标非 RUNNING；检查 C1 协作预算 |
 | Manager 评审卡住 | 看 `executables/manager.py` 的 `_review` 与 `_parse_review_assessments`；事件是否被 `flush_node_events` 兜底 |
 | 产物没落到共享分区 | 看 `executables/worker.py` 的 `_normalize_worker_artifact` 与 `runtime/workspace_resolver.py` 的分区解析 |
 | 想看真实事件流转 | `events.json` 全局日志 + 前端 Event Stream / `runtime/sse_manager.py` |
-| 想运行确定性测试 | `python3 run_tests.py`（运行项目内置测试） |
+| 想运行确定性测试 | `python3 run_tests.py`（核心原语，自带 runner，产出 `test_report.md`） |
 
 ---
 

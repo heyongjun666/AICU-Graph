@@ -2403,19 +2403,11 @@ class Runtime(RuntimeGateway, SchedulerDelegate):
             raise ValueError("Workspace path escapes its root")
         return target
 
-    def get_artifact(self, node_id: str, path: str) -> str:
-        """读取节点的产物文件。
+    def _resolve_artifact_path(self, node_id: str, path: str) -> str:
+        """把产物路径解析为真实绝对路径，并校验它没越出节点工作空间。
 
-        Args:
-            node_id: 目标节点 ID。
-            path: 文件路径（绝对或相对 workspace_root）。
-
-        Returns:
-            文件内容。
-
-        Raises:
-            ValueError: 路径穿越。
-            FileNotFoundError: 文件不存在。
+        get_artifact 与 list_artifact_dir 共用这一段：产物既可以当文件读、也可以当
+        目录列，但「这个 path 指向哪里、允不允许」只有一条事实，各写一份迟早分叉。
         """
         workspace = self.get_node_workspace(node_id)
         real_root = os.path.realpath(workspace)
@@ -2431,8 +2423,43 @@ class Runtime(RuntimeGateway, SchedulerDelegate):
             p == real_path or real_path.startswith(p + os.sep) for p in allowed
         ):
             raise ValueError(f"Path traversal detected: {path}")
+        return real_path
+
+    def get_artifact(self, node_id: str, path: str) -> str:
+        """读取节点的产物文件。
+
+        Args:
+            node_id: 目标节点 ID。
+            path: 文件路径（绝对或相对 workspace_root）。
+
+        Returns:
+            文件内容。
+
+        Raises:
+            ValueError: 路径穿越。
+            FileNotFoundError: 文件不存在。
+            IsADirectoryError: 路径指向目录（调用方应改用 list_artifact_dir）。
+        """
+        real_path = self._resolve_artifact_path(node_id, path)
         with open(real_path, "r", encoding="utf-8", errors="replace") as file:
             return file.read()
+
+    def list_artifact_dir(
+        self, node_id: str, path: str
+    ) -> Optional[list[dict[str, Any]]]:
+        """产物路径指向目录时，列举它下面的一层条目；指向文件时返回 None。
+
+        与 list_node_results 同口径（同一个 _list_dir_entries）：条目的 ``path``
+        相对被列举的目录本身。
+
+        Raises:
+            ValueError: 路径穿越。
+            FileNotFoundError: 路径不存在。
+        """
+        real_path = self._resolve_artifact_path(node_id, path)
+        if not os.path.isdir(real_path):
+            return None
+        return self._list_dir_entries(real_path, real_path)
 
     def get_graph_snapshot(self) -> dict:
         """获取 Graph 快照（序列化为可 JSON 的 dict）。"""

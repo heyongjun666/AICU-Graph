@@ -4,6 +4,7 @@ import threading
 import time
 from pathlib import Path
 
+import pytest
 from fastapi.testclient import TestClient
 
 from executables.base import Executable, ExecutableContext
@@ -39,18 +40,6 @@ class _BlockingExecutable(Executable):
         if not self.release.wait(timeout=5):
             return NodeStatus.FAILED
         return NodeStatus.COMPLETED
-
-    def stop(self, ctx: ExecutableContext) -> None:
-        self.release.set()
-
-    def pause(self, ctx: ExecutableContext) -> None:
-        self.release.set()
-
-    def resume(self, ctx: ExecutableContext) -> NodeStatus:
-        return self.run(ctx)
-
-    def cleanup_resources(self, ctx: ExecutableContext) -> None:
-        pass
 
 
 def _wait_for(predicate, timeout=3.0):
@@ -806,6 +795,63 @@ def test_node_result_and_activity_endpoints(session_client, session_manager):
     streamed = next(item for item in logs if item["message"] == "Drafting")
     assert streamed["cc_id"] == "CC-0"
     assert streamed["phase"] == "streaming"
+
+
+def test_artifact_endpoint_lists_directory_and_reads_file(session_client, session_manager):
+    """产物是文件时返回内容；是目录时返回一层清单而不是 500。
+
+    Manager 的 artifact_path 就是它的 workspace（目录），此前 open() 抛
+    IsADirectoryError 一路冒成 500，前端拿到的是「服务端错误」。
+    """
+    session = _create_session(session_client, "Inspect artifact")
+    session_id = session["id"]
+    node = session_client.post(
+        f"/v1/sessions/{session_id}/nodes",
+        json={"task": "t", "exec_type": "worker"},
+    ).json()
+    node_id = node["id"]
+    runtime = session_manager.get_session(session_id).runtime
+
+    # 未产出：形状不变
+    assert session_client.get(
+        f"/v1/sessions/{session_id}/nodes/{node_id}/artifact"
+    ).json() == {"path": None, "content": None}
+
+    output_dir = Path(runtime.get_node_workspace(node_id)) / "output"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    (output_dir / "report.md").write_text("# Report", encoding="utf-8")
+    node = runtime.get_node(node_id)
+
+    # 目录：目录清单，条目口径与 /results 一致
+    runtime.update_node_status(node_id, node.status, artifact_path=str(output_dir))
+    # 反证：get_artifact 面对目录本来就是 IsADirectoryError（旧端点未捕获 → 500），
+    # 所以端点必须先判目录，而不是指望读文件成功。
+    with pytest.raises(IsADirectoryError):
+        runtime.get_artifact(node_id, runtime.get_node(node_id).artifact_path)
+    assert runtime.list_artifact_dir(node_id, "output") is not None
+    assert runtime.list_artifact_dir(node_id, "output/report.md") is None
+    listed = session_client.get(
+        f"/v1/sessions/{session_id}/nodes/{node_id}/artifact"
+    )
+    assert listed.status_code == 200, listed.text
+    body = listed.json()
+    assert body["path"] == runtime.get_node(node_id).artifact_path == "output"
+    assert body["content"] is None
+    assert body["artifact_kind"] == "directory"
+    assert [entry["name"] for entry in body["entries"]] == ["report.md"]
+    assert body["entries"][0]["path"] == "report.md"
+
+    # 文件：响应逐字不变，仍然是 {path, content}
+    runtime.update_node_status(node_id, node.status, artifact_path=str(output_dir / "report.md"))
+    read = session_client.get(
+        f"/v1/sessions/{session_id}/nodes/{node_id}/artifact"
+    )
+    assert read.status_code == 200, read.text
+    assert read.json() == {
+        "path": runtime.get_node(node_id).artifact_path,
+        "content": "# Report",
+    }
+    assert read.json()["path"] == "output/report.md"
 
 
 def test_structured_role_schema_defaults_and_validation(session_manager, tmp_path):

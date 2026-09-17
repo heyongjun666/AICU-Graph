@@ -806,6 +806,17 @@ def create_session_app(
         if not node.artifact_path:
             return {"path": None, "content": None}
         try:
+            # 产物是一整个目录时（Manager 的产物就是它的 workspace）没有「文件内容」
+            # 可读：此前直接 open() 会抛 IsADirectoryError 变成 500。改为返回一层
+            # 目录清单，条目口径与 list_node_results / 工作区视图一致。
+            entries = runtime.list_artifact_dir(node_id, node.artifact_path)
+            if entries is not None:
+                return {
+                    "path": node.artifact_path,
+                    "content": None,
+                    "artifact_kind": "directory",
+                    "entries": entries,
+                }
             return {
                 "path": node.artifact_path,
                 "content": runtime.read_artifact(node_id, node.artifact_path),

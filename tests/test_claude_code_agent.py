@@ -82,6 +82,22 @@ class TestTransientMcpFiles:
         """
         monkeypatch.setattr(cli_adapters.Path, "home", lambda: tmp_path / "home")
 
+    @pytest.fixture(autouse=True)
+    def _qwen_counts_as_installed(self, monkeypatch):
+        """本类只关心 ``.qwen/`` 配置文件的生死，不关心 qwen 二进制在不在本机。
+
+        显式传 ``cli_name`` 时 ``ClaudeCodeAgent`` 会额外查一次 ``is_installed()``
+        （claude_code_agent.py 的「显式指定」分支），CI runner 上没装 qwen 就在构造期
+        抛错 —— 而本类测的是 ``provision()`` 写文件、收尾删文件，与二进制在不在无关。
+
+        为什么不放进 tests/conftest.py 的全局 fixture：那里钉的是自动探测路径
+        （``detect_cli``），而这四个用例走的是显式指定路径。更关键的是
+        ``is_installed`` 一旦全局为真，``test_cli_adapters.py::TestDetect`` 的三个
+        用例就失去意义了 —— 它们正是靠 ``shutil.which`` 的假实现来验证优先级排序和
+        「都没装则抛错」的。所以在本类内收窄。
+        """
+        monkeypatch.setattr(cli_adapters.CliAdapter, "is_installed", lambda self: True)
+
     def test_config_exists_while_the_cli_runs_then_is_gone(self, tmp_path, monkeypatch):
         """文件必须在 Popen 之前就位（CLI 启动时读），且 chat() 返回后不留在盘上。"""
         seen = {}

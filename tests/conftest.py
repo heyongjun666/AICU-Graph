@@ -62,6 +62,31 @@ def wait_until(condition, timeout=5.0, interval=0.1):
 # ============================================================================
 
 
+@pytest.fixture(autouse=True)
+def _assume_a_cli_is_installed(monkeypatch):
+    """假定跑测试的机器上装了 AI Coding CLI。
+
+    ``ClaudeCodeAgent`` 在**构造期**就会探测本机 CLI（``claude_code_agent.py`` 的
+    ``get_adapter(detect_cli())``），探测不到直接抛 ``RuntimeError``。可绝大多数用例
+    关心的是 prompt 拼装 / 工作区布局 / 评审解析这类逻辑，跟「本机装了哪个 CLI」
+    无关 —— 它们已经把 ``cc.chat`` 打了桩。
+
+    不钉住的话，测试结果就取决于跑测试的机器：开发机装齐了 7 个 CLI 所以全绿，
+    CI runner 一个都没有所以 55 个用例红。「本地绿」与「CI 绿」不是同一个集合。
+
+    为什么 patch 在 ``detect_cli`` 这一层，而不是 ``cli_adapters.detect_default``：
+    探测逻辑本身仍要被真实覆盖 —— ``tests/test_cli_adapters.py::TestDetect`` 的三个
+    用例自己 patch ``shutil.which``，从下游验证优先级排序与「都没装则抛错」。打在
+    ``detect_cli`` 上只影响构造路径，不碰那条线。
+
+    固定成 ``"claude"`` 在任何机器上都成立：``get_adapter`` 只查注册表，不检查是否
+    真的装了（「装没装」由 ``is_installed`` 单独回答）。
+    """
+    import claude_code_agent
+
+    monkeypatch.setattr(claude_code_agent, "detect_cli", lambda: "claude")
+
+
 @pytest.fixture
 def event_bus():
     """EventBus fixture."""

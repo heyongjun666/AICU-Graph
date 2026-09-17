@@ -542,6 +542,10 @@ cd frontend && npx vitest run src/components/__tests__/NodeInspector.test.tsx
 
 提交前把这三条各跑一遍，就等于预跑了一遍 CI。
 
+> CI runner 上 `tests/test_codegraph_context.py` 会有 1 个用例 skip（需要 `codegraph` 二进制，runner 没装），所以 CI 显示 `1608 passed, 1 skipped`，本机工具装齐则是 `1609 passed`。差值就是这一个，不是测试被漏收。
+
+**测试不依赖跑测试的机器上装了什么 CLI。** `ClaudeCodeAgent` 在构造期会探测本机 CLI，`tests/conftest.py` 有一条 autouse fixture 把这一步钉死——否则「本地绿」与「CI 绿」会变成两个不同的集合（开发机通常装齐了 CLI，runner 一个都没有）。要验证这一点，把 PATH 里的 AI CLI 摘掉跑一遍即可：`env PATH="/usr/bin:/bin" python3 -m pytest -q`。
+
 #### 文件清单
 
 | 文件 | 职责 |

@@ -473,8 +473,6 @@ export interface SearchLogsResponse {
 
 /** ReactFlow Node 的 data 字段 */
 export type RFNodeData = GraphNode & {
-  colorBlindMode?: boolean;
-  highContrastMode?: boolean;
   performanceMode?: boolean;
   /** 是否被事件联动高亮（事件的生产/消费节点） */
   highlighted?: boolean;

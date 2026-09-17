@@ -70,8 +70,6 @@ const GraphCanvasInner: React.FC = () => {
   const highlightedNodeIds = useEventStore((state) => state.highlightedNodeIds);
   const clearHighlight = useEventStore((state) => state.clearHighlight);
   const {
-    colorBlindMode,
-    highContrastMode,
     showDependencyEdges,
     performanceMode,
   } = useUIStateStore();
@@ -99,8 +97,6 @@ const GraphCanvasInner: React.FC = () => {
         ...n,
         data: {
           ...n.data,
-          colorBlindMode,
-          highContrastMode,
           performanceMode,
           highlighted: highlightedNodeIds.includes(n.id),
         },
@@ -126,15 +122,13 @@ const GraphCanvasInner: React.FC = () => {
       ...n,
       data: {
         ...n.data,
-        colorBlindMode,
-        highContrastMode,
         performanceMode,
         highlighted: highlightedNodeIds.includes(n.id),
       },
     }));
 
     return { rfNodes: enrichedNodes, rfEdges: computedEdges };
-  }, [graphNodes, graphEdges, showDependencyEdges, colorBlindMode, highContrastMode, performanceMode, highlightedNodeIds]);
+  }, [graphNodes, graphEdges, showDependencyEdges, performanceMode, highlightedNodeIds]);
 
   // 事件边：仅在选中某个事件时，绘制该事件「生产节点 → 各消费节点」的蓝色实线箭头
   const eventEdges = useMemo(() => {

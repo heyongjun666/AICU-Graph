@@ -319,7 +319,7 @@ Shared FS（共享分区）是产物单一事实源。
 
 ### 7.1 Executable 抽象（base.py）
 
-- `Executable` ABC：`run(ctx)`、`stop()`、`pause()`、`resume()`、`cleanup_resources()`；`真实 CLI 配置` 由 `BaseContext` 的 `AICU()` 工厂决定 真实 AICU。
+- `Executable` ABC：唯一抽象方法 `run(ctx)`（另有一个可选 hook `wait_for_external_input()`）；节点生命周期（暂停/停止/清理）不由执行体暴露 —— 暂停走 Scheduler，停止走杀 CC 进程（`aicu.kill_processes`），资源清理由 Runtime shutdown 负责。`真实 CLI 配置` 由 `BaseContext` 的 `AICU()` 工厂决定 真实 AICU。
 - 协议：`RuntimeGateway`（执行体反向调用 Runtime 的接口）、`SchedulerDelegate`（执行体调 Scheduler 的接口）、`ExecutableRegistry`（`register(cls)` + `create(exec_type)` 工厂）。
 
 ### 7.2 Manager（manager.py）
@@ -349,7 +349,7 @@ Shared FS（共享分区）是产物单一事实源。
   7. 成功 → `_normalize_worker_artifact`（共享分区=单一事实源）、`notify_artifact_updated(shared_root)`、`flush_node_events` → COMPLETED + artifact_path + log；
   8. 异常 → FAILED + `ErrorObject.create_worker_execution_error()`；
   9. `finally`：executor.shutdown + 缓存清理（paused 保留缓存；`activation_count==0` 则 pop）。
-- 生命周期：`stop`（killpg 杀进程组）、`pause`、`resume`（重跑 run()）、`cleanup_resources`。
+- 生命周期：只有 `run()`；节点级停止/清理不由 Worker 提供（见 §7.1）。
 - **上下文装配辅助方法**：
   - `_build_worker_context`：完整首跑上下文（共享产物清单、事件收件箱/发布块、任务）。
   - `_build_tiered_reading_instructions(deps)`：**多依赖分级阅读**（依赖 ≥4 触发）——一级全景 Glob 扫描 → 二级精读接口层（≤5 个文件）→ 三级按需深入；含 >800 行文件截断保护，避免通读所有依赖产物导致上下文溢出。
@@ -486,7 +486,7 @@ Shared FS（共享分区）是产物单一事实源。
 
 | 文件 | 职责 |
 |---|---|
-| `base.py` | `Executable` ABC（run/stop/pause/resume/cleanup_resources）+ 协议（RuntimeGateway/SchedulerDelegate/ExecutableRegistry）+ `BaseContext` |
+| `base.py` | `Executable` ABC（抽象方法 run）+ 协议（RuntimeGateway/SchedulerDelegate/ExecutableRegistry）+ `BaseContext` |
 | `manager.py` | **Manager 执行体**：expand/review 状态机、prompt 装配（事件上下文/事件 inbox/revise 候选/codegraph/repair context）、plan 解析、评审输出归一化（`_resolve_review_content`/`_parse_review_assessments`）、评审降级（`_degrade_review`） |
 | `worker.py` | **Worker 执行体**：首跑/续跑/revise-resume、产物归一、事件发布/收件箱、缓存生命周期、**多依赖分级阅读（`_build_tiered_reading_instructions`）**、**CC 流式输出分流（`_handle_cc_stream_output`）**、模型名校验（`_validate_model`）、依赖产物路径解析（`_resolve_dep_artifact_path`） |
 | `registry.py` | `ExecutableRegistry` 工厂（`register`/`create`） |
@@ -528,7 +528,6 @@ Shared FS（共享分区）是产物单一事实源。
 | `frontend/src/types.ts` `constants.ts` | 类型与常量 |
 | `frontend/src/stores/GraphStore.ts` `SessionStore.ts` `UIStateStore.ts` | zustand 状态（图/会话/UI） |
 | `frontend/src/providers/SSEProvider.tsx` | SSE 事件订阅（EventSource） |
-| `frontend/src/providers/MockProvider.tsx` | 离线 mock 数据（VITE_MOCK_MODE） |
 | `frontend/src/components/GraphCanvas.tsx` `TreeNode.tsx` `DependencyEdge.tsx` | React Flow 图渲染 |
 | `frontend/src/components/NodeInspector.tsx` | 节点详情与产物查看 |
 | `frontend/src/components/SessionSidebar.tsx` `SessionOutputsDialog.tsx` `WorkbenchSettings.tsx` `CanvasControls.tsx` `ToastContainer.tsx` `WorkbenchDialogs.tsx` `WorkbenchHeader.tsx` | 工作台各 UI 组件 |
@@ -622,7 +621,7 @@ Shared FS（共享分区）是产物单一事实源。
 | `CODEGRAPH_BIN` | codegraph CLI 路径 | 默认 |
 | `MAX_COLLABORATION_ROUNDS`（运行时属性） | 全局协作轮数上限（C1） | 10 |
 | `AICU_NODE_LOG_STREAMING` | CC 流式日志全量写入 node.log（`=1` 时；默认只写 stderr/activity 分流） | 关 |
-| `VITE_MOCK_MODE` | 前端离线 mock | 关 |
+| `VITE_MOCK_MODE` | 前端离线 mock（仅 api.ts 的 CRUD/settings 有 mock 分支，图数据无来源） | 关 |
 
 ---
 

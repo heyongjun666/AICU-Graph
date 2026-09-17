@@ -42,18 +42,6 @@ class _TestExecutable(Executable):
     def run(self, ctx: ExecutableContext) -> NodeStatus:
         return NodeStatus.COMPLETED
 
-    def stop(self, ctx: ExecutableContext) -> None:
-        pass
-
-    def pause(self, ctx: ExecutableContext) -> None:
-        pass
-
-    def resume(self, ctx: ExecutableContext) -> NodeStatus:
-        return NodeStatus.RUNNING
-
-    def cleanup_resources(self, ctx: ExecutableContext) -> None:
-        pass
-
 
 class _RouteMapStub:
     """测试专用 Router 桩：按 content 关键词 → 目标 step_ref 映射决策。

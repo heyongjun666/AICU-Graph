@@ -249,15 +249,11 @@ class TestManagerClassStructure:
         assert isinstance(mgr, Executable)
 
     def test_manager_has_required_methods(self):
-        """Manager 实例应具有 run/stop/pause/resume/cleanup_resources 方法。"""
+        """Manager 实例应具有 run 方法。"""
         node = _make_manager_node()
         ctx = ExecutableContext(node=node, runtime=_MockRuntimeGateway())
         mgr = Manager(context=ctx)
         assert hasattr(mgr, "run") and callable(mgr.run)
-        assert hasattr(mgr, "stop") and callable(mgr.stop)
-        assert hasattr(mgr, "pause") and callable(mgr.pause)
-        assert hasattr(mgr, "resume") and callable(mgr.resume)
-        assert hasattr(mgr, "cleanup_resources") and callable(mgr.cleanup_resources)
 
 
 class TestManagerRegistry:
@@ -975,42 +971,6 @@ class TestManagerReviewDegradation:
 
         assert result == NodeStatus.COMPLETED
         assert stub.calls == 2
-
-
-class TestManagerStopPauseResume:
-
-    def setup_method(self):
-        self.runtime = _MockRuntimeGateway()
-
-    def test_stop(self):
-        """stop 应幂等不抛出异常。"""
-        node = _make_manager_node()
-        ctx = ExecutableContext(node=node, runtime=self.runtime)
-        mgr = Manager(context=ctx)
-        mgr.stop(ctx)
-
-    def test_pause(self):
-        """pause 应幂等不抛出异常。"""
-        node = _make_manager_node()
-        ctx = ExecutableContext(node=node, runtime=self.runtime)
-        mgr = Manager(context=ctx)
-        mgr.pause(ctx)
-
-    def test_resume(self):
-        """resume 应返回 NodeStatus。"""
-        node = _make_manager_node()
-        self.runtime.add_node(node)
-        ctx = ExecutableContext(node=node, runtime=self.runtime)
-        mgr = Manager(context=ctx)
-        result = mgr.resume(ctx)
-        assert isinstance(result, NodeStatus)
-
-    def test_cleanup_resources(self):
-        """cleanup_resources 应幂等不抛出异常。"""
-        node = _make_manager_node()
-        ctx = ExecutableContext(node=node, runtime=self.runtime)
-        mgr = Manager(context=ctx)
-        mgr.cleanup_resources(ctx)
 
 
 class TestManagerEdgeCases:

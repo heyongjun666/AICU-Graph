@@ -45,18 +45,6 @@ class _TestExecutable(Executable):
     def run(self, ctx: ExecutableContext) -> NodeStatus:
         return NodeStatus.COMPLETED
 
-    def stop(self, ctx: ExecutableContext) -> None:
-        pass
-
-    def pause(self, ctx: ExecutableContext) -> None:
-        pass
-
-    def resume(self, ctx: ExecutableContext) -> NodeStatus:
-        return NodeStatus.RUNNING
-
-    def cleanup_resources(self, ctx: ExecutableContext) -> None:
-        pass
-
 
 def _step(step_id, config=None, **kw):
     kw.setdefault("exec_type", "worker")

@@ -11,7 +11,6 @@ import json
 import logging
 import os
 import shutil
-import signal
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
@@ -380,9 +379,8 @@ _PRODUCER_ACCEPTANCE_PRINCIPLES = (
 class Worker(Executable):
     """Worker 执行单元 — 在子进程中运行 AICU.ask() 并回填结果。
 
-    生命周期:
-        run() → (pause() ↔ resume())* → stop() / 自然结束
-        cleanup_resources() 在最终清理时调用，幂等。
+    生命周期只有 run()：节点级停止走杀 CC 进程（aicu.kill_processes），
+    不由本类提供 stop/pause/resume/cleanup_resources。
     """
 
     def __init__(
@@ -397,7 +395,6 @@ class Worker(Executable):
         """
         super().__init__(context)
         self._aicu = aicu_instance
-        self._process_pid: Optional[int] = None
 
     # 节点级 AICU 缓存：node_id → AICU 实例
     # 路由激活时复用，使 CC agent 通过 --resume 保持会话连续性
@@ -1138,26 +1135,3 @@ class Worker(Executable):
                       and not getattr(node, 'pending_routing', None)):
                     # pending_routing 已不再回填（routing.json 机制移除），恒真；保留以不变更语义
                     Worker._aicu_cache.pop(node.id, None)
-
-    def stop(self, ctx: ExecutableContext) -> None:
-        """终止 Worker 执行，清理子进程。幂等。"""
-        # Kill child process group if tracked
-        if self._process_pid is not None:
-            try:
-                os.killpg(self._process_pid, signal.SIGKILL)
-            except (ProcessLookupError, PermissionError, OSError):
-                pass
-            self._process_pid = None
-
-    def pause(self, ctx: ExecutableContext) -> None:
-        """暂停 Worker 执行。生命周期由 Runtime/Scheduler 管理。"""
-
-    def resume(self, ctx: ExecutableContext) -> NodeStatus:
-        """恢复 Worker 执行 — 重新执行 run()。"""
-        return self.run(ctx)
-
-    def cleanup_resources(self, ctx: ExecutableContext) -> None:
-        """清理 Worker 占用的资源。幂等。"""
-        self.stop(ctx)
-        with Worker._aicu_cache_lock:
-            Worker._aicu_cache.pop(ctx.node.id, None)

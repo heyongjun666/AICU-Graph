@@ -92,18 +92,6 @@ class _TestExecutable(Executable):
             ctx.node.manager_phase = ManagerPhase.WAITING.value
         return result_status
 
-    def stop(self, ctx: ExecutableContext) -> None:
-        pass
-
-    def pause(self, ctx: ExecutableContext) -> None:
-        pass
-
-    def resume(self, ctx: ExecutableContext) -> NodeStatus:
-        return NodeStatus.RUNNING
-
-    def cleanup_resources(self, ctx: ExecutableContext) -> None:
-        pass
-
 
 def _make_node(node_id: str, status: NodeStatus = NodeStatus.READY,
                exec_type: str = "test", config: Optional[dict] = None,

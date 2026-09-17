@@ -139,7 +139,8 @@ const SSEProvider: React.FC<SSEProviderProps> = ({ children, sessionId }) => {
     refreshGraph();
 
     if (isMockMode()) {
-      // VITE_MOCK_MODE 仅离线 mock（MockProvider 另行驱动 demo 数据）。
+      // VITE_MOCK_MODE 仅离线 mock：不连 SSE，CRUD/settings 由 api.ts 的内联 MOCK 分支
+      // 供给。图数据没有来源，画布为空。
       setClientStatus(SSEClientStatus.Connected);
       return () => { mounted.current = false; };
     }

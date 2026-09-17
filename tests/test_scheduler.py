@@ -72,18 +72,6 @@ class _TestExecutable(Executable):
             time.sleep(delay)
         return ctx.config.get("result_status", NodeStatus.COMPLETED)
 
-    def stop(self, ctx: ExecutableContext) -> None:
-        pass
-
-    def pause(self, ctx: ExecutableContext) -> None:
-        pass
-
-    def resume(self, ctx: ExecutableContext) -> NodeStatus:
-        return NodeStatus.RUNNING
-
-    def cleanup_resources(self, ctx: ExecutableContext) -> None:
-        pass
-
 
 def _make_node(node_id: str, status: NodeStatus = NodeStatus.READY,
                exec_type: str = "test", config: Optional[dict] = None) -> Node:

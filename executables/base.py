@@ -1,7 +1,7 @@
 """
 executables/base.py — v2 Executable 抽象基类与协议定义
 
-定义 Executable ABC（5 个抽象方法 + 1 个可选 hook）
+定义 Executable ABC（1 个抽象方法 + 1 个可选 hook）
 以及 RuntimeGateway / SchedulerDelegate 两个 Protocol。
 """  # """  # noqa: D202
 
@@ -173,13 +173,15 @@ class ExecutableContext:
 class Executable(ABC):
     """Executable 抽象基类。
 
-    所有可执行节点（Manager / Worker）必须继承此类并实现 5 个抽象方法：
+    所有可执行节点（Manager / Worker）必须继承此类并实现 1 个抽象方法：
 
         - run(ctx):                主执行逻辑
-        - stop(ctx):               停止执行
-        - pause(ctx):              暂停执行
-        - resume(ctx):             恢复执行
-        - cleanup_resources(ctx):  清理资源
+
+    只有 run() 是抽象方法：节点的生命周期（暂停/停止/清理）由 Runtime 与 Scheduler
+    统一编排 —— 暂停走 Scheduler，停止走杀 CC 进程（aicu.kill_processes），
+    资源清理由 Runtime 的 shutdown 负责。这里**不再**声明 stop/pause/resume/
+    cleanup_resources 那套节点级契约：它曾是设计的一部分，但从来没有生产调用方
+    （scheduler.py 只调 run()），留着只会让实现者去写一堆永远不会被调用的空方法。
 
     可选 hook:
         - wait_for_external_input(): 等待外部输入（默认返回 None 表示不等待）
@@ -207,30 +209,6 @@ class Executable(ABC):
         Returns:
             执行结束后的 NodeStatus（COMPLETED / FAILED）。
         """
-        ...
-
-    @abstractmethod
-    def stop(self, ctx: ExecutableContext) -> None:
-        """停止执行。"""
-        ...
-
-    @abstractmethod
-    def pause(self, ctx: ExecutableContext) -> None:
-        """暂停执行。"""
-        ...
-
-    @abstractmethod
-    def resume(self, ctx: ExecutableContext) -> NodeStatus:
-        """恢复执行。
-
-        Returns:
-            恢复后的 NodeStatus。
-        """
-        ...
-
-    @abstractmethod
-    def cleanup_resources(self, ctx: ExecutableContext) -> None:
-        """清理资源。"""
         ...
 
     # ------------------------------------------------------------------

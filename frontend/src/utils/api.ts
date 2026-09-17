@@ -668,7 +668,7 @@ export function deleteRole(roleType: NonNullable<RoleInfo['type']>, roleId: stri
 // 候选角色池 API
 //
 // 池只在设置页增删改；会话侧只能绑定（手选的角色写进会话配置的 candidate_roles，
-// 不落盘为池）。MOCK 分支内联在各函数里 —— MockProvider.tsx 只 mock 图数据，不 mock CRUD。
+// 不落盘为池）。MOCK 分支内联在各函数里（mock 模式下不再有图数据来源，画布为空）。
 // ============================================================================
 
 // MOCK 模式下的可变池列表：模块级，保证设置页在 mock 下也能增删改（否则只读不写）。

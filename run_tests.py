@@ -1359,10 +1359,6 @@ class TestExecutableRegistry:
     def test_register_create():
         class TestEx(Executable):
             def run(self, ctx): return NodeStatus.COMPLETED
-            def stop(self, ctx): pass
-            def pause(self, ctx): pass
-            def resume(self, ctx): return NodeStatus.RUNNING
-            def cleanup_resources(self, ctx): pass
         reg = ExecutableRegistry()
         reg.register("test_type", TestEx)
         ctx = ExecutableContext(node=_make_node(), runtime=None)
@@ -1375,10 +1371,6 @@ class TestExecutableRegistry:
         assert "manager" not in reg.get_types()
         reg.register("custom", type("CE", (Executable,), {
             "run": lambda s, c: NodeStatus.COMPLETED,
-            "stop": lambda s, c: None,
-            "pause": lambda s, c: None,
-            "resume": lambda s, c: NodeStatus.RUNNING,
-            "cleanup_resources": lambda s, c: None,
         }))
         assert "custom" in reg.get_types()
 
@@ -1491,10 +1483,6 @@ class TestIntegration:
         class StubExec(Executable):
             def run(self, ctx):
                 return NodeStatus.COMPLETED
-            def stop(self, ctx): pass
-            def pause(self, ctx): pass
-            def resume(self, ctx): return NodeStatus.RUNNING
-            def cleanup_resources(self, ctx): pass
         reg = ExecutableRegistry()
         reg.register("stub", StubExec)
         ctx = ExecutableContext(node=_make_node("test_node"), runtime=None)

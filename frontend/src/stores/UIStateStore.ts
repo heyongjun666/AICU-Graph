@@ -17,10 +17,6 @@ interface UIState {
   showDependencyEdges: boolean;
   /** 性能降级模式 */
   performanceMode: boolean;
-  /** 色盲模式 */
-  colorBlindMode: boolean;
-  /** 高对比度模式 */
-  highContrastMode: boolean;
   /** SSE 客户端状态 */
   clientStatus: SSEClientStatus;
   /** 界面语言 */
@@ -46,11 +42,6 @@ interface UIActions {
 
   /** 设置性能模式 */
   setPerformanceMode: (mode: boolean) => void;
-
-  /** 设置色盲模式 */
-  setColorBlindMode: (mode: boolean) => void;
-  /** 设置高对比度模式 */
-  setHighContrastMode: (mode: boolean) => void;
 
   /** 设置客户端状态 */
   setClientStatus: (status: SSEClientStatus) => void;
@@ -94,8 +85,6 @@ const initialState: UIState = {
   toasts: [],
   showDependencyEdges: true,
   performanceMode: false,
-  colorBlindMode: false,
-  highContrastMode: false,
   clientStatus: SSEClientStatus.Disconnected,
   language: readCachedLanguage(),
 };
@@ -131,10 +120,6 @@ export const useUIStateStore = create<UIStateStore>((set) => ({
 
   // ---- 性能模式 ----
   setPerformanceMode: (mode: boolean) => set({ performanceMode: mode }),
-
-  // ---- 无障碍模式 ----
-  setColorBlindMode: (mode: boolean) => set({ colorBlindMode: mode }),
-  setHighContrastMode: (mode: boolean) => set({ highContrastMode: mode }),
 
   // ---- 连接状态 ----
   setClientStatus: (status: SSEClientStatus) => set({ clientStatus: status }),

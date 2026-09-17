@@ -7,8 +7,7 @@ Tests for executables/worker.py — Worker 执行单元（双模式）
 - Slice 3: Stub 失败路径（FailureStub → FAILED + ErrorObject）
 - Slice 4: Stub 超时路径（TimeoutStub → FAILED + ErrorObject）
 - Slice 5: 真实模式（mock AICU → COMPLETED/FAILED）
-- Slice 6: 生命周期方法（stop/pause/resume/cleanup_resources）
-- Slice 7: 日志推送（LogEntry 写入 node.log）
+- Slice 6: 日志推送（LogEntry 写入 node.log）
 """
 
 import json
@@ -234,11 +233,9 @@ class TestWorkerConstruction:
         assert isinstance(worker, Executable)
 
     def test_worker_has_all_abstract_methods(self):
-        """Worker 实现全部 5 个抽象方法"""
-        methods = ["run", "stop", "pause", "resume", "cleanup_resources"]
-        for m in methods:
-            assert hasattr(Worker, m)
-            assert callable(getattr(Worker, m))
+        """Worker 实现 Executable 的抽象方法 run()"""
+        assert hasattr(Worker, "run")
+        assert callable(Worker.run)
 
 
 # ============================================================================
@@ -541,98 +538,7 @@ class TestRealMode:
 
 
 # ============================================================================
-# Slice 6: 生命周期方法
-# ============================================================================
-
-class TestLifecycleMethods:
-    """Worker 的 stop/pause/resume/cleanup_resources 生命周期。"""
-
-    def test_stop_does_not_raise(self):
-        """stop() 调用不抛出异常"""
-        stub = SuccessStub()
-        ctx = _make_context()
-        worker = Worker(ctx, aicu_instance=stub)
-        worker.stop(ctx)  # 不应抛出
-
-    def test_stop_after_run(self):
-        """run() 后调用 stop() 不抛出异常"""
-        runtime = MockRuntimeGateway()
-        stub = SuccessStub()
-        ctx = _make_context(runtime=runtime)
-        worker = Worker(ctx, aicu_instance=stub)
-        worker.run(ctx)
-        worker.stop(ctx)  # 不应抛出
-
-    def test_pause_does_not_raise(self):
-        """pause() 调用不抛出异常"""
-        ctx = _make_context()
-        worker = Worker(ctx, aicu_instance=SuccessStub())
-        worker.pause(ctx)  # 不应抛出
-
-    def test_resume_returns_node_status(self):
-        """resume() 返回 NodeStatus"""
-        runtime = MockRuntimeGateway()
-        stub = SuccessStub()
-        ctx = _make_context(runtime=runtime)
-        worker = Worker(ctx, aicu_instance=stub)
-        result = worker.resume(ctx)
-        assert isinstance(result, NodeStatus)
-        assert result == NodeStatus.COMPLETED
-
-    def test_cleanup_resources_does_not_raise(self):
-        """cleanup_resources() 调用不抛出异常"""
-        ctx = _make_context()
-        worker = Worker(ctx, aicu_instance=SuccessStub())
-        worker.cleanup_resources(ctx)  # 不应抛出
-
-    def test_cleanup_resources_idempotent(self):
-        """cleanup_resources() 幂等"""
-        ctx = _make_context()
-        worker = Worker(ctx, aicu_instance=SuccessStub())
-        worker.cleanup_resources(ctx)
-        worker.cleanup_resources(ctx)  # 第二次调用不应抛出
-
-    def test_stop_called_multiple_times(self):
-        """多次调用 stop() 幂等"""
-        ctx = _make_context()
-        worker = Worker(ctx, aicu_instance=SuccessStub())
-        worker.stop(ctx)
-        worker.stop(ctx)  # 不应抛出
-
-    def test_pause_called_multiple_times(self):
-        """多次调用 pause() 幂等"""
-        ctx = _make_context()
-        worker = Worker(ctx, aicu_instance=SuccessStub())
-        worker.pause(ctx)
-        worker.pause(ctx)  # 不应抛出
-
-    def test_full_lifecycle(self):
-        """完整的 run → pause → resume → stop → cleanup 生命周期"""
-        runtime = MockRuntimeGateway()
-        stub = SuccessStub(result_dict={"final_output_path": "/tmp/life/output.py"})
-        ctx = _make_context(runtime=runtime)
-        worker = Worker(ctx, aicu_instance=stub)
-
-        # Run
-        r1 = worker.run(ctx)
-        assert r1 == NodeStatus.COMPLETED
-
-        # Pause (after completion is no-op)
-        worker.pause(ctx)
-
-        # Resume
-        r2 = worker.resume(ctx)
-        assert r2 == NodeStatus.COMPLETED
-
-        # Stop
-        worker.stop(ctx)
-
-        # Cleanup
-        worker.cleanup_resources(ctx)
-
-
-# ============================================================================
-# Slice 7: 日志推送
+# Slice 6: 日志推送
 # ============================================================================
 
 class TestLogHook:
@@ -681,7 +587,7 @@ class TestLogHook:
 
 
 # ============================================================================
-# Slice 8: NonJsonOutputStub 兼容性
+# Slice 7: NonJsonOutputStub 兼容性
 # ============================================================================
 
 class TestNonJsonOutputStubCompatibility:
@@ -711,7 +617,7 @@ class TestNonJsonOutputStubCompatibility:
 
 
 # ============================================================================
-# Slice 9: 验收标准全覆盖
+# Slice 8: 验收标准全覆盖
 # ============================================================================
 
 class TestAcceptanceCriteria:
@@ -782,26 +688,6 @@ class TestAcceptanceCriteria:
         assert error.message  # 非空
         assert error.cause  # 非空
         assert error.suggestion  # 非空
-
-    # AC 6: stop() → 子进程终止
-    def test_ac6_stop_cleans_process(self):
-        """AC6: stop() 调用后资源清理"""
-        runtime = MockRuntimeGateway()
-        stub = SuccessStub()
-        ctx = _make_context(runtime=runtime)
-        worker = Worker(ctx, aicu_instance=stub)
-        worker.run(ctx)
-        worker.stop(ctx)  # 不应抛出
-
-    # AC 7: cleanup_resources() 无僵尸进程
-    def test_ac7_cleanup_no_zombie(self):
-        """AC7: cleanup_resources() 清理资源"""
-        runtime = MockRuntimeGateway()
-        stub = SuccessStub()
-        ctx = _make_context(runtime=runtime)
-        worker = Worker(ctx, aicu_instance=stub)
-        worker.run(ctx)
-        worker.cleanup_resources(ctx)  # 不应抛出
 
 
 # ============================================================================
@@ -965,7 +851,7 @@ class TestBuildResumeTaskBody:
 
 
 # ============================================================================
-# Slice 10: CC 流式日志粒度过滤（AICU_NODE_LOG_STREAMING）
+# Slice 9: CC 流式日志粒度过滤（AICU_NODE_LOG_STREAMING）
 # ============================================================================
 
 class _LogRecorder:

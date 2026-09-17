@@ -61,20 +61,6 @@ const STATUS_STYLES: Record<
 };
 
 // ============================================================================
-// 色盲模式形状标记
-// ============================================================================
-
-const STATUS_SHAPES: Record<NodeStatus, string> = {
-  [NodeStatus.Waiting]: '○',
-  [NodeStatus.Ready]: '◇',
-  [NodeStatus.Running]: '▶',
-  [NodeStatus.Completed]: '✓',
-  [NodeStatus.Failed]: '✕',
-  [NodeStatus.Stopped]: '■',
-  [NodeStatus.Paused]: '⏸',
-};
-
-// ============================================================================
 // ActivityIndicator — 三点点阵动画（仅 Running 状态显示）
 // ============================================================================
 
@@ -109,8 +95,6 @@ const TreeNodeComponent: React.FC<NodeProps<RFNodeData>> = ({ id, data, selected
     status,
     exec_type,
     role,
-    colorBlindMode,
-    highContrastMode,
     performanceMode,
     iteration,
     max_iterations,
@@ -118,7 +102,6 @@ const TreeNodeComponent: React.FC<NodeProps<RFNodeData>> = ({ id, data, selected
   } = data;
 
   const style = STATUS_STYLES[status] || STATUS_STYLES[NodeStatus.Waiting];
-  const shape = STATUS_SHAPES[status] || '';
   const statusLabel = t(`status.${status.toLowerCase()}`);
 
   const highlightShadow = highlighted
@@ -150,21 +133,8 @@ const TreeNodeComponent: React.FC<NodeProps<RFNodeData>> = ({ id, data, selected
       <Handle type="target" position={Position.Top} className="graph-node-handle" />
       <Handle type="source" position={Position.Bottom} className="graph-node-handle" />
 
-      {/* 头部：形状标记 + 标签 */}
+      {/* 头部：标签 */}
       <div style={{ display: 'flex', alignItems: 'center', gap: 4, marginBottom: 2 }}>
-        {colorBlindMode && (
-          <span
-            style={{
-              fontWeight: 700,
-              fontSize: 14,
-              color: style.badge,
-              marginRight: 2,
-            }}
-            title={statusLabel}
-          >
-            {shape}
-          </span>
-        )}
         <span
           style={{
             fontWeight: 600,
@@ -191,7 +161,7 @@ const TreeNodeComponent: React.FC<NodeProps<RFNodeData>> = ({ id, data, selected
             padding: '0 6px',
             borderRadius: 4,
             backgroundColor: style.badge,
-            color: highContrastMode ? '#000' : '#FFF',
+            color: '#FFF',
             fontWeight: 600,
             fontSize: 10,
             lineHeight: '18px',
@@ -220,22 +190,6 @@ const TreeNodeComponent: React.FC<NodeProps<RFNodeData>> = ({ id, data, selected
           </span>
         )}
       </div>
-
-      {/* 高对比模式：状态文字标签 */}
-      {highContrastMode && (
-        <div
-          style={{
-            position: 'absolute',
-            bottom: -14,
-            left: 0,
-            fontSize: 9,
-            color: style.badge,
-            fontWeight: 700,
-          }}
-        >
-          {statusLabel}
-        </div>
-      )}
     </div>
   );
 };

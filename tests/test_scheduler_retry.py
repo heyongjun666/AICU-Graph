@@ -117,18 +117,6 @@ class _TestExecutable(Executable):
             time.sleep(delay)
         return ctx.config.get("result_status", NodeStatus.COMPLETED)
 
-    def stop(self, ctx: ExecutableContext) -> None:
-        pass
-
-    def pause(self, ctx: ExecutableContext) -> None:
-        pass
-
-    def resume(self, ctx: ExecutableContext) -> NodeStatus:
-        return NodeStatus.RUNNING
-
-    def cleanup_resources(self, ctx: ExecutableContext) -> None:
-        pass
-
 
 class _RetryAwareExecutable(Executable):
     """Executable that FAILs on first attempt (iteration_count=0), succeeds on retry.
@@ -149,18 +137,6 @@ class _RetryAwareExecutable(Executable):
             return NodeStatus.FAILED
         return NodeStatus.COMPLETED
 
-    def stop(self, ctx: ExecutableContext) -> None:
-        pass
-
-    def pause(self, ctx: ExecutableContext) -> None:
-        pass
-
-    def resume(self, ctx: ExecutableContext) -> NodeStatus:
-        return NodeStatus.RUNNING
-
-    def cleanup_resources(self, ctx: ExecutableContext) -> None:
-        pass
-
 
 class _AlwaysFailExecutable(Executable):
     """Executable that always returns FAILED regardless of iteration count."""
@@ -173,18 +149,6 @@ class _AlwaysFailExecutable(Executable):
         if delay > 0:
             time.sleep(delay)
         return NodeStatus.FAILED
-
-    def stop(self, ctx: ExecutableContext) -> None:
-        pass
-
-    def pause(self, ctx: ExecutableContext) -> None:
-        pass
-
-    def resume(self, ctx: ExecutableContext) -> NodeStatus:
-        return NodeStatus.RUNNING
-
-    def cleanup_resources(self, ctx: ExecutableContext) -> None:
-        pass
 
 
 def _make_node(node_id: str, status: NodeStatus = NodeStatus.READY,

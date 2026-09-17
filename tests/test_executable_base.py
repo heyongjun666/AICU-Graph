@@ -169,7 +169,7 @@ class TestExecutableABC:
             _IncompleteExecutable()  # noqa: E1120
 
     def test_concrete_subclass_can_instantiate(self):
-        """实现全 5 个抽象方法的子类可以实例化。"""
+        """实现抽象方法 run() 的子类可以实例化。"""
         exe = _ConcreteExecutable()
         assert isinstance(exe, Executable)
 
@@ -180,32 +180,6 @@ class TestExecutableABC:
         status = exe.run(ctx)
         assert isinstance(status, NodeStatus)
         assert status == NodeStatus.COMPLETED
-
-    def test_stop_does_not_raise(self):
-        """stop() 应正常执行。"""
-        exe = _ConcreteExecutable()
-        ctx = _make_context()
-        exe.stop(ctx)  # 不应抛出
-
-    def test_pause_does_not_raise(self):
-        """pause() 应正常执行。"""
-        exe = _ConcreteExecutable()
-        ctx = _make_context()
-        exe.pause(ctx)
-
-    def test_resume_returns_node_status(self):
-        """resume() 应返回 NodeStatus。"""
-        exe = _ConcreteExecutable()
-        ctx = _make_context()
-        status = exe.resume(ctx)
-        assert isinstance(status, NodeStatus)
-        assert status == NodeStatus.RUNNING
-
-    def test_cleanup_resources_does_not_raise(self):
-        """cleanup_resources() 应正常执行。"""
-        exe = _ConcreteExecutable()
-        ctx = _make_context()
-        exe.cleanup_resources(ctx)
 
     def test_wait_for_external_input_default_returns_none(self):
         """wait_for_external_input 默认返回 None（非抽象钩子）。"""
@@ -306,25 +280,13 @@ class _IncompleteExecutable(Executable):
 
 
 class _ConcreteExecutable(Executable):
-    """实现全部 5 个抽象方法的完整子类。"""
+    """实现了抽象方法 run() 的完整子类。"""
 
     def __init__(self, context: ExecutableContext = None):
         super().__init__(context)
 
     def run(self, ctx: ExecutableContext) -> NodeStatus:
         return NodeStatus.COMPLETED
-
-    def stop(self, ctx: ExecutableContext) -> None:
-        pass
-
-    def pause(self, ctx: ExecutableContext) -> None:
-        pass
-
-    def resume(self, ctx: ExecutableContext) -> NodeStatus:
-        return NodeStatus.RUNNING
-
-    def cleanup_resources(self, ctx: ExecutableContext) -> None:
-        pass
 
 
 class _OverrideWaitExecutable(_ConcreteExecutable):
@@ -342,18 +304,6 @@ class _TypeCheckExecutable(Executable):
         assert isinstance(ctx.runtime, RuntimeGateway)
         assert isinstance(ctx.config, dict)
         return NodeStatus.COMPLETED
-
-    def stop(self, ctx: ExecutableContext) -> None:
-        pass
-
-    def pause(self, ctx: ExecutableContext) -> None:
-        pass
-
-    def resume(self, ctx: ExecutableContext) -> NodeStatus:
-        return NodeStatus.RUNNING
-
-    def cleanup_resources(self, ctx: ExecutableContext) -> None:
-        pass
 
 
 def _make_context(**overrides) -> ExecutableContext:

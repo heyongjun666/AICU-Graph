@@ -147,7 +147,6 @@ class Manager(Executable):
         """
         super().__init__(context)
         self._aicu = aicu_instance
-        self._interrupt_flag = False
 
     # ------------------------------------------------------------------
     # Abstract method implementations
@@ -212,25 +211,6 @@ class Manager(Executable):
                 log=log_entries,
             )
             return NodeStatus.FAILED
-
-    def stop(self, ctx: ExecutableContext) -> None:
-        """停止 Manager：设置中断标志。幂等。"""
-        self._interrupt_flag = True
-
-    def pause(self, ctx: ExecutableContext) -> None:
-        """暂停 Manager：生命周期由 Runtime/Scheduler 管理。"""
-
-    def resume(self, ctx: ExecutableContext) -> NodeStatus:
-        """恢复 Manager：清除中断标志后重新执行 run()。"""
-        self._interrupt_flag = False
-        return self.run(ctx)
-
-    def cleanup_resources(self, ctx: ExecutableContext) -> None:
-        """清理 Manager 占用的资源。幂等。"""
-        self.stop(ctx)
-        from executables.worker import Worker
-        with Worker._aicu_cache_lock:
-            Worker._aicu_cache.pop(ctx.node.id, None)
 
     # ------------------------------------------------------------------
     # Phase: Expand
@@ -738,9 +718,6 @@ class Manager(Executable):
 
         last_exception: Optional[Exception] = None
         for attempt in range(retries + 1):
-            if self._interrupt_flag:
-                raise RuntimeError("Manager execution interrupted")
-
             try:
                 if incremental:
                     ask_incremental = getattr(aicu, "ask_incremental", None)

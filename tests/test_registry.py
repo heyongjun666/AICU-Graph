@@ -44,27 +44,14 @@ class _MockRuntimeGateway:
 
 
 class _TestExecutable(Executable):
-    """实现全部 5 个抽象方法的测试用 Executable 子类。"""
+    """实现抽象方法 run() 的测试用 Executable 子类。"""
 
     def __init__(self, context: ExecutableContext, **kwargs):
         self.ctx = context
         self.kwargs = kwargs
-        self.cleaned_up = False
 
     def run(self, ctx: ExecutableContext) -> NodeStatus:
         return NodeStatus.COMPLETED
-
-    def stop(self, ctx: ExecutableContext) -> None:
-        pass
-
-    def pause(self, ctx: ExecutableContext) -> None:
-        pass
-
-    def resume(self, ctx: ExecutableContext) -> NodeStatus:
-        return NodeStatus.RUNNING
-
-    def cleanup_resources(self, ctx: ExecutableContext) -> None:
-        self.cleaned_up = True
 
 
 class _OtherExecutable(Executable):
@@ -76,18 +63,6 @@ class _OtherExecutable(Executable):
 
     def run(self, ctx: ExecutableContext) -> NodeStatus:
         return NodeStatus.FAILED
-
-    def stop(self, ctx: ExecutableContext) -> None:
-        pass
-
-    def pause(self, ctx: ExecutableContext) -> None:
-        pass
-
-    def resume(self, ctx: ExecutableContext) -> NodeStatus:
-        return NodeStatus.RUNNING
-
-    def cleanup_resources(self, ctx: ExecutableContext) -> None:
-        pass
 
 
 def _make_context(**overrides) -> ExecutableContext:
@@ -140,16 +115,11 @@ class TestExecutableRegistry:
         assert i1 is not i2
 
     def test_create_instance_executes_correctly(self):
-        """创建的实例应能正常执行 run/stop/pause/resume。"""
+        """创建的实例应能正常执行 run()。"""
         self.registry.register("worker", _TestExecutable)
         ctx = _make_context()
         instance = self.registry.create("worker", ctx)
         assert instance.run(ctx) == NodeStatus.COMPLETED
-        instance.stop(ctx)  # 不应抛出
-        instance.pause(ctx)  # 不应抛出
-        assert instance.resume(ctx) == NodeStatus.RUNNING
-        instance.cleanup_resources(ctx)
-        assert instance.cleaned_up
 
     # ------------------------------------------------------------
     # 未注册类型错误

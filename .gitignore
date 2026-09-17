@@ -2,7 +2,13 @@
 nodes/
 workspaces/
 runtime_sessions/
-events*
+# 只忽略仓库根级的运行产物。不能写成不带斜杠的 `events*`：那样会在**任意层级**按
+# 文件名匹配（本仓库 core.ignorecase=true，连 `EventStore.ts` 也命中），把
+# frontend/src/{stores/EventStore.ts,components/EventsDialog.tsx} 一起挡在 git 之外 ——
+# 而这两个文件是被已提交代码 import 的，导致 clone 下来前端编译不过。
+/events*
+/shared/
+/event_inbox/
 *.log
 router_traces.jsonl
 review_v*.md

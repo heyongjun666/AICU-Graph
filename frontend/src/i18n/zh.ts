@@ -285,6 +285,9 @@ export const zh: Dict = {
   'dialog.parent': '父节点',
   'dialog.noParent': '无父节点',
   'dialog.cli': 'CLI',
+  // {reason} 是后端 list_clis 下发的 mcp_unwired_reason 原句（「需要先安装 …扩展」/
+  // 「尚未接入 AICU」），这里只拼框、不复述成因 —— 成因会变，前端抄一份就会漂。
+  'dialog.mcpNotWiredHint': '该角色声明了 MCP，但「{cli}」的 MCP {reason}。',
   'dialog.task': '任务',
   'dialog.taskPlaceholder': '该节点应产出什么？',
   'dialog.dependencies': '依赖',

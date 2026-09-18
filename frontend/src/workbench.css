@@ -251,6 +251,10 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 
 /* Settings and resource editors */
 .form-notice { padding: 9px 10px; border: 1px solid #b9dfd1; border-radius: 6px; background: #eef9f4; color: #176b55; font-size: 12px; }
+/* 「角色声明了 mcp，但这个 CLI 接不了」的行内提示（节点对话框的 CLI 下拉下面）。
+   黄配色取自 ToastContainer 的 warning，文字色用 ToastItem 那个 #374151 —— 两处提示
+   说的是同一类「提醒而非错误」的事，配色没必要各成一套。 */
+.form-notice.is-warning { border-color: #FDE68A; background: #FEFCE8; color: #374151; }
 .settings-backdrop { z-index: 70; align-items: center; }
 .settings-panel { width: min(900px, 100%); max-height: min(720px, calc(100vh - 32px)); display: flex; flex-direction: column; overflow: hidden; border: 1px solid #d9dee2; border-radius: 10px; background: #fff; box-shadow: 0 24px 70px rgba(24,31,36,.2); }
 .settings-header { flex: 0 0 auto; padding: 18px 20px; border-bottom: 1px solid #e6e9eb; }

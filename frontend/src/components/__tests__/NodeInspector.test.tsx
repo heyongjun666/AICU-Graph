@@ -33,6 +33,7 @@ vi.mock('../../utils/api', () => ({
   listNodeResults: vi.fn(),
   readNodeResultFile: vi.fn(),
   getGlobalConfig: vi.fn(),
+  getRole: vi.fn(),
 }));
 
 function makeNode(id: string, parentId: string | null, execType: 'M' | 'W'): GraphNode {
@@ -247,5 +248,62 @@ describe('NodeInspector Worker Revise 按钮', () => {
     await waitFor(() => {
       expect(api.reviseSessionNode).toHaveBeenCalledWith('session-1', 'node-w', 'add pagination');
     });
+  });
+});
+
+// ============================================================================
+// 「角色声明了 mcp，而这个 CLI 接不了」的行内提示
+//
+// 判据落在**后端那句原因原样出现**上，而不是文案长什么样：成因是要随后端变的（pi 今天
+// 是「装个扩展就行」，agy / grok 是「AICU 还没接」），前端若自己拼一份，后端改了口径这里
+// 不会跟着变。这一组顺带守住 JSX 那根线 —— hook 单测绿了、提示却没接进面板，是完全可能的。
+// ============================================================================
+describe('NodeInspector 的 MCP 接线提示', () => {
+  const PI_REASON = '需要先安装 pi-mcp-adapter 扩展（pi install npm:pi-mcp-adapter）';
+
+  /** 渲染一个选中 node-1 的 Inspector（CLI = pi，角色声明了 mcp 由各用例自己定）。 */
+  function openEditorOnPiNode(): void {
+    const node = { ...makeNode('node-1', null, 'W'), role: 'dev', config: { cli_name: 'pi' } };
+    vi.mocked(api.getSessionNode).mockResolvedValue(node);
+    vi.mocked(api.getGlobalConfig).mockResolvedValue({
+      clis: [{
+        id: 'pi', display_name: 'Pi', installed: true, priority: 0, models: [],
+        supports_mcp: false, mcp_unwired_reason: PI_REASON,
+      }],
+      default_cli: null,
+    } as never);
+    useGraphStore.setState({ nodes: new Map([['node-1', node]]) });
+    useGraphStore.getState().selectNode('node-1');
+    render(<I18nProvider><NodeInspector /></I18nProvider>);
+    fireEvent.click(screen.getByTitle(t_editNode));
+  }
+
+  const t_editNode = 'Edit node'; // 本文件把语言钉在 en（见 beforeEach）
+
+  function warningNotice(): HTMLElement | null {
+    return document.querySelector('.form-notice.is-warning');
+  }
+
+  it('角色声明了 mcp 且 CLI 接不了 → 给出后端那句原因', async () => {
+    vi.mocked(api.getRole).mockResolvedValue(
+      { id: 'dev', type: 'worker', effective_config: { mcp: ['echo-probe'] } } as never,
+    );
+
+    openEditorOnPiNode();
+
+    await waitFor(() => expect(warningNotice()).not.toBeNull());
+    expect(warningNotice()!.textContent).toContain(PI_REASON);
+    expect(warningNotice()!.textContent).toContain('Pi');
+  });
+
+  it('角色没声明 mcp → 不提示（大多数节点的常态，不该被打扰）', async () => {
+    vi.mocked(api.getRole).mockResolvedValue(
+      { id: 'dev', type: 'worker', effective_config: {} } as never,
+    );
+
+    openEditorOnPiNode();
+
+    await waitFor(() => expect(api.getRole).toHaveBeenCalled());
+    expect(warningNotice()).toBeNull();
   });
 });

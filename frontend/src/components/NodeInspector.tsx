@@ -36,6 +36,7 @@ import {
 import { formatBytes } from '../utils/format';
 import { useI18n } from '../i18n';
 import { useAvailableClis } from '../hooks/useAvailableClis';
+import { useMcpCompatWarning } from '../hooks/useMcpCompatWarning';
 import { CliOptions } from './CliOptions';
 
 type Tab = 'overview' | 'logs' | 'artifact' | 'events';
@@ -100,6 +101,15 @@ const NodeInspector: React.FC = () => {
   const [skipPermissions, setSkipPermissions] = useState(true);
   const [error, setError] = useState('');
   const { clis, defaultCli } = useAvailableClis();
+  // 角色声明了 mcp、而这个 CLI 接不了时，编辑面板的 CLI 下拉下面说一句。原因来自后端。
+  // 挂在下面那个 `if (!node) return null` 之前：hook 不能排在条件返回后面。
+  const mcpWarning = useMcpCompatWarning({
+    enabled: editing,
+    roleType: node?.exec_type === 'M' ? 'manager' : 'worker',
+    roleId: role,
+    cliId: cliName || '',
+    clis,
+  });
 
   useEffect(() => {
     setNode(storeNode || null);
@@ -564,7 +574,7 @@ const NodeInspector: React.FC = () => {
       {editing && (
         <div className="inspector-editor">
           <div className="dialog-header"><h2>{t('inspector.editNode')}</h2><button className="icon-button" onClick={() => setEditing(false)}><X size={17} /></button></div>
-          <div className="form-grid two-columns"><label>{t('node.role')}<input value={role} onChange={(event) => setRole(event.target.value)} /></label><label>{t('dialog.cli')}<select value={cliName} onChange={(event) => setCliName(event.target.value as NodeConfig['cli_name'])}><CliOptions clis={clis} defaultCli={defaultCli} />{cliName && !clis.some((cli) => cli.id === cliName) ? <option value={cliName}>{cliName}</option> : null}</select></label></div>
+          <div className="form-grid two-columns"><label>{t('node.role')}<input value={role} onChange={(event) => setRole(event.target.value)} /></label><label>{t('dialog.cli')}<select value={cliName} onChange={(event) => setCliName(event.target.value as NodeConfig['cli_name'])}><CliOptions clis={clis} defaultCli={defaultCli} />{cliName && !clis.some((cli) => cli.id === cliName) ? <option value={cliName}>{cliName}</option> : null}</select>{mcpWarning && <div className="form-notice is-warning">{mcpWarning}</div>}</label></div>
           <label>{t('dialog.task')}<textarea value={task} onChange={(event) => setTask(event.target.value)} rows={7} /></label>
           <div className="form-grid two-columns"><label>{t('dialog.model')}<input value={model} onChange={(event) => setModel(event.target.value)} placeholder={t('dialog.useSessionDefault')} /></label><label>{t('dialog.apiKeyEnv')}<input value={apiKeyEnv} onChange={(event) => setApiKeyEnv(event.target.value)} placeholder="ANTHROPIC_API_KEY" /></label><label className="full-field">{t('dialog.apiBaseUrl')}<input value={apiBaseUrl} onChange={(event) => setApiBaseUrl(event.target.value)} /></label><label className="full-field">{t('inspector.skillIds')}<input value={skillIds} onChange={(event) => setSkillIds(event.target.value)} placeholder="skill-one, focused-review" /></label></div>
           <label className="toggle-field"><input type="checkbox" checked={skipPermissions} onChange={(event) => setSkipPermissions(event.target.checked)} /><span>{t('dialog.runWithoutPerms')}</span></label>

@@ -3,6 +3,7 @@ import { X } from 'lucide-react';
 import { GraphNode, LinkCandidate, NodeConfig, RoleInfo, SessionSummary, SkillInfo } from '../types';
 import { getRoles, getSkills } from '../utils/api';
 import { useAvailableClis } from '../hooks/useAvailableClis';
+import { useMcpCompatWarning } from '../hooks/useMcpCompatWarning';
 import { useI18n, translate } from '../i18n';
 import SearchCheckboxPicker from './SearchCheckboxPicker';
 import { CliOptions } from './CliOptions';
@@ -102,6 +103,10 @@ export const NewNodeDialog: React.FC<NodeDialogProps> = ({
   const [skillQuery, setSkillQuery] = useState('');
   const [error, setError] = useState('');
   const { clis, defaultCli } = useAvailableClis();
+  // 角色声明了 mcp、而这个 CLI 接不了时，在 CLI 下拉下面说一句。原因短语来自后端。
+  const mcpWarning = useMcpCompatWarning({
+    enabled: open, roleType: execType, roleId: role, cliId: cliName || '', clis,
+  });
 
   useEffect(() => {
     if (!open) return;
@@ -243,7 +248,7 @@ export const NewNodeDialog: React.FC<NodeDialogProps> = ({
             setParentId(nextParentId);
             setDependencies((current) => current.filter((id) => id !== nextParentId));
           }}><option value="">{t('dialog.noParent')}</option>{parentCandidates.map((candidate) => <option key={candidate.id} value={candidate.id}>{candidate.label}</option>)}</select></label>
-          <label>{t('dialog.cli')}<select value={cliName} onChange={(event) => setCliName(event.target.value as NodeConfig['cli_name'])}><CliOptions clis={clis} defaultCli={defaultCli} /></select></label>
+          <label>{t('dialog.cli')}<select value={cliName} onChange={(event) => setCliName(event.target.value as NodeConfig['cli_name'])}><CliOptions clis={clis} defaultCli={defaultCli} /></select>{mcpWarning && <div className="form-notice is-warning">{mcpWarning}</div>}</label>
         </div>
         <label>{t('dialog.task')}<textarea autoFocus value={task} onChange={(event) => setTask(event.target.value)} rows={5} placeholder={t('dialog.taskPlaceholder')} /></label>
         <div className="node-dialog-section"><div className="node-dialog-section-title">{t('dialog.dependencies')}</div>{candidateStatus === 'loading' && <div className="picker-status">{t('dialog.loadingCandidates')}</div>}{candidateStatus === 'error' && <div className="picker-status is-error">{candidateError || t('dialog.candidatesLoadFailed')}</div>}<SearchCheckboxPicker

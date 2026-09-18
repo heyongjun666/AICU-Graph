@@ -283,6 +283,9 @@ export const en: Dict = {
   'dialog.parent': 'Parent',
   'dialog.noParent': 'No parent',
   'dialog.cli': 'CLI',
+  // {reason} 是后端 list_clis 下发的 mcp_unwired_reason 原句（「需要先安装 …扩展」/
+  // 「尚未接入 AICU」），这里只拼框、不复述成因 —— 成因会变，前端抄一份就会漂。
+  'dialog.mcpNotWiredHint': 'This role declares MCP servers, but {cli} cannot use them: {reason}',
   'dialog.task': 'Task',
   'dialog.taskPlaceholder': 'What should this node produce?',
   'dialog.dependencies': 'Dependencies',

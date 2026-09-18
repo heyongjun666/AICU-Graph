@@ -154,6 +154,15 @@ export interface CliInfo {
    * 「MCP 未接入」，所以措辞不能写成「不支持」。
    */
   supports_mcp: boolean;
+  /**
+   * ``supports_mcp`` 为假时**为什么**，可直接嵌进「…的 MCP ___」这句话的原因短语；
+   * 为真时为 null。与 ``supports_mcp`` 互补，两者同进同退。
+   *
+   * 由后端下发而不是前端各写一份：成因会变（pi 现在是「装个扩展就行」，agy / grok 是
+   * 「AICU 还没接」），前端硬编码的话后端改了口径前端不会跟着变，用户读到的就是一句与
+   * 实际不符的话。
+   */
+  mcp_unwired_reason: string | null;
 }
 
 /** 公开 provider 预置参数，不包含 API Key。 */

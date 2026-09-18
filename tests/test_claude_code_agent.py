@@ -8,7 +8,9 @@
       * 会话不可续接（conversation_id 为空）→ 重置 + 带『禁读图』说明重试
 """
 
+import os
 import time
+from pathlib import Path
 
 import pytest
 
@@ -153,9 +155,17 @@ class TestDropTransient:
         assert not (ws / "a" / "b").exists()
         assert (ws / "a" / "keep.txt").read_text(encoding="utf-8") == "别删我"
 
-    def test_a_boundary_off_the_path_degrades_to_one_level(self, tmp_path):
-        """stop 不在这条目录链上时只删一层 —— 沿着无关目录链往上 rmdir 是纯粹的误伤。"""
-        config = tmp_path / "outside" / "c.json"
+    def test_a_boundary_off_the_path_never_removes_the_directory(self, tmp_path):
+        """stop 不在这条目录链上时只删文件 —— 那条链不属于我们，一层都不该 rmdir。
+
+        真实形态是 kimi 的 workspace 信任记录：文件由 AICU 写，落在 kimi 自己的
+        ``~/.kimi-code/workspace-trust/`` 里，同一个目录还装着用户自己的授权记录。
+        所以哪怕目录恰好空掉也不能端掉它 —— 这里故意用空目录，只有空目录才能把
+        「只删文件」和「顺手 rmdir 一层」两种情况区分开（非空目录下 rmdir 抛
+        OSError 被吞掉，两种实现的表现一样）。
+        """
+        trust = tmp_path / "workspace-trust"
+        config = trust / "wd_ours_0123456789ab"
         config.parent.mkdir(parents=True)
         config.write_text("x", encoding="utf-8")
         unrelated = tmp_path / "ws"
@@ -164,7 +174,7 @@ class TestDropTransient:
         _drop_transient([config], stop=unrelated)
 
         assert not config.exists()
-        assert not config.parent.exists()
+        assert trust.exists(), "这个目录是 kimi 的，不是我们建的"
         assert unrelated.exists()
 
     def test_missing_file_is_not_an_error(self, tmp_path):
@@ -254,9 +264,9 @@ class TestTransientMcpFilesPerAdapter(_TransientMcpAgentFixture):
 
     @pytest.fixture(autouse=True)
     def _gate_open(self, monkeypatch):
-        """kimi / pi 的 supports_mcp 是探本机二进制问出来的，grok 的当前是常量 False。
+        """pi 的 supports_mcp 是探本机二进制问出来的，grok 的当前是常量 False。
 
-        这些用例问的是「文件生命周期」，与开发机上装没装扩展/新版本、以及某家接没接线
+        这些用例问的是「文件生命周期」，与开发机上装没装扩展、以及某家接没接线
         无关 —— 不拨这一下，用例的结论就跟着开发机走（grok 那几条还会因为压根不落盘
         而在第一行断言上红）。门禁本身另有用例守。
         """
@@ -313,8 +323,7 @@ class TestTransientMcpFilesPerAdapter(_TransientMcpAgentFixture):
         assert (ours / "user-notes.txt").read_text(encoding="utf-8") == "别删我", cli_id
         assert not (tmp_path / "ws").joinpath(*parts).exists(), cli_id
 
-    @pytest.mark.parametrize("cli_id,parts", [("kimi", (".kimi-code", "mcp.json")),
-                                              ("pi", (".pi", "mcp.json"))])
+    @pytest.mark.parametrize("cli_id,parts", [("pi", (".pi", "mcp.json"))])
     def test_gate_closed_refuses_before_writing_anything(
         self, tmp_path, monkeypatch, cli_id, parts
     ):
@@ -322,11 +331,43 @@ class TestTransientMcpFilesPerAdapter(_TransientMcpAgentFixture):
 
         这正是 supports_mcp 那条原则的落点：宁可报错说没接线，也不要写一个不生效的
         配置还让用户以为配好了。所以这里断言两件事 —— 报错，且盘上什么都没多出来。
+
+        kimi 曾经也在这条参数化里（它的门禁当时探本机装的版本），2026-09-18 接上线后
+        ``supports_mcp`` 恒真、不再走这个分支 —— 它现在的落盘与清理由下面那条守着。
         """
         monkeypatch.setattr(cli_adapters, "_mcp_capability", lambda *a, **k: False)
         with pytest.raises(RuntimeError, match="MCP"):
             self._agent(tmp_path, _mcp_servers("echo-probe"), cli_name=cli_id)
         assert not (tmp_path / "ws").joinpath(*parts[:-1]).exists(), cli_id
+
+    def test_kimis_trust_record_is_cleaned_up_without_touching_kimis_own_dir(
+        self, tmp_path, monkeypatch
+    ):
+        """kimi 的信任记录落在 workspace **之外**，生命周期一样要跟着进程走。
+
+        这条路径与别家不同，值得单独守：``_drop_transient`` 的 ``stop`` 边界是 workspace
+        根，而这份记录的父目录 ``<kimi home>/workspace-trust/`` 不在这条目录链上 ——
+        它属于 kimi，里面还装着用户自己的记录。所以清理时必须做到「删文件、不删目录」，
+        否则一次 AICU 运行会顺手把用户其它的信任记录端掉（``rmdir`` 对空目录是会成功的，
+        一旦场景凑巧就是静默的数据损坏）。
+
+        kimi home 由 tests/conftest.py 钉在 tmp_path 下，所以这条用例碰不到真实 home。
+        """
+        monkeypatch.setattr(
+            "claude_code_agent.subprocess.Popen",
+            lambda argv, **kwargs: _FakeProc(argv, **kwargs),
+        )
+        # 预置一条「别人的」记录：既证明目录不被端掉，也证明只有我们写的那份被删。
+        trust_dir = Path(os.environ["KIMI_CODE_HOME"]) / "workspace-trust"
+        trust_dir.mkdir(parents=True)
+        (trust_dir / "wd_someone_elses").write_text('{"root":"x","trustedAt":1}', encoding="utf-8")
+
+        self._agent(tmp_path, _mcp_servers("echo-probe"), cli_name="kimi").chat("hi")
+
+        assert [p.name for p in trust_dir.iterdir()] == ["wd_someone_elses"], (
+            "AICU 写的信任记录没删干净，或者动到了用户自己的记录"
+        )
+        assert not (tmp_path / "ws" / ".kimi-code").exists(), "项目级配置那份也没删干净"
 
 
 

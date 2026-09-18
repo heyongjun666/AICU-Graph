@@ -87,6 +87,27 @@ def _assume_a_cli_is_installed(monkeypatch):
     monkeypatch.setattr(claude_code_agent, "detect_cli", lambda: "claude")
 
 
+@pytest.fixture(autouse=True)
+def _kimi_home_is_never_the_users(tmp_path, monkeypatch):
+    """把 kimi 的 home 钉到临时目录 —— 被测代码里**唯一**会往用户 home 写东西的就是它。
+
+    ``KimiAdapter.mcp_workspace_files`` 会往 kimi home 里补一条 workspace 信任记录
+    （kimi 的 project 层 MCP 配置没它就会被静默丢掉，见 cli_adapters._write_kimi_trust）。
+    那是产线的必要行为，但**测试里绝不能落到开发机真实那份** —— 跑一次测试就在
+    用户的 ``~/.kimi-code/workspace-trust/`` 里拉一堆记录。
+
+    钉在这里而不是各个测试类里：这条路径会被 ``TestMcpSupportFlag._injects_anything``
+    这类「挨个问 adapter 注入口子」的用例间接走到，那些用例的主题与 home 无关，靠它们
+    自觉加隔离是守不住的。钉住被测代码真正读的那个变量，一处生效、全套受益。
+
+    （``KIMI_CODE_HOME`` 优先于 ``Path.home()``，与 kimi 自己的 ``resolveKimiHome`` 同序，
+    所以钉它即可；个别测试类另有 ``Path.home`` 的 patch，两者不冲突。）
+    """
+    home = tmp_path / "kimi-code-home"
+    monkeypatch.setenv("KIMI_CODE_HOME", str(home))
+    return home
+
+
 @pytest.fixture
 def event_bus():
     """EventBus fixture."""

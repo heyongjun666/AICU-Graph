@@ -1,5 +1,6 @@
 """CLI 适配层单元测试。"""
 
+import hashlib
 import json
 import os
 import types
@@ -1243,106 +1244,160 @@ class TestGrokHeadlessContract:
         assert adapter.format_stream_event("starting up") == "starting up"
 
 
-class TestKimiMcpGate:
-    """kimi 的 MCP 入口是**版本相关**的，所以 supports_mcp 得探本机二进制，不能写常量。
+class TestKimiWorkspaceTrust:
+    """kimi 落一份 project 层 mcp.json 之外，还必须补一条 workspace 信任记录。
 
-    这里一律用 PATH 上的假 kimi 脚本，不碰本机真装的那个 —— 否则用例的结论会跟着
-    开发机走（本机 0.43.1 没有 mcp 子命令，2.0.0 有）。
+    kimi 引擎走 ``loadMcpServers({..., includeProject: this.trust.isTrusted()})``，未授信的
+    workspace 只读 user 层 —— project 层那份配置会被**静默**丢掉。而无头模式（``-p``）
+    永远走不到 TUI 的授权提示，所以这份信任只能由 AICU 写。
+
+    本类守的核心是「写出来的 key 与 kimi 查的那个逐字一致」。这条特别值得守，因为不一致时
+    的失败形态是**静默的**：记录写了、没人读、MCP 不加载、全程没有任何报错。
+
+    「supports_mcp 现在是常量」也有用例守着 —— 这里曾经是个探测 ``kimi --help`` 有没有
+    ``mcp`` 子命令的 property，而那个子命令 0.43.1 与 2.0.0 都没有，于是恒为假、
+    kimi 永远显示「MCP 未接入」。
     """
 
     @pytest.fixture(autouse=True)
-    def _clean_cache(self):
-        """探测结果按二进制路径缓存，跨用例复用 —— 每个用例都得从干净状态开始。"""
-        cli_adapters._MCP_CAPABILITY.clear()
-        yield
-        cli_adapters._MCP_CAPABILITY.clear()
+    def _isolated_home(self, _kimi_home_is_never_the_users):
+        """kimi home 的隔离由 conftest 的全局 fixture 兜底，这里只是把路径交出来。
 
-    def _fake_kimi(self, tmp_path, monkeypatch, help_text, *, log=None):
-        """在 PATH 上放一个只会打印 help_text 的 kimi，并把 AICU 指向它。"""
-        script = tmp_path / "kimi"
-        body = "#!/bin/sh\n"
-        if log is not None:
-            body += f"echo run >> {log}\n"
-        body += f"cat <<'EOF'\n{help_text}\nEOF\n"
-        script.write_text(body, encoding="utf-8")
-        script.chmod(0o755)
-        monkeypatch.setenv("PATH", f"{tmp_path}:{os.environ['PATH']}")
-        return str(script)
+        隔离本身不在本类做：这条覆写**会往 home 里写东西**，是本仓库里唯一碰 home 的
+        代码路径，而它不止被本类走到 —— ``TestMcpSupportFlag`` 那种「挨个问 adapter
+        注入口子」的用例也会间接撞上。隔离放在 conftest 才守得住。
+        """
+        home = _kimi_home_is_never_the_users
+        home.mkdir(parents=True, exist_ok=True)
+        return home
 
-    # 0.43.1 的 --help 实测：Commands 段里没有 mcp（其余行照抄，确保不是在真空里匹配）
-    _HELP_WITHOUT_MCP = (
-        "Usage: kimi [options] [command]\n"
-        "\n"
-        "Commands:\n"
-        "  provider                      Manage LLM providers non-interactively.\n"
-        "  session                       Manage sessions non-interactively.\n"
-        "  doctor                        Validate Kimi Code configuration files.\n"
-    )
-    # 假设 2.0.0 补上了这个子命令；形状照 0.43.1 已有行的样子写
-    _HELP_WITH_MCP = (
-        "Usage: kimi [options] [command]\n"
-        "\n"
-        "Commands:\n"
-        "  provider                      Manage LLM providers non-interactively.\n"
-        "  mcp                           Manage MCP servers.\n"
-        "  doctor                        Validate Kimi Code configuration files.\n"
-    )
+    # 真机黄金样本。来自 ~/.kimi-code/workspace-trust/ 里一条**已经存在**的记录，
+    # 内容 {"root":"/Users/heyongjun/Desktop/AICU/final_solution","trustedAt":1789700854694}。
+    # 用它而不是自造样本：这是唯一一条从真机反推出来的判据，算法一漂移它就红。
+    _GOLDEN_ROOT = "/Users/heyongjun/Desktop/AICU/final_solution"
+    _GOLDEN_KEY = "wd_final_solution_5b262f6d586a"
 
-    def test_gate_closed_when_there_is_no_mcp_subcommand(self, tmp_path, monkeypatch):
-        self._fake_kimi(tmp_path, monkeypatch, self._HELP_WITHOUT_MCP)
-        assert get_adapter("kimi").supports_mcp is False
+    def test_supports_mcp_is_a_constant(self):
+        """曾经的探测恒为假 —— 探的是 ``kimi --help`` 里的 mcp 子命令，而两版都没有它。
 
-    def test_gate_open_when_the_subcommand_is_listed(self, tmp_path, monkeypatch):
-        self._fake_kimi(tmp_path, monkeypatch, self._HELP_WITH_MCP)
+        把「没有 CLI 管理子命令」当成「引擎不会加载 MCP」是两件事被当成一件，代价是
+        kimi 明明能跑 MCP 却一直报未接入。
+        """
+        assert KimiAdapter.supports_mcp is True
         assert get_adapter("kimi").supports_mcp is True
 
-    def test_prose_mentioning_mcp_does_not_open_the_gate(self, tmp_path, monkeypatch):
-        """帮助正文里出现「MCP」不算有入口 —— 只认 Commands 段行首那个 token。
+    def test_key_matches_a_real_record_from_the_machine(self):
+        assert cli_adapters._kimi_trust_key(self._GOLDEN_ROOT) == self._GOLDEN_KEY
 
-        这条区分是必要的：真按子串匹配的话，任何在描述里提一句 MCP 的版本都会被判成
-        「有入口」，于是 AICU 落一份那个版本其实读不了的文件，正是门禁要防的静默失效。
+    @pytest.mark.parametrize("name, expected_slug", [
+        ("final_solution", "final_solution"),
+        ("My Workspace", "my-workspace"),   # 大写转小写、空格转短横线
+        ("a" * 60, "a" * 40),               # 截到 MAX_WORKDIR_SLUG_LENGTH
+        ("工作区", "workspace"),             # 非 ASCII 全变短横线，再剥光 → 兜底串
+        ("--edge--", "edge"),               # 首尾短横线要剥掉
+    ])
+    def test_slug_rules(self, tmp_path, name, expected_slug):
+        """slug 段要与 kimi 的 ``slugifyWorkDirName`` 同规则；key 形如 ``wd_<slug>_<hash12>``。"""
+        key = cli_adapters._kimi_trust_key(tmp_path / name)
+        assert key.startswith("wd_") and len(key) - len("wd_") - 13 == len(expected_slug)
+        assert key[3:-13] == expected_slug
+
+    def test_a_root_that_slugs_to_nothing_falls_back(self):
+        """兜底串那一路：``/`` 的目录名是空的，kimi 用 ``"workspace"`` 顶上。"""
+        assert cli_adapters._kimi_trust_key("/")[3:-13] == "workspace"
+
+    def test_key_follows_the_physical_path_not_the_literal_one(self, tmp_path):
+        """key 必须按**物理路径**算 —— 这条是实测出来的，不是推理。
+
+        kimi 那边 key 的输入是子进程的 ``process.cwd()``，而 ``getcwd()`` 返回的是已化解
+        软链的物理路径，Node 的 ``path.resolve`` 又不会再解析一次。2026-09-18 三臂对照实测
+        （唯一变量 = 记录怎么写）：不写记录全 0、用 ``abspath`` 算的 key 全 0（kimi 找不到）、
+        用 ``realpath`` 算的 拉起=1 握手=1 tools/list=1 真调用=1。
+
+        本机 ``/tmp → /private/tmp`` 就是现成的软链样本，所以这条不是纸上推演。
         """
-        help_text = (
-            "Usage: kimi [options] [command]\n"
-            "\n"
-            "Options:\n"
-            "  --mcp-config <path>           Path to an MCP configuration file.\n"
-            "\n"
-            "Commands:\n"
-            "  doctor                        Validate config, including MCP servers.\n"
-        )
-        self._fake_kimi(tmp_path, monkeypatch, help_text)
-        assert get_adapter("kimi").supports_mcp is False
+        real = tmp_path / "real"
+        real.mkdir()
+        link = tmp_path / "link"
+        link.symlink_to(real, target_is_directory=True)
 
-    def test_probe_result_is_cached_per_binary(self, tmp_path, monkeypatch):
-        """探一次就够 —— 这个属性会被 Web 请求线程反复读，每次都起子进程太贵。"""
-        log = tmp_path / "runs.log"
-        self._fake_kimi(tmp_path, monkeypatch, self._HELP_WITH_MCP, log=log)
-        adapter = get_adapter("kimi")
-        for _ in range(3):
-            assert adapter.supports_mcp is True
-        assert log.read_text(encoding="utf-8").count("run") == 1
+        assert cli_adapters._kimi_trust_key(link) == cli_adapters._kimi_trust_key(real)
+        physical = os.path.realpath(str(link))
+        assert physical != str(link)  # 前提：这个断言成立才谈得上区分两者
+        assert cli_adapters._kimi_trust_key(link).endswith(
+            hashlib.sha256(physical.encode()).hexdigest()[:12])
 
-    def test_a_missing_binary_is_not_capable(self, tmp_path, monkeypatch):
-        """二进制不在 / 探不动 —— 一律判否（宁可报错说没接线，也别写个死文件）。"""
-        monkeypatch.setenv("PATH", str(tmp_path))
-        assert get_adapter("kimi").supports_mcp is False
+    def test_nothing_is_written_without_mcp_servers(self, tmp_path, _isolated_home):
+        """没配 mcp 的运行不该在用户 home 里留下任何痕迹。"""
+        ws = tmp_path / "ws"
+        assert get_adapter("kimi").mcp_workspace_files(ws, []) == []
+        assert list(_isolated_home.rglob("*")) == []
+        assert not ws.exists()
 
-    def test_gate_decides_whether_the_config_file_is_written(self, tmp_path, monkeypatch):
-        """门禁不是一个报告用的字段，它真的挡在落盘前面。"""
-        adapter = get_adapter("kimi")
-        # 每轮一个干净 workspace：关着的那轮要断言「连目录都没建」，
-        # 跟开着的那轮共用目录就分不清是谁建的。
-        for capable in (True, False):
-            ws = tmp_path / ("open" if capable else "closed")
-            monkeypatch.setattr(cli_adapters, "_mcp_capability", lambda *a, **k: capable)
-            paths = adapter.mcp_workspace_files(ws, _mcp_servers("echo-probe"))
-            assert bool(paths) is capable
-            assert (ws / ".kimi-code").exists() is capable
+    def test_writes_the_project_config_and_a_trust_record(self, tmp_path, _isolated_home):
+        ws = tmp_path / "ws"
+        paths = get_adapter("kimi").mcp_workspace_files(ws, _mcp_servers("echo-probe"))
+
+        project = ws / ".kimi-code" / "mcp.json"
+        assert project in paths
+        assert json.loads(project.read_text(encoding="utf-8"))["mcpServers"].keys() == {"echo-probe"}
+
+        record = _isolated_home / "workspace-trust" / cli_adapters._kimi_trust_key(ws)
+        assert record in paths
+
+    def test_the_record_is_byte_for_byte_like_kimis_own(self, tmp_path, _isolated_home):
+        """形状必须与 kimi 自己写的那条同形：紧凑 JSON、无尾换行、两个键、毫秒 int。
+
+        比着真机那条写：``{"root":"...","trustedAt":1789700854694}``。老实说内容读的时候
+        并不校验（判据只是 key 在不在），但写一个自己都不认识的形状没有好处 —— 哪天
+        kimi 开始校验了，这里不用再改。
+        """
+        ws = tmp_path / "ws"
+        get_adapter("kimi").mcp_workspace_files(ws, _mcp_servers("echo-probe"))
+
+        raw = (_isolated_home / "workspace-trust" / cli_adapters._kimi_trust_key(ws)).read_text("utf-8")
+        data = json.loads(raw)
+        assert sorted(data) == ["root", "trustedAt"]
+        assert data["root"] == cli_adapters._kimi_workspace_root(ws)
+        assert isinstance(data["trustedAt"], int) and data["trustedAt"] > 10 ** 12  # 毫秒而非秒
+        assert raw == json.dumps(data, separators=(",", ":"))  # 紧凑，没有缩进
+        assert not raw.endswith("\n")
+
+    def test_an_existing_record_is_neither_overwritten_nor_returned(self, tmp_path, _isolated_home):
+        """用户自己在 TUI 里授过的信不能被顶掉。
+
+        更要紧的是**不能被当成「本次创建的」而删掉** —— 返回值就是「跑完删这些」的契约，
+        把别人的记录放进返回值，等于一次 AICU 运行顺手撤销了用户的授权。
+        """
+        ws = tmp_path / "ws"
+        record = _isolated_home / "workspace-trust" / cli_adapters._kimi_trust_key(ws)
+        record.parent.mkdir(parents=True)
+        record.write_text('{"root":"x","trustedAt":1}', encoding="utf-8")
+
+        paths = get_adapter("kimi").mcp_workspace_files(ws, _mcp_servers("echo-probe"))
+
+        assert record not in paths
+        assert record.read_text(encoding="utf-8") == '{"root":"x","trustedAt":1}'
+        assert (ws / ".kimi-code" / "mcp.json") in paths  # 项目级那份照写，两件事互不影响
+
+    def test_an_unwritable_home_degrades_instead_of_failing(self, tmp_path, monkeypatch):
+        """写不进 home 只该退化成「MCP 不生效」，不该让整个节点炸掉。
+
+        信任记录是**增强**，不是本次运行的前提：写不进去时最坏的结果是与改动前一样
+        （kimi 不加载 project 层配置），而那远好过一个 OSError 把一次能跑完的节点带走。
+        """
+        blocker = tmp_path / "not-a-dir"
+        blocker.write_text("", encoding="utf-8")       # 拿文件当目录用 → mkdir 必然 OSError
+        monkeypatch.setenv("KIMI_CODE_HOME", str(blocker))
+
+        ws = tmp_path / "ws"
+        paths = get_adapter("kimi").mcp_workspace_files(ws, _mcp_servers("echo-probe"))
+
+        assert paths == [ws / ".kimi-code" / "mcp.json"]
 
 
 class TestProbeStdoutRobustness:
-    """``_probe_stdout`` 是两条门禁（kimi / pi）共用的底座，它自己的失败面得守住。
+    """``_probe_stdout`` 是能力门禁（现在只剩 pi 一条）的底座，它自己的失败面得守住。
 
     设计意图通篇是「探测不出来就判否」—— 二进制不在、超时都返回 None。唯一的例外曾是
     解码：默认严格解码遇到非 UTF-8 字节抛 ``UnicodeDecodeError``，而它既不是 OSError
@@ -1654,14 +1709,14 @@ class TestKnownModels:
         硬编码的代价是同一份事实维护两遍：将来接一个新 CLI，后端接了、前端没改，
         用户看到的就是一句和实际不符的标注。
 
-        这里只列**常量**为真的 CLI。pi / kimi 压根不是常量，它们的值取决于本机装了
-        什么，另有用例专门守（见下一条）；antigravity 则是常量 False，但它现在在隐藏
-        名单里，取不到 by_id，所以改为直接问 adapter。
+        这里只列**常量**的 CLI。pi 压根不是常量，它的值取决于本机装没装
+        ``pi-mcp-adapter``，另有用例专门守（见下一条）；antigravity 则是常量 False，但它
+        现在在隐藏名单里，取不到 by_id，所以改为直接问 adapter。
         """
         items = cli_adapters.list_clis()
         assert all("supports_mcp" in item for item in items)
         by_id = {item["id"]: item for item in items}
-        for cli_id in ("internal", "claude", "codebuddy", "codex", "opencode", "qwen"):
+        for cli_id in ("internal", "claude", "codebuddy", "codex", "opencode", "qwen", "kimi"):
             assert by_id[cli_id]["supports_mcp"] is True, cli_id
         # grok 是常量 False，且它在下拉里（不在隐藏名单），所以取得到 by_id。
         # 为什么关：CLI 侧验过（``grok mcp doctor`` 握手 OK、认出 1 个工具），模型侧
@@ -1677,18 +1732,20 @@ class TestKnownModels:
         assert "antigravity" not in by_id
         assert get_adapter("antigravity").supports_mcp is False
 
-    @pytest.mark.parametrize("cli_id", ["pi", "kimi"])
-    def test_capability_gated_clis_report_whatever_the_probe_says(self, monkeypatch, cli_id):
-        """pi / kimi 的 MCP 入口要看**本机这个二进制**，所以不能在这儿钉死一个值。
+    def test_capability_gated_clis_report_whatever_the_probe_says(self, monkeypatch):
+        """pi 的 MCP 入口要看**本机这个二进制**，所以不能在这儿钉死一个值。
 
         钉死等于让用例的结论跟着开发机走：装了扩展的机器上它红、没装的机器上它绿，
         而两种情况下产线代码都是对的。这里把门禁拨到两边，断言列表如实反映结果 ——
         这才是这个字段的契约（「告诉前端能不能用」），而不是「永远是某个值」。
+
+        kimi 曾经也在这条参数化里，现在不在：它的 MCP 支持是引擎自带的常量（见
+        TestKimiWorkspaceTrust），不再随本机装的版本变。
         """
         for value in (True, False):
             monkeypatch.setattr(cli_adapters, "_mcp_capability", lambda *a, **k: value)
             by_id = {item["id"]: item for item in cli_adapters.list_clis()}
-            assert by_id[cli_id]["supports_mcp"] is value, (cli_id, value)
+            assert by_id["pi"]["supports_mcp"] is value, value
 
     def test_hidden_clis_absent_from_list_but_adapters_kept(self):
         """摘出下拉的 CLI：列表里没有，但 adapter 必须保留。
@@ -1906,7 +1963,7 @@ class TestMcpSupportFlag:
 
     @pytest.fixture(params=[True, False])
     def capability(self, monkeypatch, request):
-        """把 kimi / pi 的能力门禁拨到两边，两条不变量各跑两遍。
+        """把 pi 的能力门禁拨到两边，两条不变量各跑两遍。
 
         不拨这一下，用例的**覆盖面跟着开发机走**：装了 pi-mcp-adapter 的机器上 pi 是
         True、会被正向那条查到；没装的机器上它是 False、正向那条直接 continue 掉，
@@ -1991,27 +2048,37 @@ class TestMcpWiringGuard:
 
     @pytest.fixture(autouse=True)
     def _pin_the_gate_closed(self, monkeypatch):
-        """把能力门禁钉成 False，否则这条用例的结论跟着开发机走。
+        """把 pi 的能力门禁钉成 False，否则用例的结论跟着开发机走。
 
-        kimi / pi 的 ``supports_mcp`` 是探本机二进制问出来的：装了带 mcp 命令的 kimi
-        或装了 pi-mcp-adapter 的机器上，它们**本来就不该**报错 —— 那时这条用例会红，
-        而产线代码是对的。门禁本身另有用例守（TestKimiMcpGate / 上面那条参数化）。
+        pi 的 ``supports_mcp`` 是探本机二进制问出来的：装了 ``pi-mcp-adapter`` 的机器上
+        它**本来就不该**报错 —— 那时用例会红，而产线代码是对的。门禁本身另有用例守
+        （上面那条参数化）。
+
+        本类现在只用 antigravity（常量 False）当未接线样本，本来不依赖这一下 —— 留着是因为
+        将来有人拿 pi 写用例时，不拨它就又变成一条跟着开发机走的隐式依赖。
         """
         monkeypatch.setattr(cli_adapters, "_mcp_capability", lambda *a, **k: False)
 
     def test_unwired_cli_raises(self, tmp_path):
         with pytest.raises(RuntimeError) as excinfo:
-            self._build(tmp_path, "kimi", _mcp_servers("echo-probe"))
-        assert "kimi" in str(excinfo.value)
+            self._build(tmp_path, "antigravity", _mcp_servers("echo-probe"))
+        assert "antigravity" in str(excinfo.value)
+
+    def test_a_cli_that_got_wired_stops_raising(self, tmp_path):
+        """kimi 2026-09-18 接上了线，同一个构造调用不该再报错。
+
+        这条是那次改动的**回归哨**：kimi 的 ``supports_mcp`` 曾经是个恒为假的探测
+        （探 ``kimi --help`` 有没有 mcp 子命令，而 0.43.1 与 2.0.0 都没有），
+        于是角色一配 mcp 就在建 CC 这一步炸掉。现在它恒真。
+        """
+        agent = self._build(tmp_path, "kimi", _mcp_servers("echo-probe"))
+        assert agent.adapter.supports_mcp is True
 
     def test_message_says_not_wired_not_unsupported(self, tmp_path):
         """文案不许说「该 CLI 不支持 MCP」。
 
         agy 自己就有 MCP，只是它只认全局配置文件、AICU 注入不了。说成「不支持」是关于
         CLI 的假陈述 —— 用户会跑去除错或换 CLI，而不是来问我们能不能接。
-
-        这里用 antigravity（常量 False）而不是 kimi：kimi 的文案已经被它自己覆盖成
-        「版本没有入口」了，那句话里本来就不该出现「尚未接入」。
         """
         with pytest.raises(RuntimeError) as excinfo:
             self._build(tmp_path, "antigravity", _mcp_servers("echo-probe"))
@@ -2019,17 +2086,23 @@ class TestMcpWiringGuard:
         assert "尚未接入" in message
         assert "不支持 MCP" not in message
 
-    def test_unwired_reason_is_asked_of_the_adapter(self, tmp_path):
-        """原因短语由 adapter 提供，不是守卫里写死的一句 —— kimi 的成因是版本。
+    def test_unwired_reason_is_asked_of_the_adapter(self, tmp_path, monkeypatch):
+        """原因短语由 adapter 提供，不是守卫里写死的一句。
 
-        写死的话，一个「升级 kimi 就能解决」的场景会被告知「AICU 还没接线」，
-        用户于是去做一个错误的动作：等，或者换 CLI。
+        写死的话，一个「换个注入方式就能解决」的场景会被告知「AICU 还没接线」，用户于是
+        去做一个错误的动作：等，或者换 CLI。
+
+        这里换成拨 adapter 的方法到一句哨兵串，断言它**真的出现在报错里** ——
+        比钉死某一家当前的文案更贴契约：文案本来就是要随成因变的，而「守卫会去问 adapter」
+        才是这条用例该守的不变量。（kimi 曾经是这条的样本，现在它不再走这个分支。）
         """
+        monkeypatch.setattr(
+            cli_adapters.AntigravityAdapter, "mcp_unwired_reason",
+            lambda self: "哨兵原因-4f2a",
+        )
         with pytest.raises(RuntimeError) as excinfo:
-            self._build(tmp_path, "kimi", _mcp_servers("echo-probe"))
-        message = str(excinfo.value)
-        assert "版本" in message
-        assert "升级" in message
+            self._build(tmp_path, "antigravity", _mcp_servers("echo-probe"))
+        assert "哨兵原因-4f2a" in str(excinfo.value)
 
     def test_every_adapter_can_answer_the_reason_question(self):
         """钩子必须所有 adapter 都能答 —— 守卫在**每条**未接线路径上都会问它一遍。"""
@@ -2040,7 +2113,7 @@ class TestMcpWiringGuard:
     def test_message_recommends_a_cli_that_actually_works(self, tmp_path):
         """推荐的替代品必须真的在已接线名单里，且从 adapter 派生而非写死。"""
         with pytest.raises(RuntimeError) as excinfo:
-            self._build(tmp_path, "kimi", _mcp_servers("echo-probe"))
+            self._build(tmp_path, "antigravity", _mcp_servers("echo-probe"))
         message = str(excinfo.value)
         wired = cli_adapters.mcp_enabled_clis()
         assert wired, "接入名单为空，文案会推荐一个空集合"

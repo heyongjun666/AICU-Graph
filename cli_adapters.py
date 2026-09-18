@@ -32,12 +32,14 @@ flags 依据（截至 2026-08；MCP 那一侧的核实情况另见各 adapter �
     的 docstring 为准，别照这一行判断
 """
 
+import hashlib
 import json
 import os
 import re
 import shutil
 import subprocess
 import threading
+import time
 from pathlib import Path
 from typing import Optional
 
@@ -858,8 +860,8 @@ class CliAdapter:
     #     角色如果声明了 mcp 而落到这类 CLI 上，AICU 会直接报错而不是静默忽略 ——
     #     skill 就吃过这个亏：软链对所有 CLI 照建，非 claude 系 CLI 上那是死文件，
     #     建了但永远不生效。
-    #   子类可以把它改成 @property：kimi / pi 的答案是「看本机装的那个二进制」，
-    #     没法用一个类属性写死（见 _mcp_capability）。
+    #   子类可以把它改成 @property：pi 的答案是「看本机装没装那个扩展」，没法用一个
+    #     类属性写死（见 _mcp_capability）。
     supports_mcp = False
 
     # 项目级 MCP 配置文件的路径，**相对 CC 的 workspace 逐段给出**。
@@ -1131,14 +1133,17 @@ def _grok_mcp_toml(servers: list) -> str:
 
 # ---- MCP 能力探测：supports_mcp 得先问本机二进制才能回答的 CLI -------------------
 #
-# 多数 adapter 的 ``supports_mcp`` 是个常量：AICU 接线了就是 True。但有两家的 MCP
-# 入口**取决于本机装的那个版本/扩展**，写常量会说假话：
+# 多数 adapter 的 ``supports_mcp`` 是个常量：AICU 接线了就是 True。pi 是唯一的例外 ——
+# 它的 MCP 入口**取决于本机装没装那个扩展**，写常量会说假话：
 #
-#   pi   —— pi 本体没有 MCP。0.84.2 的 ``dist/`` 里 ``mcpServers`` 命中数为 0，
-#           配置是由外部扩展 pi-mcp-adapter 读的（``pi install npm:pi-mcp-adapter``）。
-#           扩展没装时 ``.pi/mcp.json`` 是个死文件。
-#   kimi —— 引擎里有 MCP，但项目级配置被 workspace trust 门禁挡着，而 trust 只能由
-#           交互式 TUI 授予（见 ``KimiAdapter.mcp_unwired_reason``）。
+#   pi —— pi 本体没有 MCP。0.84.2 的 ``dist/`` 里 ``mcpServers`` 命中数为 0，
+#         配置是由外部扩展 pi-mcp-adapter 读的（``pi install npm:pi-mcp-adapter``）。
+#         扩展没装时 ``.pi/mcp.json`` 是个死文件。
+#
+# 这层探测的门槛得拿捏：它探的必须是**本机的能力**，而不是「CLI 有没有某个子命令」。
+# kimi 曾经也挂在这里，探的正是后者（``kimi --help`` 里有没有 ``mcp``），而那个子命令
+# 0.43.1 与 2.0.0 都没有 —— 门禁于是恒为假，把一条本来能用的链路整个挡掉。真正挡着
+# 项目级配置的是 workspace trust，那是 AICU 自己就能写的（见 KimiAdapter）。
 #
 # 门禁判否时的对外表现与「还没接线」完全一致（守卫照常报错、前端标未接入）——
 # 这正是 ``supports_mcp`` 注释里那条原则：**宁可报错说没接线，也不要写一个不生效的
@@ -1199,35 +1204,83 @@ def _probe_pi_mcp(command: str) -> bool:
     return output is not None and "pi-mcp-adapter" in output
 
 
-# ``kimi --help`` 的 Commands 段里，一行行形如 ``  <名字>[|别名] [options] ... 说明``。
-# 只认行首（缩进后）那个 token，不认正文里出现的 mcp —— 否则将来帮助文案里提一句
-# MCP 就会把没有子命令的版本判成有。
-_KIMI_MCP_COMMAND = re.compile(r"^\s+mcp(?:\||\s|\[|$)", re.MULTILINE)
+# ---------------------------------------------------------------------------
+# kimi 的 workspace 信任记录
+#
+# kimi 引擎加载 MCP 分两层（``loadMcpServers``）：
+#   user 层    ``$KIMI_CODE_HOME/mcp.json``    —— 无条件加载
+#   project 层 ``<cwd>/.kimi-code/mcp.json``   —— 只在 ``trust.isTrusted()`` 为真时加载
+# 而 trust 只能由交互式 TUI 的授权提示授予，``kimi -p`` 永远走不到那一步 —— 所以 AICU
+# 落一份 project 层配置却不补信任记录，等于什么都没做（这正是 2026-09-17 那次 A/B 里
+# project 臂全 0 的原因）。
+#
+# 好在这个 trust 是**纯落盘记录**：``readWorkspaceTrust`` 的判据是
+# ``docs.get("workspace-trust", trustKey(root)) !== void 0`` —— 只认 key 在不在，
+# 内容不校验、不签名、不看时间。于是 AICU 可以把这条记录直接写出来。
+#
+# 下面两个函数逐行复刻 kimi 的 ``canonicalWorkspaceRoot`` + ``encodeWorkDirKey``，
+# 改任何一处都要同步改这里，否则算出来的 key 与 kimi 查的那个对不上 —— 而那种失败是
+# **静默的**：记录写了、没人读、MCP 不加载、全程没有任何报错。
+# 黄金样本（本机真机记录，可用来校验算法是否还准）：
+#   /Users/heyongjun/Desktop/AICU/final_solution → wd_final_solution_5b262f6d586a
+# ---------------------------------------------------------------------------
+
+# 与 kimi 的 ``TRUST_SCOPE`` 常量逐字一致，是 home 下的子目录名
+_KIMI_TRUST_SCOPE = "workspace-trust"
+# ``slugifyWorkDirName`` 里的 MAX_WORKDIR_SLUG_LENGTH；截断之后还要再剥一次首尾短横线
+_KIMI_SLUG_MAX = 40
 
 
-def _probe_kimi_mcp(command: str) -> bool:
-    """``kimi`` 暴露了 ``mcp`` 子命令没有 —— 有入口才谈得上收 MCP 配置。
+def _kimi_workspace_root(workspace) -> str:
+    """kimi 眼里的 workspace 根 —— 对齐 Node 的 ``path.resolve`` + ``workspaceRootKey``。
 
-    问的是**有没有入口**，不是「能不能用」：0.43.1 实测 ``kimi mcp list`` 回
-    ``unknown command 'mcp'. See 'kimi --help'.``（stderr，退出码 1），该版本的
-    ``--help`` Commands 段里也没有它。
+    **必须用 ``realpath`` 而不是 ``abspath``**：key 的输入是子进程的 ``process.cwd()``，
+    而 ``getcwd()`` 返回的是**物理路径**（软链已被化解），Node 的 ``path.resolve`` 又不会
+    再解析一次 —— 所以含软链的 workspace 上两者算出的 key 不同。macOS 的
+    ``/tmp → /private/tmp`` 就是现成例子。
 
-    为什么查 ``--help`` 而不是直接跑 ``kimi mcp list``：后者在有这个子命令的版本上
-    会**真的去读配置**（读 ~/.kimi-code 与 cwd），而这份配置里可能有需要起子进程、
-    需要联网、乃至需要等认证的 server —— 一旦挂住就撞上超时，被当成「没有入口」，
-    正好把唯一能判真的情形误判成假。``--help`` 只打印一份静态帮助，没有这些副作用。
-
-    **这道门禁的已知局限**：kimi 引擎里的 MCP 加载还要过 workspace trust，而 trust
-    只能由交互式 TUI 授予（``-p`` 走不到那个提示）。所以即使这里判真、即使
-    ``.kimi-code/mcp.json`` 写得再对，无头运行时项目级 server 仍可能被静默 gated 掉。
-    探到真只是「这个版本有入口」，不等于「这条路走得通」—— 升级后实测确认之前，
-    这道门禁给的是**必要非充分**信号。
-
-    （Kimi 平台侧另有一条 MCP 路 —— 托管智能体的远程 MCP，只收 ``type: "url"``，
-    与 AICU 的 stdio 下发对不上，刻意没接；见 ``KimiAdapter`` docstring 里的说明。）
+    2026-09-18 三臂对照实测（唯一变量 = 记录怎么写）：不写记录全 0、abspath 写的全 0、
+    realpath 写的 拉起=1 握手=1 tools/list=1 真调用=1。**这不是推理出来的，是测出来的。**
     """
-    output = _probe_stdout([command, "--help"])
-    return output is not None and _KIMI_MCP_COMMAND.search(output) is not None
+    return os.path.realpath(str(workspace)).replace("\\", "/").rstrip("/")
+
+
+def _kimi_trust_key(workspace) -> str:
+    """``wd_<目录名小写化≤40>_<sha256(规范化路径)[:12]>``，与 kimi 的 ``encodeWorkDirKey`` 同形。"""
+    root = _kimi_workspace_root(workspace)
+    name = root.split("/")[-1] or root
+    slug = re.sub(r"[^a-z0-9._-]+", "-", name.lower()).strip("-")[:_KIMI_SLUG_MAX].strip("-")
+    digest = hashlib.sha256(root.encode("utf-8")).hexdigest()[:12]
+    return f"wd_{slug or 'workspace'}_{digest}"
+
+
+def _write_kimi_trust(workspace) -> Optional[Path]:
+    """写一条 workspace 信任记录并返回路径；**已经存在则返回 None**。
+
+    返回 None 那一条是有意的：记录已经在那儿，说明用户自己在 TUI 里授过信、或者上一次
+    AICU 运行留下的 —— 两种情况都不该由本次运行删掉。调用方按「返回了才删」处理
+    （见 ``CliAdapter.mcp_workspace_files`` 的返回值契约）。
+
+    home 按 ``resolveKimiHome`` 的同序取：``KIMI_CODE_HOME`` 优先，否则 ``~/.kimi-code``。
+    跟着这个变量走是必须的 —— kimi 从同一个 home 读 mcp.json 与信任记录，写岔了等于没写。
+    """
+    home = os.environ.get("KIMI_CODE_HOME") or str(Path.home() / ".kimi-code")
+    record = Path(home).joinpath(_KIMI_TRUST_SCOPE, _kimi_trust_key(workspace))
+    if record.exists():
+        return None
+    try:
+        record.parent.mkdir(parents=True, exist_ok=True)
+        # 紧凑 JSON、无尾换行、trustedAt 毫秒 int —— 与 kimi 自己写的那条逐字同形
+        record.write_text(
+            json.dumps({"root": _kimi_workspace_root(workspace),
+                        "trustedAt": int(time.time() * 1000)},
+                       separators=(",", ":")),
+            encoding="utf-8")
+    except OSError:
+        # 写不进去（home 只读 / 权限不足）不该让整次运行失败，退化成「MCP 不生效」，
+        # 与改动前一致。不吞的话，一个可选的增强会变成硬故障。
+        return None
+    return record
 
 
 def _mcp_servers_settings_json(servers: list) -> str:
@@ -1756,7 +1809,9 @@ class KimiAdapter(CliAdapter):
       - **形态**：接它等于新增一类 HTTP 后端，与 AICU「起子进程 + 往 workspace 写项目级
         配置文件」的 adapter 模型不是一回事，不是改一行的事。
 
-    本 CLI 自己那条 MCP 路径的局限见 ``_probe_kimi_mcp``（版本门禁 + workspace trust）。
+    本 CLI 自己那条 MCP 路径见 ``mcp_workspace_files``：往 project 层
+    ``<cwd>/.kimi-code/mcp.json`` 落配置，**外加一条 workspace 信任记录** —— 少了后者，
+    kimi 的 trust 门禁会把这份配置静默丢掉（机制与实测见 ``_write_kimi_trust`` 上方那段）。
     """
 
     id = "kimi"
@@ -1782,28 +1837,36 @@ class KimiAdapter(CliAdapter):
     # kimi 的项目级 MCP 配置文件，位置从 0.43.1 与 2.0.0 两份 bundle 逐字核实：
     # ``resolveMcpJsonPaths`` 里的 project 一路就是 ``<cwd>/.kimi-code/mcp.json``，
     # key 是 ``mcpServers``（与 gemini/cursor/pi 同形，故走基类的通用实现）。
-    #
-    # 路径写死，但**本次落不落盘由下面的门禁说了算** —— 基类 mcp_workspace_files 里
-    # ``not self.supports_mcp`` 那一条就是为它准备的。
     mcp_workspace_config = (".kimi-code", "mcp.json")
 
-    @property
-    def supports_mcp(self) -> bool:
-        """kimi 的 MCP 入口取决于**本机装的那个版本**有没有 ``mcp`` 子命令。
+    # 引擎一侧的 MCP 支持从 0.43.1 起就在（``resolveMcpJsonPaths`` / ``loadMcpServers``
+    # 两版都有），所以这里是常量而不是探测。
+    #
+    # 曾经这里是个探测 ``kimi --help`` 有没有 ``mcp`` 子命令的 property，**恒为假** ——
+    # 0.43.1 与 2.0.0 都没有那个子命令（``kimi mcp list`` → ``unknown command 'mcp'``），
+    # 于是 kimi 永远显示「未接入」。那个写法把「没有 CLI 管理子命令」当成了「引擎不会加载
+    # MCP」，是两件事。
+    supports_mcp = True
 
-        0.43.1（本机 ``~/.kimi-code/bin/kimi``）的 ``--help`` 里没有这个子命令；
-        2.0.0 才有。所以这里不能写常量：写 True，老版本上会落一份谁也读不了的文件；
-        写 False，新版本上会让一个已经能用的通道一直报「未接入」。
+    def mcp_workspace_files(self, workspace, mcp_servers: Optional[list]) -> list:
+        """项目级 ``mcp.json`` 之外，**再补一条 workspace 信任记录**。
+
+        这是 KimiAdapter 独有的额外动作，也是这条路能不能通的全部关键：kimi 引擎走
+        ``loadMcpServers({..., includeProject: this.trust.isTrusted()})``，而未授信的
+        workspace 只读 user 层 —— project 层那份配置会被**静默**丢掉。无头模式（``-p``）
+        永远走不到 TUI 的授权提示，所以这份信任只能由 AICU 写。
+
+        返回的两个路径都由调用方在进程结束后删掉（见 ``_drop_transient``）；
+        信任记录如果本来就在（用户自己授的、或上次运行留下的），``_write_kimi_trust``
+        返回 None，不会被删 —— 写别人的东西和删别人的东西是两回事。
         """
-        return _mcp_capability(self.command, _probe_kimi_mcp)
-
-    def mcp_unwired_reason(self) -> str:
-        """报错文案得说真话：这里为假的**原因**是版本，不是 AICU 没接线。
-
-        基类默认那句「尚未接入 AICU」在这个分支上是关于 CLI 的假话 —— 用户读到它
-        只会以为换个 CLI 就好了，而实际要做的动作是升级 kimi。
-        """
-        return "在当前安装的 kimi 版本上没有可用入口（该版本未暴露 mcp 子命令，升级后重试）"
+        files = super().mcp_workspace_files(workspace, mcp_servers)
+        if not files:
+            # 没落盘 = 本次压根没 mcp，那就一个字节都不写：不配 MCP 的运行不该在
+            # 用户的 home 里留下信任记录。
+            return files
+        record = _write_kimi_trust(workspace)
+        return files + [record] if record is not None else files
 
     def model_arg(self, model: Optional[str], *, api_base_url: Optional[str]) -> Optional[str]:
         """改道时恒为 None —— 模型由 ``KIMI_MODEL_NAME`` 承担，命令行上不能出现 ``--model``。

@@ -67,6 +67,11 @@ def _drop_transient(paths: list, stop=None) -> None:
         当初写这版的起因，但那一版最终没接 —— 见 AntigravityAdapter），所以这一路
         对现有 CLI 是行为等价的；留着是因为「配置文件的深度」是 adapter 的自由，
         而少删一层是个只在产物目录里才看得见的缺陷。
+
+        **不在 ``stop`` 之下的路径只删文件、不删目录**：这类文件是 adapter 写在
+        workspace 之外的（kimi 的 workspace 信任记录落在 ``~/.kimi-code/workspace-trust/``），
+        文件是我写的，目录不是 —— 那个目录属于 kimi，里面还有用户自己的记录。
+        ``rmdir`` 一旦碰上恰好空的目录就会把别人的目录端掉，所以这一路直接跳过。
     """
     for path in paths or []:
         try:
@@ -76,10 +81,11 @@ def _drop_transient(paths: list, stop=None) -> None:
                 path.parent.rmdir()
                 continue
             boundary = Path(stop)
-            # stop 不在本文件的目录链上时退化成单层：沿着一条无关的目录链向上 rmdir
-            # 是纯粹的误伤，宁可留着空目录。
+            # stop 不在本文件的目录链上时只删文件、不动目录：这种文件是我们写的，它
+            # 所在的**目录不是**（kimi 的 workspace 信任记录就落在 ~/.kimi-code/
+            # workspace-trust/ 里，那是 kimi 自己的目录，还装着用户其它记录）。
+            # 沿一条不属于自己的目录链 rmdir 是纯粹的误伤，宁可留着空目录。
             if boundary not in path.parents:
-                path.parent.rmdir()
                 continue
             parent = path.parent
             while parent != boundary:
@@ -391,8 +397,9 @@ class ClaudeCodeAgent:
         # 少数 CLI（qwen / gemini / cursor / pi / kimi / grok）只能从「cwd 下的项目级
         # 配置文件」读 MCP，没法走 argv/env。这类文件必须在 Popen 之前写好（CLI 启动
         # 时就要读），进程结束后立刻删掉，否则会被产物收集当成交付物（见 _drop_transient）。
-        # 名单说的是「这条路怎么走」，不是「现在接没接」：kimi 与 grok 的 supports_mcp
-        # 当前都是 False（版本门禁 / 模型侧没验过），落盘那一步在基类里就被挡掉了。
+        # 返回值也可能包含 workspace **之外**的文件 —— kimi 除了项目级配置还要补一条
+        # workspace 信任记录（在 ~/.kimi-code/workspace-trust/ 下），少了它 kimi 会把
+        # 项目级配置静默丢掉；这类路径在 _drop_transient 里只删文件不删目录。
         # stop=self.workspace：清空目录时不许爬出本次 CC 的 workspace。
         transient = self.adapter.mcp_workspace_files(self.workspace, self.mcp_servers)
         try:

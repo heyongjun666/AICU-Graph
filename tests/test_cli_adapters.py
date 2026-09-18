@@ -1824,6 +1824,36 @@ class TestKnownModels:
             by_id = {item["id"]: item for item in cli_adapters.list_clis()}
             assert by_id["pi"]["supports_mcp"] is value, value
 
+    def test_the_reason_is_shipped_only_when_there_is_one(self, monkeypatch):
+        """接不了才给原因，接得了给 None —— 那时那句话没有意义。
+
+        ``supports_mcp`` 与它是一对**互补**字段，不是两个各自为政的字段：契约就一条
+        「真假与有无原因必须同进同退」。前端据此决定要不要提示，判两次的话两个字段迟早
+        会漂移。
+
+        成因这句话必须与 adapter 的说法**逐字一致**，不是后端另写一份：它是给用户看的
+        动作（pi 的那句里带着一条 ``pi install``），两边分叉就会出现「照文档装了、报错
+        还指到别处」。
+        """
+        for item in cli_adapters.list_clis():
+            assert (item["mcp_unwired_reason"] is None) is item["supports_mcp"], item["id"]
+            if not item["supports_mcp"]:
+                assert item["mcp_unwired_reason"], item["id"]
+
+        # 取一个常量 True 的当「接得了」的样本，省得跟着本机装没装扩展走。
+        by_id = {item["id"]: item for item in cli_adapters.list_clis()}
+        assert by_id["claude"]["mcp_unwired_reason"] is None
+        assert by_id["grok"]["mcp_unwired_reason"] == get_adapter("grok").mcp_unwired_reason()
+
+        # pi 那条随门禁走：拨开是 None，拨闭是 adapter 给的那句 —— 里面得带着安装命令，
+        # 否则用户读完只知道「不行」，不知道下一步干什么。
+        monkeypatch.setattr(cli_adapters, "_mcp_capability", lambda *a, **k: True)
+        assert {i["id"]: i for i in cli_adapters.list_clis()}["pi"]["mcp_unwired_reason"] is None
+        monkeypatch.setattr(cli_adapters, "_mcp_capability", lambda *a, **k: False)
+        pi = {i["id"]: i for i in cli_adapters.list_clis()}["pi"]
+        assert pi["mcp_unwired_reason"] == get_adapter("pi").mcp_unwired_reason()
+        assert "pi-mcp-adapter" in pi["mcp_unwired_reason"]
+
     def test_hidden_clis_absent_from_list_but_adapters_kept(self):
         """摘出下拉的 CLI：列表里没有，但 adapter 必须保留。
 

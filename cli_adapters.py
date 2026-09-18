@@ -3162,25 +3162,36 @@ def detect_default() -> str:
 def list_clis() -> list[dict]:
     """返回全部已注册 CLI 的描述（含安装状态），供前端工具切换下拉使用。
 
-    每项: {id, display_name, installed, priority, models, supports_mcp}，按优先级顺序排列。
-    _HIDDEN_CLI_IDS 里的 CLI 不出现在结果中（adapter 本身仍可用 get_adapter 取到）。
+    每项: {id, display_name, installed, priority, models, supports_mcp,
+    mcp_unwired_reason}，按优先级顺序排列。_HIDDEN_CLI_IDS 里的 CLI 不出现在结果中
+    （adapter 本身仍可用 get_adapter 取到）。
 
     注意 priority 取 _ADAPTERS 里的下标而非结果下标：隐藏项不影响其余 CLI 的
     相对优先级，将来放回时也不用重排。
 
     ``supports_mcp`` 直接取自 adapter，前端据此在选项上标注「MCP 未接入」。**刻意不在
     前端硬编码名单** —— 那等于把同一份事实维护两遍，将来接一个新 CLI 就必然漏改一处。
+
+    ``mcp_unwired_reason`` 是同一件事再往前一步：接不了时把**原因**也一并给出
+    （接得了则为 None，那种情况下这句话没有意义）。前端要在「角色声明了 mcp + 选中的
+    CLI 接不了」时给用户一个提示，而「为什么接不了」会随成因变 —— pi 今天是「装个
+    扩展就行」，agy / grok 是「AICU 还没接」。让前端各拼一份，后端改了口径前端不会跟着
+    变，用户读到的就是一句与实际不符的话，正是上面那条注释要避免的坑。
     """
     result = []
     for index, adapter in enumerate(_ADAPTERS):
         if adapter.id in _HIDDEN_CLI_IDS:
             continue
+        # 取一次存下来：supports_mcp 在 pi 上是个探测（要起子进程问 `pi list`），
+        # 判真判假各问一遍是白跑一趟。
+        supports_mcp = adapter.supports_mcp
         result.append({
             "id": adapter.id,
             "display_name": adapter.display_name,
             "installed": adapter.is_installed(),
             "priority": index,
             "models": list(adapter.known_models),
-            "supports_mcp": adapter.supports_mcp,
+            "supports_mcp": supports_mcp,
+            "mcp_unwired_reason": None if supports_mcp else adapter.mcp_unwired_reason(),
         })
     return result

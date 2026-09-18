@@ -154,6 +154,25 @@ class TestInternalAdapter:
             set_credential_store(None)
 
 
+def _allowed_tools(cmd: list) -> list:
+    """取出 ``--allowedTools`` 放行的工具名，**兼容两种 argv 形态**。
+
+    测的是语义（哪些工具被放行），不是某一种拼法：
+
+      - claude / internal：「空格连接成单个参数」—— claude 的文档写明认这种；
+      - codebuddy：「一个名字一个 argv 项」—— 它不拆串，整串会被当成**一个**工具名，
+        白名单于是整个失效（见 CodeBuddyAdapter.allowed_tools_flag）。
+
+    形态本身另有专门用例钉住（TestCodeBuddyAllowlistShape），别让这里顺手把它放过去。
+    """
+    names: list = []
+    i = cmd.index("--allowedTools") + 1
+    while i < len(cmd) and not cmd[i].startswith("--"):
+        names.extend(cmd[i].split())
+        i += 1
+    return names
+
+
 class TestMcpAllowlist:
     """MCP 工具必须并进 --allowedTools 白名单。
 
@@ -171,9 +190,9 @@ class TestMcpAllowlist:
             enable_project_skills=False,
             mcp_servers=_mcp_servers("echo-probe"),
         )
-        allowed = cmd[cmd.index("--allowedTools") + 1]
-        assert "mcp__echo-probe" in allowed.split()
-        assert set("Read Write Edit Bash".split()) <= set(allowed.split())
+        allowed = _allowed_tools(cmd)
+        assert "mcp__echo-probe" in allowed
+        assert set("Read Write Edit Bash".split()) <= set(allowed)
 
     def test_multiple_servers_all_added(self):
         cmd = get_adapter("claude").build_base_command(
@@ -182,7 +201,7 @@ class TestMcpAllowlist:
             enable_project_skills=False,
             mcp_servers=_mcp_servers("a", "b"),
         )
-        allowed = cmd[cmd.index("--allowedTools") + 1].split()
+        allowed = _allowed_tools(cmd)
         assert "mcp__a" in allowed and "mcp__b" in allowed
 
     def test_no_mcp_keeps_allowlist_byte_identical(self):
@@ -1518,6 +1537,64 @@ class TestCodeBuddyAdapter:
         assert cmd[0] == "codebuddy"
         assert "--model" in cmd and "gpt-5" in cmd
         assert "--allowedTools" in cmd and "--permission-mode" in cmd
+
+    def test_allowlist_is_one_argv_item_per_name(self):
+        """codebuddy 的 --allowedTools 必须**一个名字一个 argv 项**。
+
+        它不拆串：整串会被当成**一个**工具名，于是白名单整个失效 —— 实测表现为
+        dontAsk 下 Write / Bash 双双被拒、产物为空，且**与有没有声明 MCP 无关**
+        （两组对照都跑过）。所以这条修复对每次 codebuddy 运行生效，不是只修 MCP。
+
+        这条用例钉的是 argv 形态本身；语义断言在 TestMcpAllowlist。
+        """
+        cmd = get_adapter("codebuddy").build_base_command(
+            model=None, skip_permissions=True, enable_project_skills=False,
+            mcp_servers=_mcp_servers("echo-probe"),
+        )
+        i = cmd.index("--allowedTools")
+        assert cmd[i + 1] == "Read"  # 不是 "Read Write Edit Bash mcp__echo-probe"
+        assert " " not in cmd[i + 1]
+        assert cmd[i + 5] == "mcp__echo-probe"
+        assert cmd[i + 6] == "--permission-mode"
+
+    @pytest.mark.parametrize("cli", ["claude", "internal"])
+    def test_claude_family_keeps_the_joined_form(self, cli):
+        """claude / internal 保持整串形态 —— 别为 codebuddy 顺手把它们也改了。
+
+        claude 的 ``--allowedTools`` 文档写明认 "comma or space-separated list"，
+        真机 claude 节点用整串产物正常（端到端 passed）。形态一动，受保护的那几家
+        argv 就不再逐字节一致，得重新验一遍，没有必要。
+        """
+        cmd = get_adapter(cli).build_base_command(
+            model=None, skip_permissions=True, enable_project_skills=False,
+            mcp_servers=_mcp_servers("echo-probe"),
+        )
+        i = cmd.index("--allowedTools")
+        assert cmd[i + 1] == "Read Write Edit Bash mcp__echo-probe"
+        assert cmd[i + 2] == "--permission-mode"
+
+    def test_defer_loading_disabled_when_mcp_declared(self):
+        """声明了 MCP 时关掉 codebuddy 的 MCP 工具延迟加载。
+
+        开着时 MCP 工具得经它自己的 ``DeferExecuteTool`` 转发，而审批卡在**那层壳**
+        上，非交互模式没有审批提示可用，于是必被拒（旁路调用日志实测 0 次）。关掉后
+        工具以 ``mcp__<server>__<tool>`` 真名直接注册，父类下发的通配就够用 ——
+        **一个权限都没放宽**，也没动用户的 settings。
+        """
+        env = get_adapter("codebuddy").build_env(
+            {}, api_base_url=None, api_key_env=None,
+            mcp_servers=_mcp_servers("echo-probe"),
+        )
+        assert env["CODEBUDDY_DEFER_TOOL_LOADING"] == "0"
+
+    def test_defer_loading_untouched_without_mcp(self):
+        """没声明 MCP 就不设它 —— 免得白付「所有工具 schema 常驻上下文」那笔代价。"""
+        adapter = get_adapter("codebuddy")
+        for servers in (None, []):
+            env = adapter.build_env(
+                {}, api_base_url=None, api_key_env=None, mcp_servers=servers,
+            )
+            assert "CODEBUDDY_DEFER_TOOL_LOADING" not in env
 
     def test_no_username_for_codebuddy(self):
         adapter = get_adapter("codebuddy")

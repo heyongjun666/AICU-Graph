@@ -1361,14 +1361,27 @@ class ClaudeCodeAdapter(CliAdapter):
             # `mcp__<server>` 是 server 级通配，一条即放行该 server 的全部工具，不必逐工具枚举。
             # 名字取自同一个 server 列表（与 mcp_flags 下发的配置同源），不可能对不上。
             allowed_tools.extend(f"mcp__{server.name}" for server in (mcp_servers or []))
-            cmd.extend([
-                "--allowedTools", " ".join(allowed_tools),
-                "--permission-mode", "dontAsk",
-            ])
+            cmd.extend(self.allowed_tools_flag(allowed_tools))
+            cmd.extend(["--permission-mode", "dontAsk"])
         if enable_project_skills:
             # 限定只加载 workspace/.claude/skills/ 中的 project-level skill
             cmd.extend(["--setting-sources", "project"])
         return cmd
+
+    def allowed_tools_flag(self, tool_names: list) -> list:
+        """把工具名列表拼成 ``--allowedTools`` 那一段 argv。
+
+        默认「空格连接成单个参数」。这是 claude CLI 自己文档里的形态：``--allowedTools
+        <tools...>`` 写着 "Comma or space-separated list of tool names to allow"，
+        实测也确实认（AICU 的 claude / internal 节点一直这么跑，产物正常）。
+
+        **CodeBuddyAdapter 覆盖了它**，因为 codebuddy 虽号称 Claude Code 协议克隆，
+        这一处解析却不同：它不拆串，整串会被当成**一个**工具名。后果不是「MCP 用不了」
+        而是「白名单整个失效」—— 名字对不上任何工具，于是 Read / Write / Edit / Bash
+        在 dontAsk 下被逐条拒绝，与有没有声明 MCP 无关（两组对照都实测过）。
+        改法与证据见 CodeBuddyAdapter.allowed_tools_flag。
+        """
+        return ["--allowedTools", " ".join(tool_names)]
 
     def print_flags(self, streaming: bool) -> list:
         if streaming:
@@ -1478,37 +1491,41 @@ class CodeBuddyAdapter(ClaudeCodeAdapter):
       - CODEBUDDY_API_KEY：API 密钥，用于模型接口调用，非交互模式 (-p) 下始终使用
       - CODEBUDDY_AUTH_TOKEN：平台认证令牌，用于所有平台接口调用
 
-    **MCP 这条路默认走不通**（2026-09-17/18 端到端实测 + 旁路判据复核）—— 除非用户在
-    自己的 codebuddy settings 里放行那一层壳（见本节末）。codebuddy 把
-    **每一个** MCP 工具调用都包在自己的 ``DeferExecuteTool`` 里走，而父类放行的
-    ``mcp__<server>`` 是 server 级通配，覆盖不到那层壳。三条证据：
+    **MCP 能跑通**（2026-09-18 端到端实测，判据是探针 server 侧的旁路调用日志 ——
+    只有 server 进程写得进去，模型伪造不了）。走到这一步需要两处 codebuddy 专属适配，
+    都在本类里，父类与其它适配器一个字都没动：
 
-      1. ``probe_echo`` 被拒，codebuddy 原样报出 ``Permission to use DeferExecuteTool
-         has been denied because this tool requires approval but permission prompts are
-         not available in non-interactive mode``。
-      2. 把 ``DeferExecuteTool`` 补进 ``--allowedTools`` **无效** —— 拒绝照旧。codebuddy
-         自己的报错就写了出路只有两条：``-y`` / ``--permission-mode bypassPermissions``，
-         或把 ``DeferExecuteTool`` 写进 settings 的 ``permissions.allow``。
-         ``--allowedTools`` 不在这两条路里。
-      3. 探针 server 侧挂旁路调用日志（只有 server 进程写得进去、模型伪造不了）后，
-         上述 argv 下 ``tools/call`` **一次都没发生**。
+      1. ``build_env`` 注入 ``CODEBUDDY_DEFER_TOOL_LOADING=0``（仅在声明了 MCP 时）。
+         codebuddy 默认开着 MCP 工具的「延迟加载」：schema 不进上下文，模型要用得先
+         ToolSearch、再经它自己的 ``DeferExecuteTool`` 按名字转发。审批发生在**那层壳**
+         上，而父类下发的 ``mcp__<server>`` 是 server 级通配、覆盖不到壳 —— 非交互模式
+         下没有审批提示可用，于是必被拒。关掉延迟加载后工具以真名直接注册，父类的通配
+         就够了。**一个权限都没放宽**，也没写用户 settings。
+      2. ``allowed_tools_flag`` 覆盖成「一个名字一个 argv 项」。
 
-    第 3 条是必需的，因为「产物里有没有 ``probe_echo: AICU-MCP-PROBE-7f3a``」这个判据
-    **可被伪造**：工具名就叫 probe_echo、描述写着「回显传入的 text」、输入串又写在任务
-    提示词里，模型不调工具也能把这一行编出来。中途确实观测到过一次「产物对」的假通过，
-    改用旁路日志后即告消失 —— 本适配器相关的旧结论若与本节冲突，以本节为准。
+    ★ 第 2 条与本适配器先前那版结论有关，必须说明白。旧版这里写的是「MCP 默认走不通、
+    除非用户改 settings」，理由有三条，其中两条**站不住，已撤回**：
 
-    所以此处**刻意不加任何额外 flag**：``-y`` 那类会把这个适配器变成比 claude 危险一档
-    的形态（审批整个关掉），而 AICU 的立场是宁可报错说没接线，也不下发一份永不生效的
-    配置。要用 codebuddy + MCP，得由用户在 settings 里自行 ``permissions.allow``。
+      - 「把 ``DeferExecuteTool`` 补进 ``--allowedTools`` 无效」—— 那是在**整串**形态下
+        测的，而整串在 codebuddy 里根本没被解析成名单，补什么都无效。这条不是关于
+        ``DeferExecuteTool`` 的证据。
+      - 「中途那次『产物对』是通过伪造的」—— 那次用的是 ``--allowedTools "$@"``，
+        shell 展开成的是**独立 argv 项**；后来推翻它的那次用的是**整串**。两者不是同一个
+        形状，属于混淆对照。该说法一并撤回，真相不明。
 
-    **``supports_mcp`` 仍是 True（继承自父类），这是有意的**，与上面「默认走不通」不矛盾：
-    挡路的是 codebuddy 自己的权限层，而那一层是**用户可配置的**。放行过的用户这里就该
-    是 True —— AICU 照常下发 ``--mcp-config``，链路是通的。真按「默认不通」关成 False，
-    反而是把这类用户的可用配置一起废掉，而且 ``mcp_workspace_files`` 的守卫会让配置
-    根本不落盘，从「可能被拒」退化成「一定不生效」。代价是：没放行的用户会看到
-    ``supports_mcp=True``、下拉不标「未接入」，实际调用却被拒 —— 这个取舍记在这里，
-    等 codebuddy 哪天把 ``DeferExecuteTool`` 挪出审批层再回头收掉。
+    仍然成立的是：在父类原来的 argv 形态下，``tools/call`` 确实一次都没发生（旁路日志
+    实测）。所以「旧形态跑不通」是对的，**错的是原因**。
+
+    关于 ``--allowedTools`` 的形态：codebuddy 不拆串，整串会被当成**一个**工具名，
+    于是白名单整个失效 —— 不只是 MCP，Read / Write / Edit / Bash 一起被拒。这与有没有
+    声明 MCP **无关**，两组对照都跑过。也就是说这条修复对**每次** codebuddy 运行生效。
+    claude 不受影响：它的文档写明认空格分隔的整串，真机节点用整串产物正常。
+
+    综上，``supports_mcp = True``（继承自父类）现在名副其实 —— 链路是真通的，不是
+    「理论上通、实际要用户先改配置」。
+
+    仍然刻意不加的东西：``-y`` / ``--permission-mode bypassPermissions``。那会把审批
+    整个关掉，让这个适配器变成比 claude 危险一档的形态，而上面的做法不需要它。
     """
 
     api_key_env = "CODEBUDDY_API_KEY"
@@ -1536,7 +1553,42 @@ class CodeBuddyAdapter(ClaudeCodeAdapter):
             api_key = os.environ.get(key_env)
             if api_key:
                 env[self.api_key_env] = api_key
+        if mcp_servers:
+            # 关掉 MCP 工具的「延迟加载」。默认开着时 MCP 工具的 schema 不进上下文，
+            # 模型要用得先 ToolSearch、再经 DeferExecuteTool 按名字转发 —— 而审批发生在
+            # 那层壳上，非交互模式没有审批提示可用，于是调用必被拒（旁路调用日志 0 次）。
+            # 关掉后工具以 mcp__<server>__<tool> 的真名直接注册，父类下发的
+            # mcp__<server> 通配即可放行 —— **不需要放宽任何权限**，也不碰用户的 settings。
+            #
+            # 只在声明了 MCP server 时才设：不涉及 MCP 的运行保持 codebuddy 的默认行为，
+            # 免得白付「所有工具 schema 都常驻上下文」那笔代价。
+            # 2.137.1 的解析链（dist/codebuddy.js）：env 优先，其次 settings 的
+            # deferToolLoading，再次 productFeatures.DeferToolLoading（默认 true）。
+            env["CODEBUDDY_DEFER_TOOL_LOADING"] = "0"
         return env
+
+    def allowed_tools_flag(self, tool_names: list) -> list:
+        """覆盖父类的「空格连接成单个参数」形态 —— codebuddy 不拆串。
+
+        codebuddy 虽号称 Claude Code 协议克隆，这一处解析不同：整串会被当成**一个**
+        工具名。后果不是「MCP 用不了」，而是**白名单整个失效** —— 每个名字都对不上任何
+        工具，dontAsk 下 Read / Write / Edit / Bash 被逐条拒绝。
+
+        对照实测（唯一变量就是这一处，其余同模型、同端点、同 --mcp-config、同 dontAsk、
+        同 skip_permissions=True）：
+
+          - 整串 → ``Permission to use Write has been denied because this tool requires
+            approval but permission prompts are not available in non-interactive
+            mode``，Bash 同样被拒，产物为空；
+          - 拆开 → Write 成功、产物落地，MCP 工具也照常被真调（旁路日志 1 次）。
+
+        **与有没有声明 MCP 无关**：声明与不声明两组都跑过，结果一致。所以这条修复是对
+        每次运行生效的，不是只修 MCP 那条路。
+
+        claude 不需要这个覆盖：它的 ``--allowedTools`` 文档写明认 "comma or
+        space-separated list"，且真机 claude 节点用整串形态产物正常。
+        """
+        return ["--allowedTools", *tool_names]
 
 
 # codex exec --json 的事件信封：正文在 ``item`` 里，``item.type`` 说明这条是什么

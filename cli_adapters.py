@@ -935,9 +935,17 @@ class CliAdapter:
         """``supports_mcp`` 为假时，一个能直接嵌进 ``"CLI 'x' 的 MCP ___，但……"``
         这句话里的**原因短语**。
 
-        默认是「尚未接入 AICU」—— 绝大多数情况下这是实话。kimi 覆盖它，因为那边为假
-        的原因是**本机装的那个版本**没有可用的 MCP 入口，说成 AICU 没接线同样是关于
-        CLI 的假话，而且把用户指向一个他做不了的动作（等我们接）而不是该做的（升级）。
+        默认是「尚未接入 AICU」—— 绝大多数情况下这是实话。留着这个钩子是因为「为什么没接」
+        只有 adapter 知道：有的 CLI 自己就有 MCP，只是注入方式对不上，那是关于 CLI 的事实，
+        守卫里写死一句会把它说错，还会把用户指向一个他做不了的动作。
+
+        当前覆盖它的是 pi：它的门禁问的是本机装没装 ``pi-mcp-adapter`` 扩展，为假时该做的
+        动作是装扩展 —— 沿用默认句会把一个三十秒能自己解决的事说成「等我们接」。kimi 也
+        覆盖过，成因是本机版本没有 MCP 入口；那条 2026-09-18 已证实是误判，kimi 现在
+        ``supports_mcp`` 恒真、不再走这个分支。
+
+        测试仍守着「守卫问的是 adapter 而不是写死一句」这条契约 —— 样本换来换去，
+        契约没变，用例该守的是契约。
         """
         return "尚未接入 AICU"
 
@@ -2525,6 +2533,19 @@ class PiAdapter(CliAdapter):
     @property
     def supports_mcp(self) -> bool:
         return _mcp_capability(self.command, _probe_pi_mcp)
+
+    def mcp_unwired_reason(self) -> str:
+        """为假的原因是**本机没装扩展**，不是 AICU 没接线 —— 别让用户去等我们。
+
+        上面那条 ``supports_mcp`` 判否时，AICU 这边的注入路径其实是**齐的**：配置该怎么写
+        已经写在 ``mcp_workspace_config`` 里，扩展一装上就生效。缺的只有那个扩展。
+        沿用基类默认句，用户读到的是关于 AICU 的假话，于是去做错误的动作 —— 等我们接、
+        或者干脆换一个 CLI，而真正该做的是一条 ``pi install``。
+
+        措辞要落在**用户能做的那一步**上，所以把命令一起写出来：这句话会原样嵌进
+        ``"CLI 'pi' 的 MCP ___，但本次运行声明了 MCP server。"``，其余部分由守卫补。
+        """
+        return "需要先安装 pi-mcp-adapter 扩展（pi install npm:pi-mcp-adapter）"
 
     # pi 的项目级 MCP 配置。配置文件优先级（pi-mcp-adapter README）：
     # 全局 ~/.config/mcp/mcp.json > <Pi agent dir>/mcp.json > .mcp.json > .pi/mcp.json，

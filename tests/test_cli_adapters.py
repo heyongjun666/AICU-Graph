@@ -2171,7 +2171,8 @@ class TestMcpWiringGuard:
 
         这里换成拨 adapter 的方法到一句哨兵串，断言它**真的出现在报错里** ——
         比钉死某一家当前的文案更贴契约：文案本来就是要随成因变的，而「守卫会去问 adapter」
-        才是这条用例该守的不变量。（kimi 曾经是这条的样本，现在它不再走这个分支。）
+        才是这条用例该守的不变量。（kimi 曾经是这条的样本，现在它不再走这个分支；
+        真在走这个分支的样本见下一条。）
         """
         monkeypatch.setattr(
             cli_adapters.AntigravityAdapter, "mcp_unwired_reason",
@@ -2180,6 +2181,20 @@ class TestMcpWiringGuard:
         with pytest.raises(RuntimeError) as excinfo:
             self._build(tmp_path, "antigravity", _mcp_servers("echo-probe"))
         assert "哨兵原因-4f2a" in str(excinfo.value)
+
+    def test_the_extension_gated_cli_points_at_the_extension(self, tmp_path):
+        """pi 为假的原因是**本机没装扩展**，报错就得说扩展、说那条命令。
+
+        这是钩子存在的理由本身：pi 的注入路径 AICU 这边已经接好了（配置照写
+        ``.pi/mcp.json``），缺的是读它的 ``pi-mcp-adapter``。沿用基类默认句，用户读到的
+        就是关于 AICU 的假话，于是去做错误的动作 —— 等我们接、或者换掉 CLI，而真正该做的
+        是跑一条 ``pi install``。所以断言的判据是两半：**提到扩展**、**不提「尚未接入」**。
+        """
+        with pytest.raises(RuntimeError) as excinfo:
+            self._build(tmp_path, "pi", _mcp_servers("echo-probe"))
+        message = str(excinfo.value)
+        assert "pi-mcp-adapter" in message
+        assert "尚未接入" not in message
 
     def test_every_adapter_can_answer_the_reason_question(self):
         """钩子必须所有 adapter 都能答 —— 守卫在**每条**未接线路径上都会问它一遍。"""

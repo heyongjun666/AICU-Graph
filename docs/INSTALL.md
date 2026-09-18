@@ -93,6 +93,16 @@ npm install -g @earendil-works/pi-coding-agent
 pi --version
 ```
 
+**需要用 MCP 的话，还得再装一个扩展**：
+
+```bash
+pi install npm:pi-mcp-adapter
+```
+
+pi 本体不含 MCP，读 `.pi/mcp.json` 的是这个外部扩展 —— 不装它，AICU 下发的 MCP 配置就是个没人读的死文件。所以没装时 AICU 会把 pi 标成「MCP 未接入」，并在角色声明了 `mcp` 时报错（报错里给的就是上面这条命令）。
+
+判断装没装：`pi list` 的输出里能看到 `pi-mcp-adapter` 即可。注意要装**全局**（不加 `-l`）—— AICU 每次运行的 workspace 都是新生成的临时目录，装在那里面下次就没了。
+
 ### CodeBuddy Code
 
 ```bash

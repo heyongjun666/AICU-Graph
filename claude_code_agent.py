@@ -167,14 +167,19 @@ class ClaudeCodeAgent:
         # 只是注入方式各不相同、AICU 还没接线。说成「该 CLI 不支持」是关于 CLI 的假话，
         # 用户会跑去换 CLI，而不是来问我们。
         #
-        # 具体原因由 adapter 给（``mcp_unwired_reason``）：kimi 为假的原因是**本机装的
-        # 那个版本**没有 mcp 子命令，说成「AICU 还没接线」同样是假话，且指向一个用户
-        # 做不了的动作（等我们接）而不是该做的（升级 kimi）。
+        # 具体原因由 adapter 给（``mcp_unwired_reason``），因为「为什么没接」只有 adapter
+        # 知道，而且未必是「AICU 还没接」：pi 就是现成的反例 —— 注入路径我们这边是齐的，
+        # 缺的是用户本机那个扩展，所以它的原因短语给的是**装扩展的命令**。把用户指向一个
+        # 他做得了的动作，是留这个钩子的全部理由。（grok / antigravity 的成因写在各自的
+        # docstring 里，走基类默认句。）
         if self.mcp_servers and not self.adapter.supports_mcp:
             raise RuntimeError(
                 f"CLI '{self.cli_name}' 的 MCP {self.adapter.mcp_unwired_reason()}，"
                 f"但本次运行声明了 MCP server。"
-                f"请改用已接入 MCP 的 CLI（{', '.join(mcp_enabled_clis())}），"
+                # 「也可以」而非「请」：原因是「装个扩展就行」时，上面那句已经给了正确的
+                # 动作，这里再写「请改用」就成了与它抢注意力的第二道指令。降级成备选之后，
+                # 两条成因（要用户自己动手 / AICU 确实还没接）读起来都顺。
+                f"本次运行也可以改用已接入 MCP 的 CLI（{', '.join(mcp_enabled_clis())}），"
                 f"或从角色配置中移除 mcp 字段。"
             )
 

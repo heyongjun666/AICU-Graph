@@ -1,7 +1,7 @@
-import React, { FormEvent, useEffect, useState } from 'react';
+import React, { FormEvent, useEffect, useRef, useState } from 'react';
 import { X } from 'lucide-react';
 import { GraphNode, LinkCandidate, NodeConfig, RoleInfo, SessionSummary, SkillInfo } from '../types';
-import { getRoles, getSkills } from '../utils/api';
+import { getRole, getRoles, getSkills } from '../utils/api';
 import { useAvailableClis } from '../hooks/useAvailableClis';
 import { useMcpCompatWarning } from '../hooks/useMcpCompatWarning';
 import { useI18n, translate } from '../i18n';
@@ -94,6 +94,8 @@ export const NewNodeDialog: React.FC<NodeDialogProps> = ({
   const [roles, setRoles] = useState<RoleInfo[]>([]);
   const [skills, setSkills] = useState<SkillInfo[]>([]);
   const [selectedSkills, setSelectedSkills] = useState<string[]>([]);
+  const [skillsLoading, setSkillsLoading] = useState(false);
+  const roleRequestId = useRef(0);
   const [cliName, setCliName] = useState<NodeConfig['cli_name']>('internal');
   const [model, setModel] = useState('');
   const [apiBaseUrl, setApiBaseUrl] = useState('');
@@ -139,6 +141,41 @@ export const NewNodeDialog: React.FC<NodeDialogProps> = ({
       });
     return () => { cancelled = true; };
   }, [open]);
+
+  // 角色详情里的 effective_config 是节点新建时应回显的最终配置；请求按角色和类型绑定，
+  // 避免切换角色后旧响应把用户刚选中的 skills 覆盖掉。
+  useEffect(() => {
+    const requestId = ++roleRequestId.current;
+    if (!open || !role.trim()) {
+      setSkillsLoading(false);
+      if (open && !role.trim()) setSelectedSkills([]);
+      return;
+    }
+
+    let cancelled = false;
+    setSkillsLoading(true);
+    setError('');
+    getRole(execType, role)
+      .then((detail) => {
+        if (cancelled || requestId !== roleRequestId.current) return;
+        const config = detail.effective_config ?? detail.config ?? {};
+        const declared = config.skills;
+        setSelectedSkills(Array.isArray(declared)
+          ? declared.filter((item): item is string => typeof item === 'string')
+          : []);
+        setSkillsLoading(false);
+      })
+      .catch((reason) => {
+        if (cancelled || requestId !== roleRequestId.current) return;
+        setSelectedSkills([]);
+        setSkillsLoading(false);
+        setError(reason instanceof Error ? reason.message : String(reason));
+      });
+    return () => {
+      cancelled = true;
+      if (requestId === roleRequestId.current) setSkillsLoading(false);
+    };
+  }, [open, execType, role]);
 
   // CLI 选项可能晚于对话框打开到达：保留用户选择，仅当当前值不在权威列表中时回退为"自动（会话默认）"。
   useEffect(() => {
@@ -192,6 +229,10 @@ export const NewNodeDialog: React.FC<NodeDialogProps> = ({
       setError(t('dialog.waitForCandidates'));
       return;
     }
+    if (skillsLoading) {
+      setError(t('dialog.waitForRoleConfig'));
+      return;
+    }
     if (candidateStatus === 'error') {
       setError(candidateError || t('dialog.candidatesLoadFailed'));
       return;
@@ -239,7 +280,10 @@ export const NewNodeDialog: React.FC<NodeDialogProps> = ({
           <button type="button" className="icon-button" onClick={onClose} title={t('common.close')}><X size={18} /></button>
         </div>
         <div className="form-grid two-columns">
-          <label>{t('dialog.type')}<select value={execType} onChange={(event) => setExecType(event.target.value as 'manager' | 'worker')}><option value="worker">{t('dialog.worker')}</option><option value="manager">{t('dialog.manager')}</option></select></label>
+          <label>{t('dialog.type')}<select value={execType} onChange={(event) => {
+            setExecType(event.target.value as 'manager' | 'worker');
+            setRole('default');
+          }}><option value="worker">{t('dialog.worker')}</option><option value="manager">{t('dialog.manager')}</option></select></label>
           <label>{t('node.role')}{availableRoles.length ? <select value={role} onChange={(event) => setRole(event.target.value)}><option value="default">default</option>{availableRoles.map((item) => <option key={item.id} value={item.id}>{item.display_name}</option>)}</select> : <input value={role} onChange={(event) => setRole(event.target.value)} />}</label>
         </div>
         <div className="form-grid two-columns">
@@ -271,6 +315,7 @@ export const NewNodeDialog: React.FC<NodeDialogProps> = ({
           searchPlaceholder={t('dialog.searchSkills')}
           emptyLabel={t('dialog.noMatchingSkills')}
           selectedLabel={t('dialog.selectedCount')}
+          disabled={skillsLoading}
         /></div>}
         <div className="form-grid two-columns">
           <label>{t('dialog.model')}<input value={model} onChange={(event) => setModel(event.target.value)} placeholder={t('dialog.useSessionDefault')} /></label>
@@ -279,7 +324,7 @@ export const NewNodeDialog: React.FC<NodeDialogProps> = ({
         </div>
         <label className="toggle-field"><input type="checkbox" checked={skipPermissions} onChange={(event) => setSkipPermissions(event.target.checked)} /><span>{t('dialog.runWithoutPerms')}</span></label>
         {error && <div className="form-error">{error}</div>}
-        <div className="dialog-actions"><button type="button" className="secondary-button" onClick={onClose}>{t('common.cancel')}</button><button className="primary-button" disabled={!task.trim() || !role.trim() || busy || relationDisabled}>{busy ? t('dialog.adding') : t('dialog.addNode')}</button></div>
+        <div className="dialog-actions"><button type="button" className="secondary-button" onClick={onClose}>{t('common.cancel')}</button><button className="primary-button" disabled={!task.trim() || !role.trim() || busy || relationDisabled || skillsLoading}>{busy ? t('dialog.adding') : t('dialog.addNode')}</button></div>
       </form>
     </div>
   );

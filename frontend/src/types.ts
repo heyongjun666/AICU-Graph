@@ -271,6 +271,8 @@ export interface SkillInfo {
   id: string;
   name: string;
   description?: string;
+  /** 详情接口返回的角色引用；列表接口不计算此字段。 */
+  referencing_roles?: McpRoleRef[];
   size?: number;
   content?: string;
   license?: string | null;
@@ -278,6 +280,67 @@ export interface SkillInfo {
   metadata?: Record<string, unknown> | null;
   file_count?: number;
   files?: string[];
+}
+
+/**
+ * MCP server 注册表（仓库根 mcp_servers.json）里的一条定义。
+ *
+ * 这是**与 CLI 无关**的中立表示：command 与 args 分开存，不预设哪家 CLI 要什么形状
+ * （claude 系要 `{command, args}`、opencode 要 `command: [...]`、codex 要一对对 -c 键值）。
+ * 界面上照实编辑这四个字段即可，序列化成哪家的样子是后端的事。
+ *
+ * command / args 是**用户写下的原始写法**（可能是 `tests/mcp_echo_server.py` 这样的相对
+ * 路径），不是运行时解析后的绝对路径 —— 界面上要显示和编辑的就是这一份。
+ */
+export interface McpServerInfo {
+  name: string;
+  /** 仅 stdio 条目返回；远程 save/update 响应没有这些字段。 */
+  command?: string;
+  args?: string[];
+  env?: Record<string, string>;
+  description: string;
+  /**
+   * 启动节点时这条连不上是否算失败。为 false 时只打一条告警照常启动。
+   * 不影响「测试连接」按钮 —— 手动测就是要看到错误。
+   */
+  required: boolean;
+  /**
+   * 远程（Streamable HTTP）server 的地址。**只有远程条目才有这两个键**：
+   * 本地条目的形状恒为「command + args + env」，多两个恒为空的键只会让人以为要填。
+   * 传输不另存字段，由 url 是否有值决定（与后端 mcp_manager.transport_of 同一条判据）。
+   */
+  url?: string;
+  /** 远程条目的请求头（常放 Authorization）。同样只有远程条目才有。 */
+  headers?: Record<string, string>;
+  /** 哪些角色声明了这个 server。列表接口才返回；新建/更新的响应里没有。 */
+  referencing_roles?: McpRoleRef[];
+}
+
+/** 引用了某个 MCP server 的角色。type 不能省：角色 id 在 manager / worker 下可以重名。 */
+export interface McpRoleRef {
+  id: string;
+  type: NonNullable<RoleInfo['type']>;
+}
+
+/**
+ * 新建/更新时提交的定义。
+ *
+ * 刻意**不写成** ``Omit<McpServerInfo, 'referencing_roles'>``：那个形状要求 command /
+ * args / env 三样俱全，而远程条目本来就没有它们 —— 后端会明确拒绝「url 与 command
+ * 同时给」。用 Omit 的话，提交远程条目就得先编一组空值塞进去，前端于是成了那个
+ * 「以为在传、其实会被丢掉」的一环，正是本轮要消灭的坏法。
+ */
+export interface McpServerInput {
+  name: string;
+  description: string;
+  required: boolean;
+  /** 本地（stdio）条目：命令 + 参数 + 环境变量。远程条目一个都不给。 */
+  command?: string;
+  args?: string[];
+  env?: Record<string, string>;
+  /** 远程（Streamable HTTP）条目：地址 + 请求头。本地条目一个都不给。 */
+  url?: string;
+  headers?: Record<string, string>;
 }
 
 export interface CCActivity {

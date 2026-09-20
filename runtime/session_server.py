@@ -12,21 +12,32 @@ import struct
 import subprocess
 import tempfile
 import termios
+from pathlib import Path
 from typing import Any, Literal, Optional
 
 from fastapi import FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
+from runtime.credentials import vendor_of_model
+from runtime.i18n import LanguageMiddleware, localized_detail, t
+from runtime.mcp_client import DEFAULT_PROBE_TIMEOUT, McpProbeError, probe_server
+from runtime.mcp_manager import (
+    McpConfigError,
+    build_server,
+    delete_server as delete_mcp_server,
+    list_servers as list_mcp_servers,
+    roles_referencing,
+    server_names,
+    save_server as save_mcp_server,
+)
 from runtime.models import LogLevel
 from runtime.repo_paths import REPO_ROOT
-from runtime.role_pools_manager import RolePoolsManager
 from runtime.roles_manager import RolesManager
+from runtime.role_pools_manager import RolePoolsManager
 from runtime.server import _sse_stream
 from runtime.session_manager import SessionHandle, SessionManager
 from runtime.skills_manager import SkillsManager
-from runtime.credentials import vendor_of_model
-from runtime.i18n import LanguageMiddleware, localized_detail, t
 from cli_adapters import (
     detect_default,
     effective_base_url,
@@ -114,6 +125,28 @@ class UpdateRolePoolRequest(BaseModel):
     roles: Optional[list[str]] = None
 
 
+class McpServerRequest(BaseModel):
+    """一条 MCP server 定义。
+
+    ``name`` 的形状在这里先挡一道（与 skills_manager 的 id 规则一致），业务层
+    ``validate_server`` 还会用同一条正则再挡一道 —— 名字最终会变成 CLI 的配置键
+    （grok 的 TOML 表名、codex 的 ``-c`` 键路径），不能只靠一层。
+
+    两种传输共用这一个模型：本地填 ``command``（+ ``args`` / ``env``），远程填 ``url``
+    （+ ``headers``），哪组算数由 ``validate_server`` 按「有没有 url」判。``command``
+    因此是可选 —— 远程条目本来就没有命令。
+    """
+
+    name: str = Field(pattern="^[a-z][a-z0-9_-]*$", max_length=80)
+    command: Optional[str] = Field(default=None, max_length=1000)
+    args: list[str] = Field(default_factory=list)
+    env: dict[str, str] = Field(default_factory=dict)
+    url: Optional[str] = Field(default=None, max_length=2000)
+    headers: dict[str, str] = Field(default_factory=dict)
+    description: str = Field(default="", max_length=2000)
+    required: bool = True
+
+
 class CreateNodeRequest(BaseModel):
     task: str = Field(min_length=1, max_length=100000)
     role: str = Field(default="default", min_length=1, max_length=80)
@@ -145,6 +178,7 @@ def create_session_app(
     roles_manager: Optional[RolesManager] = None,
     skills_manager: Optional[SkillsManager] = None,
     role_pools_manager: Optional[RolePoolsManager] = None,
+    mcp_registry_path: Optional[str] = None,
 ) -> FastAPI:
     app = FastAPI(title="Execution Graph Workbench API", version="2.0")
     app.add_middleware(LanguageMiddleware)
@@ -158,6 +192,8 @@ def create_session_app(
     role_pools_manager = role_pools_manager or RolePoolsManager(
         os.path.join(session_manager.root_dir, "role_pools.json"), roles_manager
     )
+    # MCP 注册表默认是仓库根的 mcp_servers.json；参数只为测试能指向 tmp_path。
+    registry_path = Path(mcp_registry_path) if mcp_registry_path else None
 
     def resolve(session_id: str) -> SessionHandle:
         try:
@@ -256,7 +292,11 @@ def create_session_app(
     @app.get("/v1/skills/{skill_id}")
     def get_skill(skill_id: str):
         try:
-            return skills_manager.get_skill(skill_id)
+            detail = skills_manager.get_skill(skill_id)
+            return {
+                **detail,
+                "referencing_roles": roles_manager.roles_referencing_skill(skill_id),
+            }
         except KeyError as error:
             raise _http_error(404, error) from error
         except ValueError as error:
@@ -309,6 +349,101 @@ def create_session_app(
             raw = await request.body()
             return skills_manager.import_skill_zip(skill_id, raw)
         except ValueError as error:
+            raise _http_error(400, error) from error
+
+    # ---- MCP 注册表 ----
+    # 注册表是「角色 yaml 只写名字、定义集中一处」的那份全局定义（仓库根
+    # mcp_servers.json）。这里只管增删改查与「测试连接」；怎么把它下发给各家 CLI 是
+    # cli_adapters 的事，怎么解析名字是 mcp_manager 的事。
+
+    def mcp_spec(body: McpServerRequest) -> dict:
+        """请求体 → ``validate_server`` 认的那份字典。
+
+        两种传输的字段一起透传，由 ``validate_server`` 按「有没有 url」判该走哪一支 ——
+        在这里先判一次就会多出第二份判据（与 mcp_manager.transport_of 各说各话）。
+        """
+        return {
+            "command": body.command,
+            "args": body.args,
+            "env": body.env,
+            "url": body.url,
+            "headers": body.headers,
+            "description": body.description,
+            "required": body.required,
+        }
+
+    @app.get("/v1/mcp/servers")
+    def list_mcp_registry():
+        try:
+            servers = list_mcp_servers(registry_path)
+        except McpConfigError as error:
+            raise _http_error(400, error) from error
+        # 角色配置扫一次就好：逐个 server 各扫一遍是 N×M 次读文件，而这里问的是同一份。
+        configs = list(roles_manager.iter_role_configs())
+        return {
+            "servers": [
+                {**item, "referencing_roles": roles_referencing(item["name"], configs)}
+                for item in servers
+            ],
+        }
+
+    @app.post("/v1/mcp/servers", status_code=201)
+    def create_mcp_registry_entry(body: McpServerRequest):
+        try:
+            if body.name in server_names(registry_path):
+                raise HTTPException(
+                    status_code=409,
+                    detail=t(
+                        f"MCP server '{body.name}' 已存在",
+                        f"MCP server '{body.name}' already exists",
+                    ),
+                )
+            return save_mcp_server(body.name, mcp_spec(body), registry_path)
+        # McpConfigError 是 ValueError 的子类（注册表坏掉、名字或字段不合法），一并覆盖。
+        except ValueError as error:
+            raise _http_error(400, error) from error
+
+    @app.patch("/v1/mcp/servers/{name}")
+    def update_mcp_registry_entry(name: str, body: McpServerRequest):
+        try:
+            # 名字是注册表的键、也是角色 yaml 里的引用，改它要同步重写所有引用方，
+            # 与角色 id 同一惯例：不可改，要改就是新建 + 删旧。
+            if body.name != name:
+                raise ValueError("MCP server name cannot be changed")
+            if name not in server_names(registry_path):
+                raise KeyError(f"MCP server '{name}' not found")
+            return save_mcp_server(name, mcp_spec(body), registry_path)
+        except KeyError as error:
+            raise _http_error(404, error) from error
+        except ValueError as error:
+            raise _http_error(400, error) from error
+
+    @app.delete("/v1/mcp/servers/{name}", status_code=204)
+    def delete_mcp_registry_entry(name: str):
+        try:
+            delete_mcp_server(name, registry_path)
+        except KeyError as error:
+            raise _http_error(404, error) from error
+        except ValueError as error:
+            raise _http_error(400, error) from error
+
+    @app.post("/v1/mcp/probe")
+    def probe_mcp_registry_entry(body: McpServerRequest):
+        """真连一次这条定义，返回它暴露的工具名列表。
+
+        测的是**请求体里的值**，不是已保存的那份：改了 command 就该能立刻测，而一个还没
+        保存过的新 server 根本无从「按名字测」。判据与超时都走运行时预检那一套
+        （``probe_server`` + ``DEFAULT_PROBE_TIMEOUT``），否则会出现「页面上测试通过、
+        节点起不来」。这里刻意不走 ``probe_servers``：那个对 ``required=False`` 的 server
+        会吞掉错误只打告警，而手动点「测试」时要的恰恰是那句错误。
+        """
+        try:
+            server = build_server(body.name, mcp_spec(body))
+        except McpConfigError as error:
+            raise _http_error(400, error) from error
+        try:
+            return {"tools": probe_server(server, timeout=DEFAULT_PROBE_TIMEOUT)}
+        except McpProbeError as error:
             raise _http_error(400, error) from error
 
     @app.get("/v1/config")

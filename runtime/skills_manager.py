@@ -68,6 +68,7 @@ class SkillsManager:
         return result
 
     def get_skill(self, skill_id: str) -> dict[str, Any]:
+        self._validate_id(skill_id)
         # 优先在主目录查找，再查额外目录
         for skills_dir in self._all_dirs():
             path = skills_dir / skill_id

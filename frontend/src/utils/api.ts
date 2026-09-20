@@ -24,6 +24,8 @@ import {
   RoleSchema,
   RolePool,
   SkillInfo,
+  McpServerInfo,
+  McpServerInput,
   WorkspaceListing,
   WorkspaceFile,
   LinkCandidate,
@@ -752,6 +754,46 @@ export async function importSkill(skillId: string, zipFile: File): Promise<Skill
     throw new Error(payload?.detail || `HTTP ${response.status}`);
   }
   return response.json();
+}
+
+// ============================================================================
+// MCP server 注册表 API
+//
+// 注册表是全局一份、角色按名字引用（角色 yaml 里只写 `mcp: [echo-probe]`），即仓库根的
+// mcp_servers.json。这里只有设置页的增删改查与「测试连接」；怎么把它下发给各家 CLI 是
+// 后端的事。与 skills 一样不写 mock 分支 —— 注册表是后端的一个真实文件，mock 下没有它。
+// ============================================================================
+
+export async function getMcpServers(): Promise<McpServerInfo[]> {
+  const payload = await sessionRequest<{ servers: McpServerInfo[] }>('mcp/servers');
+  return payload.servers || [];
+}
+
+export function createMcpServer(payload: McpServerInput): Promise<McpServerInfo> {
+  return sessionRequest('mcp/servers', { method: 'POST', body: JSON.stringify(payload) });
+}
+
+export function updateMcpServer(name: string, payload: McpServerInput): Promise<McpServerInfo> {
+  return sessionRequest(`mcp/servers/${name}`, { method: 'PATCH', body: JSON.stringify(payload) });
+}
+
+export function deleteMcpServer(name: string): Promise<void> {
+  return sessionRequest(`mcp/servers/${name}`, { method: 'DELETE' });
+}
+
+/**
+ * 连一次这条定义，返回它暴露的工具名；连不上则抛错，错误信息由后端写好（含命令名、
+ * 超时、stderr 尾部），前端不重写。
+ *
+ * 测的是**传进来的值**，不是已保存的那份 —— 改了 command 就该能立刻测，而一个还没保存过
+ * 的新 server 根本无从「按名字测」。判据与超时和节点启动时的预检是同一套，所以这里测通了
+ * 就意味着节点起得来。
+ */
+export function probeMcpServer(payload: McpServerInput): Promise<string[]> {
+  return sessionRequest<{ tools: string[] }>('mcp/probe', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  }).then((resp) => resp.tools || []);
 }
 
 function workspaceQuery(path: string): string {

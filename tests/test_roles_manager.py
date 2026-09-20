@@ -55,6 +55,21 @@ class TestListRoles:
         assert roles[0]["description"] == ("长" * 80)
 
 
+class TestSkillReferences:
+    def test_reports_effective_skill_references_and_explicit_empty_override(self, tmp_path):
+        _write_role_yaml(tmp_path, "manager", "default", "skills: [shared]\n")
+        _write_role_yaml(tmp_path, "worker", "default", "skills: [shared]\n")
+        _write_role_yaml(tmp_path, "worker", "plain", "role_md: plain\n")
+        _write_role_yaml(tmp_path, "worker", "empty", "skills: []\n")
+        _write_role_yaml(tmp_path, "manager", "same", "skills: [other]\n")
+        refs = RolesManager(str(tmp_path)).roles_referencing_skill("shared")
+        assert refs == [
+            {"id": "default", "type": "manager"},
+            {"id": "default", "type": "worker"},
+            {"id": "plain", "type": "worker"},
+        ]
+
+
 class TestAddGetRole:
     def test_add_with_content(self, tmp_path):
         rm = RolesManager(str(tmp_path))
@@ -166,3 +181,20 @@ class TestRoleSchema:
         assert "generate_instruction" not in names
         assert "review_checklist" not in names
         assert "summary" in names
+
+    def test_mcp_is_a_first_class_role_config_field(self, tmp_path):
+        _write_role_yaml(
+            tmp_path, "worker", "default",
+            "summary: base\nmcp: []\n",
+        )
+        rm = RolesManager(str(tmp_path))
+        schema = rm.get_role_schema("worker")
+        fields = {field["name"]: field for field in schema["fields"]}
+        assert fields["mcp"]["type"] == "list"
+
+        created = rm.add_role(
+            "mcp_probe", role_type="worker",
+            config={"summary": "Uses the probe", "mcp": ["echo-probe"]},
+        )
+        assert created["config"]["mcp"] == ["echo-probe"]
+        assert rm.get_role("mcp_probe", "worker")["config"]["mcp"] == ["echo-probe"]

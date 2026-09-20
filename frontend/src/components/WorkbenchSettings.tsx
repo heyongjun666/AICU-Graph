@@ -1,14 +1,16 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { ChevronDown, Boxes, FolderTree, HelpCircle, Languages, Pencil, Plus, Save, Server, Sparkles, Trash2, Upload, Users, X } from 'lucide-react';
-import { CliInfo, EffectiveBaseUrlResponse, GlobalConfig, ProviderPreset, RoleField, RoleInfo, RolePool, RoleSchema, SkillInfo } from '../types';
+import { ChevronDown, Boxes, FolderTree, HelpCircle, Languages, Pencil, Plug, Plus, Save, Server, Sparkles, Trash2, Upload, Users, X } from 'lucide-react';
+import { CliInfo, EffectiveBaseUrlResponse, GlobalConfig, McpRoleRef, McpServerInfo, McpServerInput, ProviderPreset, RoleField, RoleInfo, RolePool, RoleSchema, SkillInfo } from '../types';
 import { useI18n } from '../i18n';
 import { useUIStateStore } from '../stores/UIStateStore';
 import SearchCheckboxPicker from './SearchCheckboxPicker';
 import { CliOptions } from './CliOptions';
 import {
+  createMcpServer,
   createRole,
   createRolePool,
   createSkill,
+  deleteMcpServer,
   deleteRole,
   deleteRolePool,
   deleteSkill,
@@ -16,6 +18,7 @@ import {
   getInternalUsername,
   getEffectiveBaseUrl,
   getGlobalConfig,
+  getMcpServers,
   getRole,
   getRolePools,
   getRoleSchema,
@@ -23,17 +26,19 @@ import {
   getSkill,
   getSkills,
   importSkill,
+  probeMcpServer,
   saveApiKey,
   saveInternalUsername,
   testConnection,
   updateGlobalConfig,
+  updateMcpServer,
   updateRole,
   updateRolePool,
   updateSkill,
 } from '../utils/api';
 import { clearRoleHoverDetailCache, loadRoleHoverDetail } from '../utils/roleHoverDetail';
 
-type SettingsTab = 'connection' | 'workspace' | 'roles' | 'pools' | 'skills' | 'language';
+type SettingsTab = 'connection' | 'workspace' | 'roles' | 'pools' | 'skills' | 'mcp' | 'language';
 type RoleType = NonNullable<RoleInfo['type']>;
 
 interface WorkbenchSettingsProps {
@@ -48,6 +53,7 @@ const tabs: Array<{ id: SettingsTab; label: string; icon: React.ReactNode }> = [
   { id: 'roles', label: 'settings.tab.roles', icon: <Users size={16} /> },
   { id: 'pools', label: 'settings.tab.pools', icon: <Boxes size={16} /> },
   { id: 'skills', label: 'settings.tab.skills', icon: <Sparkles size={16} /> },
+  { id: 'mcp', label: 'settings.tab.mcp', icon: <Plug size={16} /> },
   { id: 'language', label: 'settings.tab.language', icon: <Languages size={16} /> },
 ];
 
@@ -79,7 +85,7 @@ const clampNumCcs = (value: unknown): number => {
 const ROLE_FIELD_SECTIONS: Record<string, string> = {
   summary: 'Identity', description: 'Identity', suitable_for: 'Identity', not_for: 'Identity',
   num_ccs: 'Execution', model: 'Execution', cli_name: 'Execution', audit_rounds: 'Execution',
-  skills_dir: 'Skills', skills: 'Skills',
+  skills_dir: 'Skills', skills: 'Skills', mcp: 'Skills',
   output_file: 'Output', final_file: 'Output', modular_output: 'Output', main_doc: 'Output', index_file: 'Output',
 };
 
@@ -105,6 +111,12 @@ function displayValue(value: unknown): string {
   return String(value);
 }
 
+function normalizeStringList(value: unknown): string[] {
+  if (typeof value === 'string') return value.trim() ? [value] : [];
+  if (Array.isArray(value)) return value.map(String);
+  return [];
+}
+
 function coerceField(field: RoleField, value: string): unknown {
   if (field.type === 'number') return value === '' ? undefined : Number(value);
   if (field.type === 'boolean') return value === 'true';
@@ -115,9 +127,44 @@ function coerceField(field: RoleField, value: string): unknown {
 /** 资源编辑区的显隐状态：idle = 什么都没选，view = 只读查看，edit = 改已有条目，create = 新建。 */
 type ResourceMode = 'idle' | 'view' | 'edit' | 'create';
 
+/**
+ * MCP server 的两种传输，对应界面上那组互斥的表单字段。
+ *
+ * ``stdio`` = 本地子进程（命令 + 参数 + 环境变量），``http`` = 远程 Streamable HTTP
+ * （地址 + 请求头）。**只是表单的界面状态**：存进注册表的是 url，有没有它就是哪种传输。
+ * SSE 型的远程 server 不在其中 —— 后端只支持 Streamable HTTP（见 mcp_manager.validate_server）。
+ */
+type McpTransport = 'stdio' | 'http';
+
 /** 由「是否在编辑」与「当前选中项」推导，避免两者各存一份而互相打架。 */
 const deriveMode = (editing: boolean, selected: string): ResourceMode =>
   editing ? (selected ? 'edit' : 'create') : (selected ? 'view' : 'idle');
+
+/**
+ * 多行文本 → 参数数组，一行一个。
+ *
+ * 刻意不按空格分：arg 本身可以含空格（`--config "a b.json"`），按空格分会把它劈成两个
+ * 参数**且不报错** —— 用户只能从 server 那边一句莫名其妙的报错反推回来。
+ */
+const parseArgLines = (text: string): string[] =>
+  text.split('\n').map((line) => line.trim()).filter(Boolean);
+
+/** 多行「KEY=VALUE」→ env 对象；有一行不是这个形状就返回 null（由调用方去报错）。 */
+function parseEnvLines(text: string): Record<string, string> | null {
+  const env: Record<string, string> = {};
+  for (const line of text.split('\n')) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    const separator = trimmed.indexOf('=');
+    if (separator <= 0) return null;   // 没有 =，或 = 打头（那是个没有名字的变量）
+    env[trimmed.slice(0, separator).trim()] = trimmed.slice(separator + 1).trim();
+  }
+  return env;
+}
+
+/** 表单里的 env 文本：一行一个 KEY=VALUE，与 parseEnvLines 互为逆运算。 */
+const envToLines = (env: Record<string, string>): string =>
+  Object.entries(env).map(([key, value]) => `${key}=${value}`).join('\n');
 
 /** 悬浮（hover）或点击（focus）显示说明气泡的帮助图标。 */
 const HelpTip: React.FC<{ text: string; title?: string }> = ({ text, title }) => {
@@ -130,14 +177,37 @@ const HelpTip: React.FC<{ text: string; title?: string }> = ({ text, title }) =>
   );
 };
 
-/** 可搜索的下拉多选框：列出所有 skill，勾选/取消、支持按名称或 id 过滤。 */
-const SkillMultiSelect: React.FC<{
-  options: SkillInfo[];
+/**
+ * 下拉里的一项。
+ *
+ * ``id`` 是存进配置的取值，``label`` 是给人看的名字 —— 两者未必相同（skill 的 id 与
+ * 显示名就常常不一样）。``keywords`` 只参与搜索、不上屏：一句描述放在行里会把菜单撑变形，
+ * 但它恰恰是「该选哪个」的主要依据，所以搜索要认它。
+ */
+type SelectOption = {
+  id: string;
+  label: string;
+  hint?: string;
+  title?: string;
+  keywords?: string;
+};
+
+/**
+ * 可搜索的下拉多选框：勾选/取消，支持按名字或关键字过滤。
+ *
+ * 做成通用件而不是照抄两份：skill 与 MCP server 的差别只有「一行显示什么、搜索认哪些字」，
+ * 而这份实现里有几处不显眼但要紧的东西（外部点击关闭、`is-checked` 的样式钩子、chips
+ * 的溢出处理）。抄一份出来，改了其中一处另一处就会与它悄悄分叉。
+ */
+const MultiSelect: React.FC<{
+  options: SelectOption[];
   value: string[];
   onChange: (ids: string[]) => void;
+  placeholder: string;
+  searchPlaceholder: string;
+  emptyText: string;
   disabled?: boolean;
-}> = ({ options, value, onChange, disabled = false }) => {
-  const { t } = useI18n();
+}> = ({ options, value, onChange, placeholder, searchPlaceholder, emptyText, disabled = false }) => {
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState('');
   const boxRef = useRef<HTMLDivElement>(null);
@@ -151,12 +221,12 @@ const SkillMultiSelect: React.FC<{
     return () => document.removeEventListener('mousedown', onDoc);
   }, [open]);
 
-  const filtered = options.filter((skill) =>
-    !query
-    || skill.name.toLowerCase().includes(query.toLowerCase())
-    || skill.id.toLowerCase().includes(query.toLowerCase()),
+  const needle = query.toLowerCase();
+  const filtered = options.filter((option) =>
+    !needle
+    || `${option.label} ${option.id} ${option.keywords || ''}`.toLowerCase().includes(needle),
   );
-  const selected = options.filter((skill) => value.includes(skill.id));
+  const selected = options.filter((option) => value.includes(option.id));
   const toggle = (id: string) => onChange(
     value.includes(id) ? value.filter((item) => item !== id) : [...value, id],
   );
@@ -166,31 +236,84 @@ const SkillMultiSelect: React.FC<{
       <button type="button" className="skill-select-trigger" disabled={disabled} onClick={() => !disabled && setOpen((v) => !v)}>
         {selected.length > 0 ? (
           <span className="skill-select-chips">
-            {selected.map((skill) => <span key={skill.id} className="skill-select-chip">{skill.name || skill.id}</span>)}
+            {selected.map((option) => <span key={option.id} className="skill-select-chip">{option.label}</span>)}
           </span>
         ) : (
-          <span className="skill-select-placeholder">{t('settings.selectSkill')}</span>
+          <span className="skill-select-placeholder">{placeholder}</span>
         )}
         <ChevronDown size={14} className={open ? 'is-open' : ''} />
       </button>
       {open && (
         <div className="skill-select-menu">
           <div className="skill-select-search">
-            <input autoFocus value={query} onChange={(event) => setQuery(event.target.value)} placeholder={t('settings.searchSkill')} />
+            <input autoFocus value={query} onChange={(event) => setQuery(event.target.value)} placeholder={searchPlaceholder} />
           </div>
           <div className="skill-select-list">
-            {filtered.map((skill) => (
-              <label key={skill.id} className={`skill-select-item ${value.includes(skill.id) ? 'is-checked' : ''}`}>
-                <input type="checkbox" checked={value.includes(skill.id)} onChange={() => toggle(skill.id)} disabled={disabled} />
-                <span className="skill-select-name">{skill.name || skill.id}</span>
-                {skill.name !== skill.id && <code className="skill-select-id">{skill.id}</code>}
+            {filtered.map((option) => (
+              <label key={option.id} className={`skill-select-item ${value.includes(option.id) ? 'is-checked' : ''}`} title={option.title}>
+                <input type="checkbox" checked={value.includes(option.id)} onChange={() => toggle(option.id)} disabled={disabled} />
+                <span className="skill-select-name">{option.label}</span>
+                {option.hint && <code className="skill-select-id">{option.hint}</code>}
               </label>
             ))}
-            {filtered.length === 0 && <div className="skill-select-empty">{t('settings.noMatchingSkill')}</div>}
+            {filtered.length === 0 && <div className="skill-select-empty">{emptyText}</div>}
           </div>
         </div>
       )}
     </div>
+  );
+};
+
+/** 列出所有 skill，勾选/取消。 */
+const SkillMultiSelect: React.FC<{
+  options: SkillInfo[];
+  value: string[];
+  onChange: (ids: string[]) => void;
+  disabled?: boolean;
+}> = ({ options, value, onChange, disabled = false }) => {
+  const { t } = useI18n();
+  return (
+    <MultiSelect
+      options={options.map((skill) => ({
+        id: skill.id,
+        label: skill.name || skill.id,
+        // 显示名与 id 不同时才把 id 也摆出来：相同的话那是同一句话说两遍。
+        hint: skill.name !== skill.id ? skill.id : undefined,
+      }))}
+      value={value}
+      onChange={onChange}
+      placeholder={t('settings.selectSkill')}
+      searchPlaceholder={t('settings.searchSkill')}
+      emptyText={t('settings.noMatchingSkill')}
+      disabled={disabled}
+    />
+  );
+};
+
+/** 列出所有 MCP server，勾选/取消。 */
+const McpMultiSelect: React.FC<{
+  options: McpServerInfo[];
+  value: string[];
+  onChange: (ids: string[]) => void;
+  disabled?: boolean;
+}> = ({ options, value, onChange, disabled = false }) => {
+  const { t } = useI18n();
+  return (
+    <MultiSelect
+      options={options.map((server) => ({
+        id: server.name,
+        label: server.name,
+        // 描述只做悬浮提示与搜索关键字，不上屏 —— 它可能很长，摆进行里会把菜单撑变形。
+        title: server.description || undefined,
+        keywords: server.description,
+      }))}
+      value={value}
+      onChange={onChange}
+      placeholder={t('settings.selectMcp')}
+      searchPlaceholder={t('settings.searchMcp')}
+      emptyText={t('settings.noMatchingMcp')}
+      disabled={disabled}
+    />
   );
 };
 
@@ -201,11 +324,12 @@ const RoleFieldEditor: React.FC<{
   onChange: (value: unknown) => void;
   onReset: () => void;
   skillOptions?: SkillInfo[];
+  mcpOptions?: McpServerInfo[];
   /** 只读查看态。必须显式透传：控件的禁用条件是 `!overridden`，
    *  而 roleConfig 恰好就是被覆盖字段的集合，不单独判只读会让"查看"态里
    *  最该锁住的那些字段反而可改。 */
   readOnly?: boolean;
-}> = ({ field, value, overridden, onChange, onReset, skillOptions, readOnly = false }) => {
+}> = ({ field, value, overridden, onChange, onReset, skillOptions, mcpOptions, readOnly = false }) => {
   const { t, lang } = useI18n();
   const fieldLabel = lang === 'en' ? field.label_en || field.label : field.label;
   const fieldDescription = lang === 'en' ? field.description_en || field.description : field.description;
@@ -220,9 +344,13 @@ const RoleFieldEditor: React.FC<{
         ? []
         : '';
   const isSkillPicker = field.name === 'skills' && Boolean(skillOptions);
-  const currentSkills = (Array.isArray(value) ? value : Array.isArray(field.default) ? field.default : []).map(String);
+  const isMcpPicker = field.name === 'mcp' && Boolean(mcpOptions);
+  // 两个选择器共用的取值：存的就是名字/ id 的字符串数组，回退到字段默认值。
+  const currentList = normalizeStringList(value === undefined ? field.default : value);
 
-  if (isSkillPicker) {
+  if (isSkillPicker || isMcpPicker) {
+    // 共用同一段外壳（标签 + 说明 + 空态提示），只有控件与文案不同。
+    const emptyHint = isMcpPicker ? t('settings.noMcpSelected') : t('settings.noSkillSelected');
     return (
       <div className="role-field is-overridden">
         <div className="role-field-header">
@@ -232,8 +360,10 @@ const RoleFieldEditor: React.FC<{
             {fieldDescription && <HelpTip text={fieldDescription} title={fieldLabel} />}
           </div>
         </div>
-        <SkillMultiSelect options={skillOptions!} value={currentSkills} onChange={onChange} disabled={readOnly} />
-        {currentSkills.length === 0 && <small className="field-default">{t('settings.noSkillSelected')}</small>}
+        {isMcpPicker
+          ? <McpMultiSelect options={mcpOptions!} value={currentList} onChange={onChange} disabled={readOnly} />
+          : <SkillMultiSelect options={skillOptions!} value={currentList} onChange={onChange} disabled={readOnly} />}
+        {currentList.length === 0 && <small className="field-default">{emptyHint}</small>}
       </div>
     );
   }
@@ -311,10 +441,33 @@ const WorkbenchSettings: React.FC<WorkbenchSettingsProps> = ({ open, onClose, on
   const [skillContent, setSkillContent] = useState('# Skill\n\n');
   const [skillDetail, setSkillDetail] = useState<SkillInfo | null>(null);
   const [zipFile, setZipFile] = useState<File | null>(null);
+  // MCP 注册表：列表 + 表单。args / env / headers 在表单里是**多行文本**（见
+  // parseArgLines / parseEnvLines），保存和测试时才解析 —— 边敲边解析的话，用户敲一个
+  // 换行就会把半截参数吞掉。
+  //
+  // 传输是本地的界面状态而不是表单字段：条目里存的是 url，有没有它就是哪种传输（与后端
+  // mcp_manager.transport_of 同一条判据）。界面上再存一份能跟 url 打架的选择，正是本项目
+  // 反复防的那类「看起来两样都在、运行时按哪个走看读的那一方」。
+  const [mcpServers, setMcpServers] = useState<McpServerInfo[]>([]);
+  const [editingMcp, setEditingMcp] = useState(false);
+  const [selectedMcp, setSelectedMcp] = useState('');
+  const [mcpName, setMcpName] = useState('');
+  const [mcpTransport, setMcpTransport] = useState<McpTransport>('stdio');
+  const [mcpCommand, setMcpCommand] = useState('');
+  const [mcpArgs, setMcpArgs] = useState('');
+  const [mcpEnv, setMcpEnv] = useState('');
+  const [mcpUrl, setMcpUrl] = useState('');
+  const [mcpHeaders, setMcpHeaders] = useState('');
+  const [mcpDescription, setMcpDescription] = useState('');
+  const [mcpRequired, setMcpRequired] = useState(true);
+  const [mcpTools, setMcpTools] = useState<string[] | null>(null);
+  const [mcpTesting, setMcpTesting] = useState(false);
+  const mcpProbeGeneration = useRef(0);
   const [busy, setBusy] = useState(false);
   const [testing, setTesting] = useState(false);
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [error, setError] = useState('');
+  const [mcpError, setMcpError] = useState('');
   const [notice, setNotice] = useState('');
   // 成功提示 banner 自动消除（与 Toast 默认 3000ms 对齐），避免"已删除"等信息常驻不清。
   useEffect(() => {
@@ -331,6 +484,18 @@ const WorkbenchSettings: React.FC<WorkbenchSettingsProps> = ({ open, onClose, on
   const load = async () => {
     setBusy(true);
     setError('');
+    setMcpError('');
+    setMcpServers([]);
+    setMcpFormEmpty();
+    void getMcpServers()
+      .then((nextMcp) => {
+        setMcpServers(nextMcp);
+        if (nextMcp[0]) fillMcpForm(nextMcp[0]);
+      })
+      .catch((reason) => {
+        setMcpServers([]);
+        setMcpError(reason instanceof Error ? reason.message : String(reason));
+      });
     try {
       const [globalResp, nextRoles, nextSkills, schema, nextPools] = await Promise.all([
         getGlobalConfig(), getRoles(), getSkills(), getRoleSchema('worker'), getRolePools(),
@@ -404,6 +569,7 @@ const WorkbenchSettings: React.FC<WorkbenchSettingsProps> = ({ open, onClose, on
     setNotice('');
     setSelectedRole('');
     setRoleId('');
+    setMcpError('');
     setRoleType('worker');
     setRoleConfig({});
     setPoolFormEmpty();
@@ -412,8 +578,14 @@ const WorkbenchSettings: React.FC<WorkbenchSettingsProps> = ({ open, onClose, on
     setEditingRole(false);
     setEditingPool(false);
     setEditingSkill(false);
+    setEditingMcp(false);
+    setMcpFormEmpty();
     setAdvancedOpen(false);
     void load();
+  }, [open]);
+
+  useEffect(() => () => {
+    mcpProbeGeneration.current += 1;
   }, [open]);
 
   // 按当前 CLI 回显 Internal 账号或模型厂商 API Key。
@@ -743,6 +915,13 @@ const WorkbenchSettings: React.FC<WorkbenchSettingsProps> = ({ open, onClose, on
   const roleTypeLabel = (type?: RoleInfo['type']) =>
     (type === 'manager' ? t('dialog.manager') : t('dialog.worker'));
 
+  const formatRoleReferences = (refs: McpRoleRef[]) => {
+    const wrap = lang === 'en' ? (value: string) => `(${value})` : (value: string) => `（${value}）`;
+    return refs
+      .map((item) => `${item.id}${wrap(roleTypeLabel(item.type))}`)
+      .join(lang === 'en' ? '; ' : '、');
+  };
+
   const togglePoolRole = (id: string, checked: boolean) => {
     setPoolRoles((current) => checked
       ? (current.includes(id) ? current : [...current, id])
@@ -788,13 +967,20 @@ const WorkbenchSettings: React.FC<WorkbenchSettingsProps> = ({ open, onClose, on
   };
 
   const deleteCurrentSkill = async () => {
-    if (!selectedSkill || !skillId) return;
-    const target = skills.find((item) => item.id === selectedSkill);
-    const name = target?.name || skillId;
-    if (!window.confirm(t('settings.deleteSkillConfirm', { name }))) return;
+    const targetId = selectedSkill || skillId;
+    if (!targetId) return;
+    const target = skills.find((item) => item.id === targetId);
+    const name = target?.name || targetId;
     setBusy(true); setError(''); setNotice('');
     try {
-      await deleteSkill(skillId);
+      const detail = await getSkill(targetId);
+      const refs = detail.referencing_roles || [];
+      const roles = formatRoleReferences(refs);
+      const warning = refs.length
+        ? `\n${t('settings.skillReferencedWarning', { count: refs.length, roles })}`
+        : `\n${t('settings.skillReferenceScope')}`;
+      if (!window.confirm(`${t('settings.deleteSkillConfirm', { name })}${warning}`)) return;
+      await deleteSkill(targetId);
       const nextSkills = await getSkills();
       setSkills(nextSkills);
       setNotice(t('settings.skillDeleted'));
@@ -805,6 +991,180 @@ const WorkbenchSettings: React.FC<WorkbenchSettingsProps> = ({ open, onClose, on
       else { setSelectedSkill(''); setSkillId(''); setSkillContent('# Skill\n\n'); setSkillDetail(null); }
     } catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)); }
     finally { setBusy(false); }
+  };
+
+  const reportMcpError = (message: string) => {
+    setError(message); addToast({ type: 'error', message });
+  };
+
+  const setMcpFormEmpty = () => {
+    setSelectedMcp(''); setMcpName(''); setMcpTransport('stdio');
+    setMcpCommand(''); setMcpArgs(''); setMcpEnv(''); setMcpUrl(''); setMcpHeaders('');
+    setMcpDescription(''); setMcpRequired(true); setMcpTools(null);
+  };
+
+  const fillMcpForm = (server: McpServerInfo) => {
+    // 有没有 url 就是传输本身，不另读一个字段（见 mcpTransport state 的说明）。
+    setMcpTransport(server.url ? 'http' : 'stdio');
+    setSelectedMcp(server.name); setMcpName(server.name); setMcpCommand(server.command || '');
+    setMcpArgs((server.args || []).join('\n')); setMcpEnv(envToLines(server.env || {}));
+    setMcpUrl(server.url || ''); setMcpHeaders(envToLines(server.headers || {}));
+    setMcpDescription(server.description); setMcpRequired(server.required); setMcpTools(null);
+  };
+
+  /** 入参为空串表示切到「新建」态。 */
+  const invalidateMcpProbe = () => {
+    mcpProbeGeneration.current += 1;
+  };
+
+  const chooseMcp = (name: string) => {
+    invalidateMcpProbe();
+    setError(''); setNotice('');
+    const server = name ? mcpServers.find((item) => item.name === name) : undefined;
+    if (server) fillMcpForm(server); else setMcpFormEmpty();
+  };
+
+  /**
+   * 屏幕上这套值 → 请求体；本地能判出来的问题在这里拦下，其余交给后端。
+   *
+   * 刻意不在这里复刻名字的正则：那条规则的成品是「会进 CLI 配置键的标识符」，它归
+   * mcp_manager.validate_server 所有，后端也已经把违规的名字与原因拼成一句可直接展示的话。
+   * 前端再写一份，两边就会各自漂移。header 名与换行的规则同理，也不在这里复刻。
+   *
+   * 但 env / headers 的**行格式**是界面自己的语法（一行一个 NAME=VALUE），后端看到的只是
+   * 解析结果 —— 一行漏了 `=` 会被静默丢掉，用户以为存进去了。所以这一条必须在这里拦。
+   *
+   * 两种传输各自只提交自己那组字段：远程条目带上 command/args/env 会被后端**报错**（不是
+   * 忽略），而界面上那些框已经藏起来了，用户看不到自己在提交什么。
+   */
+  const mcpPayload = (): McpServerInput | null => {
+    const name = mcpName.trim();
+    if (!name) { reportMcpError(t('settings.mcpNameRequired')); return null; }
+    const common = { name, description: mcpDescription.trim(), required: mcpRequired };
+    if (mcpTransport === 'http') {
+      const url = mcpUrl.trim();
+      if (!url) { reportMcpError(t('settings.mcpUrlRequired')); return null; }
+      // 只判协议前缀，不判 URL 合不合法：这条判据的成品是「后端 validate_server 会收的
+      // 那两种 scheme」，两边不一样的后果是用户敲完保存才在另一个进程里看到报错。
+      if (!/^https?:\/\//i.test(url)) { reportMcpError(t('settings.mcpUrlInvalid')); return null; }
+      const headers = parseEnvLines(mcpHeaders);
+      if (!headers) { reportMcpError(t('settings.mcpHeadersInvalid')); return null; }
+      return { ...common, url, headers };
+    }
+    const command = mcpCommand.trim();
+    if (!command) { reportMcpError(t('settings.mcpCommandRequired')); return null; }
+    const env = parseEnvLines(mcpEnv);
+    if (!env) { reportMcpError(t('settings.mcpEnvInvalid')); return null; }
+    return { ...common, command, args: parseArgLines(mcpArgs), env };
+  };
+
+  /** 传输切换：清掉另一组字段，免得「切过去又切回来」时旧值悄悄留着被一起提交。 */
+  const switchMcpTransport = (next: McpTransport) => {
+    if (next === mcpTransport) return;
+    invalidateMcpProbe();
+    if (next === 'http') { setMcpCommand(''); setMcpArgs(''); setMcpEnv(''); }
+    else { setMcpUrl(''); setMcpHeaders(''); }
+    setMcpTools(null);
+    setMcpTransport(next);
+  };
+
+  /**
+   * 「测试」「保存」两个按钮的禁用条件：名字 + **当前传输那一组**的必填项。
+   *
+   * 按传输取对应的那个输入，而不是恒看 command —— 远程表单里 command 恒为空，
+   * 恒看它会让两个按钮在填好 URL 之后依然点不动。这里只判「空没空」，格式对不对
+   * 交给 mcpPayload（点下去会给出具体原因，比一个灰按钮好懂）。
+   */
+  const mcpFormIncomplete = !mcpName.trim() || (mcpTransport === 'http' ? !mcpUrl.trim() : !mcpCommand.trim());
+
+  const saveMcp = async () => {
+    const payload = mcpPayload();
+    if (!payload) return;
+    setBusy(true); setError(''); setNotice('');
+    try {
+      const saved = selectedMcp
+        ? await updateMcpServer(selectedMcp, payload)
+        : await createMcpServer(payload);
+      // 重新拉列表而不是把响应塞回去：referencing_roles 只有列表接口才算得出来。
+      const next = await getMcpServers();
+      setMcpServers(next);
+      fillMcpForm(next.find((item) => item.name === saved.name) || saved);
+      setEditingMcp(false);
+      const message = t('settings.mcpSaved');
+      setNotice(message); addToast({ type: 'success', message });
+    } catch (reason) {
+      reportMcpError(reason instanceof Error ? reason.message : String(reason));
+    } finally { setBusy(false); }
+  };
+
+  const deleteCurrentMcp = async () => {
+    if (!selectedMcp) return;
+    const target = mcpServers.find((item) => item.name === selectedMcp);
+    // 引用它的角色要一个个列出来：删掉之后那些角色下次启动会带着「可用 server 列表」当场
+    // 报错，这一行字是用户唯一的判断依据。
+    const refs = target?.referencing_roles || [];
+    const warning = refs.length
+      ? `\n${t('settings.mcpReferencedWarning', {
+          count: refs.length,
+          roles: formatRoleReferences(refs),
+        })}`
+      : '';
+    if (!window.confirm(`${t('settings.mcpDeleteConfirm', { name: target?.name || mcpName })}${warning}`)) return;
+    setBusy(true); setError(''); setNotice('');
+    try {
+      await deleteMcpServer(selectedMcp);
+      const next = await getMcpServers();
+      setMcpServers(next);
+      setEditingMcp(false);
+      if (next[0]) fillMcpForm(next[0]); else setMcpFormEmpty();
+      setNotice(t('settings.mcpDeleted'));
+      addToast({ type: 'success', message: t('settings.mcpDeleted') });
+    } catch (reason) {
+      reportMcpError(reason instanceof Error ? reason.message : String(reason));
+    } finally { setBusy(false); }
+  };
+
+  /** 测试连接：连的是屏幕上这套**还没保存**的值，所以走 payload 而不是 selectedMcp。 */
+  const runMcpProbe = async () => {
+    const payload = mcpPayload();
+    if (!payload) return;
+    const generation = mcpProbeGeneration.current + 1;
+    mcpProbeGeneration.current = generation;
+    setMcpTesting(true); setError(''); setNotice(''); setMcpTools(null);
+    try {
+      const tools = await probeMcpServer(payload);
+      if (mcpProbeGeneration.current !== generation) return;
+      setMcpTools(tools);
+      setNotice(tools.length ? t('settings.mcpTestOk') : t('settings.mcpTestOkNoTools'));
+    } catch (reason) {
+      if (mcpProbeGeneration.current !== generation) return;
+      // 失败原句来自后端（含命令名、超时、stderr 尾部），前端不重写。
+      const message = reason instanceof Error ? reason.message : String(reason);
+      setError(message); addToast({ type: 'error', message });
+    } finally {
+      if (mcpProbeGeneration.current === generation) setMcpTesting(false);
+    }
+  };
+
+  const cancelEditMcp = () => {
+    invalidateMcpProbe();
+    setEditingMcp(false); setError(''); setNotice(''); setMcpTools(null);
+    const server = mcpServers.find((item) => item.name === selectedMcp);
+    if (server) fillMcpForm(server); else setMcpFormEmpty();
+  };
+
+  const currentMcpName = () => mcpServers.find((item) => item.name === selectedMcp)?.name || mcpName;
+
+  const requestSelectMcp = (name: string) => {
+    if (!confirmSwitchAway(editingMcp, name, selectedMcp, currentMcpName())) return;
+    setEditingMcp(false);
+    chooseMcp(name);
+  };
+
+  const startCreateMcp = () => {
+    if (!confirmSwitchAway(editingMcp, '', selectedMcp, currentMcpName())) return;
+    setEditingMcp(true);
+    chooseMcp('');
   };
 
   /**
@@ -889,11 +1249,15 @@ const WorkbenchSettings: React.FC<WorkbenchSettingsProps> = ({ open, onClose, on
 
   /**
    * 关闭设置面板时若正在编辑，提醒一句，避免点右上角的关闭直接丢掉改动。
-   * 三个 tab 同一时刻只有一个在编辑，所以按 tab 取当前条目的名字，提示里能指名道姓。
+   * 四个 tab 同一时刻只有一个在编辑，所以按 tab 取当前条目的名字，提示里能指名道姓。
    */
   const requestClose = () => {
-    if (!editingRole && !editingPool && !editingSkill) { onClose(); return; }
-    const name = editingRole ? currentRoleName() : editingPool ? currentPoolName() : currentSkillName();
+    invalidateMcpProbe();
+    if (!editingRole && !editingPool && !editingSkill && !editingMcp) { onClose(); return; }
+    const name = editingRole ? currentRoleName()
+      : editingPool ? currentPoolName()
+        : editingSkill ? currentSkillName()
+          : currentMcpName();
     if (!window.confirm(t('settings.discardEditsConfirm', { name: name || t('settings.unsavedEdits') }))) return;
     onClose();
   };
@@ -902,6 +1266,19 @@ const WorkbenchSettings: React.FC<WorkbenchSettingsProps> = ({ open, onClose, on
   const roleMode = deriveMode(editingRole, selectedRole);
   const poolMode = deriveMode(editingPool, selectedPool);
   const skillMode = deriveMode(editingSkill, selectedSkill);
+  const mcpMode = deriveMode(editingMcp, selectedMcp);
+  // 用不了 MCP 的 CLI。原因短语直接取后端下发的 mcp_unwired_reason，前端不重写成因 ——
+  // 成因会变（pi 现在是「装个扩展就行」，agy / grok 是「AICU 还没接」），前端各写一份的话
+  // 后端改了口径这边不会跟着变，用户读到的就是一句与实际不符的话。只列已安装的：没装的
+  // CLI 在下拉里选不到，写进来只是噪音。
+  const unwiredClis = clis.filter((cli) => cli.installed && !cli.supports_mcp);
+  const mcpCliHint = unwiredClis.length
+    ? t('settings.mcpCliHint', {
+        clis: unwiredClis
+          .map((cli) => (cli.mcp_unwired_reason ? `${cli.display_name} — ${cli.mcp_unwired_reason}` : cli.display_name))
+          .join(lang === 'en' ? '; ' : '；'),
+      })
+    : t('settings.mcpCliAllWired');
   const roleFields = roleSchema?.fields || [];
   const basicFields = roleFields.filter((field) => !field.advanced);
   const advancedFields = roleFields.filter((field) => field.advanced);
@@ -925,6 +1302,7 @@ const WorkbenchSettings: React.FC<WorkbenchSettingsProps> = ({ open, onClose, on
           onChange={(value) => setRoleConfig((current) => ({ ...current, [field.name]: value }))}
           onReset={() => setRoleConfig((current) => { const next = { ...current }; delete next[field.name]; return next; })}
           skillOptions={field.name === 'skills' ? skills : undefined}
+          mcpOptions={field.name === 'mcp' ? mcpServers : undefined}
           readOnly={roleMode === 'view' || roleMode === 'idle'}
         />
       ))}
@@ -936,10 +1314,11 @@ const WorkbenchSettings: React.FC<WorkbenchSettingsProps> = ({ open, onClose, on
       <section className="settings-dialog" role="dialog" aria-modal="true" aria-label={t('settings.title')}>
         <header className="dialog-header"><div><span className="eyebrow">WORKBENCH</span><h2>{t('settings.title')}</h2></div><button className="icon-button" onClick={requestClose} title={t('settings.close')}><X size={18} /></button></header>
         <div className="settings-layout">
-          <nav className="settings-nav">{tabs.map((item) => <button key={item.id} className={tab === item.id ? 'is-active' : ''} onClick={() => { setTab(item.id); setEditingRole(false); setEditingPool(false); setEditingSkill(false); }}>{item.icon}<span>{t(item.label)}</span></button>)}</nav>
+          <nav className="settings-nav">{tabs.map((item) => <button key={item.id} className={tab === item.id ? 'is-active' : ''} onClick={() => { if (item.id !== 'mcp') invalidateMcpProbe(); setTab(item.id); setEditingRole(false); setEditingPool(false); setEditingSkill(false); setEditingMcp(false); }}>{item.icon}<span>{t(item.label)}</span></button>)}</nav>
           <div className="settings-body">
             {error && <div className="settings-message is-error">{error}</div>}
             {notice && <div className="settings-message is-success">{notice}</div>}
+            {tab === 'mcp' && mcpError && <div className="settings-message is-error">{mcpError}</div>}
             {tab === 'connection' && <div className="settings-section"><div className="section-heading"><div><h3>{t('settings.connectionTitle')}</h3><p>{t('settings.connectionDesc')}</p></div></div><div className="form-grid"><label>{t('settings.provider')}<select id="provider-select" value={selectedProviderId} onChange={(event) => chooseProvider(event.target.value)}><option value={MANUAL_PROVIDER}>{t('settings.providerManual')}</option>{providerPresets.filter((preset) => preset.available !== false).map((preset) => <option key={preset.id} value={preset.id}>{preset.display_name}</option>)}</select><small>{manualMode ? t('settings.providerManualHint') : t('settings.providerHint')}</small></label><label>{t('settings.cli')}<select id="cli-select" value={config.cli_name || ''} onChange={(event) => setGlobal('cli_name', event.target.value || null)}><CliOptions clis={clis} defaultCli={defaultCli} /></select></label><label>{t('settings.model')}{modelIsFreeText ? <><input list="model-options" value={config.model || ''} onChange={(event) => setGlobal('model', event.target.value || null)} placeholder={t('settings.selectOrTypeModel')} /><datalist id="model-options">{allModelOptions.map((model) => <option key={model} value={model} />)}</datalist></> : <select id="model-select" value={config.model || ''} onChange={(event) => setGlobal('model', event.target.value || null)}>{modelIsForeign && <option value={config.model as string}>{t('settings.modelNotInList', { model: config.model as string })}</option>}{allModelOptions.map((model) => <option key={model} value={model}>{model}</option>)}</select>}</label><label>{t('settings.apiBaseUrl')}<input id="api-base-url" value={displayedBaseUrl} disabled={addressLocked} onChange={(event) => setGlobal('api_base_url', event.target.value || null)} placeholder={t('common.optional')} /><small>{baseUrlHint}</small></label>{(config.cli_name || defaultCli) === 'internal' ? <label>{t('settings.accountName')}<input value={internalUsername} onChange={(event) => setInternalUsername(event.target.value)} placeholder={t('settings.accountNamePlaceholder')} /><small>{t('settings.accountNameNote')}</small></label> : <label>{t('settings.apiKey')}<input type="password" value={apiKey} onChange={(event) => setApiKey(event.target.value)} placeholder={t('settings.apiKeyPlaceholder')} /><small>{apiKeyVendor ? t('settings.vendor', { vendor: apiKeyVendor }) : ''}{t('settings.localPlaintextNote')}</small></label>}</div><div className="settings-actions"><button className="secondary-button" disabled={testing || busy} onClick={runConnectionTest}>{testing ? t('settings.testing') : t('settings.testConnection')}</button><button className="primary-button" disabled={busy} onClick={saveConnection}><Save size={15} /> {t('settings.saveConnection')}</button></div></div>}
             {tab === 'workspace' && <div className="settings-section"><div className="section-heading"><div><h3>{t('settings.workspaceTitle')}</h3><p>{t('settings.workspaceDesc')}</p></div></div><label>{t('settings.workspaceRoot')}<input value={config.workspace_root || ''} onChange={(event) => setGlobal('workspace_root', event.target.value || null)} placeholder={t('settings.workspaceRootPlaceholder')} /></label><div className="settings-actions"><button className="primary-button" disabled={busy} onClick={saveWorkspace}><Save size={15} /> {t('settings.saveWorkspace')}</button></div></div>}
             {tab === 'workspace' && <div className="settings-section"><div className="section-heading"><div><h3>{t('settings.executionTitle')}</h3><p>{t('settings.executionDesc')}</p></div></div><label className="settings-toggle"><input type="checkbox" checked={config.dynamic_num_ccs !== false} onChange={(event) => setGlobal('dynamic_num_ccs', event.target.checked)} /><span>{t('settings.dynamicNumCcs')}</span><HelpTip text={t('settings.dynamicNumCcsHelp')} title={t('settings.dynamicNumCcs')} /></label>{config.dynamic_num_ccs === false && <label>{t('settings.defaultNumCcs')}<input type="number" min={NUM_CCS_MIN} max={NUM_CCS_MAX} step={1} value={config.default_num_ccs ?? NUM_CCS_MIN} disabled={busy} onChange={(event) => setGlobal('default_num_ccs', clampNumCcs(event.target.value))} /><small>{t('settings.defaultNumCcsHelp', { min: NUM_CCS_MIN, max: NUM_CCS_MAX })}</small></label>}<div className="settings-actions"><button className="primary-button" disabled={busy} onClick={saveExecution}><Save size={15} /> {t('settings.saveExecution')}</button></div></div>}
@@ -966,6 +1345,38 @@ const WorkbenchSettings: React.FC<WorkbenchSettingsProps> = ({ open, onClose, on
                 {/* 导入只会新建一个 skill，放在查看/编辑态容易被当成覆盖当前 skill，故只在新建态出现。 */}
                 {skillMode === 'create' && <div className="skill-import"><div className="skill-import-title"><Upload size={14} /> {t('settings.importFromZip')}<HelpTip text={t('settings.importHelp')} /></div><div className="skill-import-row"><input type="file" accept=".zip,application/zip" onChange={(event) => setZipFile(event.target.files?.[0] || null)} />{zipFile && <code className="skill-import-file">{zipFile.name}</code>}<button className="secondary-button" disabled={busy || !zipFile} onClick={importZip}>{t('settings.import')}</button></div><small>{t('settings.importNote')}</small></div>}
                 {skillMode !== 'view' && <div className="settings-actions">{skillMode === 'edit' && <button className="danger-button" disabled={busy} onClick={deleteCurrentSkill}><Trash2 size={15} /> {t('settings.deleteSkill')}</button>}<button className="secondary-button" disabled={busy} onClick={() => void cancelEditSkill()}>{t('common.cancel')}</button><button className="primary-button" disabled={busy || !skillId.trim() || !skillContent.trim()} onClick={saveSkill}><Save size={15} /> {t('settings.saveSkill')}</button></div>}
+              </>}
+            </div></div></div>}
+            {tab === 'mcp' && <div className="settings-section mcp-editor"><div className="section-heading"><div><h3>{t('settings.mcpTitle')}</h3><p>{t('settings.mcpDesc')}</p></div><div className="section-heading-actions">{!editingMcp && <button className="secondary-button" disabled={!selectedMcp || busy} onClick={() => setEditingMcp(true)}><Pencil size={15} /> {t('common.edit')}</button>}<button className="secondary-button" onClick={startCreateMcp}><Plus size={15} /> {t('settings.newMcp')}</button></div></div><p className="mcp-cli-hint">{mcpCliHint}</p><div className="role-editor-layout"><aside className="resource-list"><ul className="resource-list-items">{mcpServers.map((item) => <li key={item.name}><button type="button" className={selectedMcp === item.name ? 'is-active' : ''} disabled={busy} onClick={() => requestSelectMcp(item.name)}><span className="resource-list-name">{item.name}</span>{(item.referencing_roles?.length ?? 0) > 0 && <span className="resource-list-type">{t('settings.mcpUsedBy', { count: item.referencing_roles!.length })}</span>}</button></li>)}</ul><div className="resource-list-note">{mcpServers.length ? t('settings.mcpCount', { count: mcpServers.length }) : t('settings.noMcp')}</div></aside><div className="mcp-form">
+              {mcpMode === 'idle' ? <p className="detail-empty">{t('settings.selectOrCreateMcp')}</p> : <>
+                <div className="form-grid"><label>{t('settings.mcpName')}<input value={mcpName} onChange={(event) => setMcpName(event.target.value)} placeholder={t('settings.mcpNamePlaceholder')} disabled={Boolean(selectedMcp)} title={selectedMcp ? t('settings.mcpIdentityLocked') : undefined} /><small>{t('settings.mcpNameHelp')}</small></label><label>{t('settings.mcpTransport')}<select value={mcpTransport} onChange={(event) => switchMcpTransport(event.target.value as McpTransport)} disabled={mcpMode === 'view'}><option value="stdio">{t('settings.mcpTransportStdio')}</option><option value="http">{t('settings.mcpTransportHttp')}</option></select><small>{t('settings.mcpTransportHelp')}</small></label></div>
+                {mcpTransport === 'http' ? <>
+                  <label>{t('settings.mcpUrl')}<input value={mcpUrl} onChange={(event) => setMcpUrl(event.target.value)} placeholder={t('settings.mcpUrlPlaceholder')} disabled={mcpMode === 'view'} /><small>{t('settings.mcpUrlHint')}</small></label>
+                  <label>{t('settings.mcpHeaders')}<textarea rows={3} value={mcpHeaders} onChange={(event) => setMcpHeaders(event.target.value)} placeholder={t('settings.mcpHeadersPlaceholder')} disabled={mcpMode === 'view'} /><small>{t('settings.mcpHeadersHint')}</small></label>
+                </> : <>
+                  <label>{t('settings.mcpCommand')}<input value={mcpCommand} onChange={(event) => setMcpCommand(event.target.value)} placeholder={t('settings.mcpCommandPlaceholder')} disabled={mcpMode === 'view'} /><small>{t('settings.mcpCommandHint')}</small></label>
+                  <label>{t('settings.mcpArgs')}<textarea rows={3} value={mcpArgs} onChange={(event) => setMcpArgs(event.target.value)} placeholder={t('settings.mcpArgsPlaceholder')} disabled={mcpMode === 'view'} /><small>{t('settings.mcpArgsHint')}</small></label>
+                  <label>{t('settings.mcpEnv')}<textarea rows={3} value={mcpEnv} onChange={(event) => setMcpEnv(event.target.value)} placeholder={t('settings.mcpEnvPlaceholder')} disabled={mcpMode === 'view'} /><small>{t('settings.mcpEnvHint')}</small></label>
+                </>}
+                {/* 「照这样填」放在字段**下面**：会填的人不该每次都被一段示例挡在表单前面。
+                    只在能编辑时出现 —— 查看态里字段本身就摆着真实值，再放一份示例是噪音。 */}
+                {mcpMode !== 'view' && <div className="mcp-example">
+                  <span className="mcp-example-title">{t('settings.mcpExampleTitle')}</span>
+                  {mcpTransport === 'http' ? <>
+                    <p className="mcp-example-row"><span>{t('settings.mcpUrl')}</span><code>{t('settings.mcpExampleUrlHttp')}</code></p>
+                    <p className="mcp-example-row"><span>{t('settings.mcpHeaders')}</span><code>{t('settings.mcpExampleHeadersHttp')}</code></p>
+                    <p className="mcp-example-note">{t('settings.mcpExampleNoteHttp')}</p>
+                  </> : <>
+                    <p className="mcp-example-row"><span>{t('settings.mcpCommand')}</span><code>npx</code></p>
+                    <p className="mcp-example-row"><span>{t('settings.mcpArgs')}</span><code>{t('settings.mcpExampleArgsStdio')}</code></p>
+                    <p className="mcp-example-note">{t('settings.mcpExampleNoteStdio')}</p>
+                  </>}
+                </div>}
+                <label>{t('settings.mcpDescription')}<input value={mcpDescription} onChange={(event) => setMcpDescription(event.target.value)} placeholder={t('settings.mcpDescriptionPlaceholder')} disabled={mcpMode === 'view'} /></label>
+                <label className="settings-toggle"><input type="checkbox" checked={mcpRequired} disabled={mcpMode === 'view'} onChange={(event) => setMcpRequired(event.target.checked)} /><span>{t('settings.mcpRequired')}</span><HelpTip text={t('settings.mcpRequiredHelp')} title={t('settings.mcpRequired')} /></label>
+                {mcpTools && mcpTools.length > 0 && <div className="mcp-tools"><span className="mcp-tools-label">{t('settings.mcpTools', { count: mcpTools.length })}</span><div className="skill-tags">{mcpTools.map((tool) => <code key={tool}>{tool}</code>)}</div></div>}
+                <p className="mcp-test-note">{mcpTransport === 'http' ? t('settings.mcpTestNoteHttp') : t('settings.mcpTestNote')}</p>
+                {mcpMode !== 'view' && <div className="settings-actions">{mcpMode === 'edit' && <button className="danger-button" disabled={busy} onClick={() => void deleteCurrentMcp()}><Trash2 size={15} /> {t('settings.mcpDelete')}</button>}<button className="secondary-button" disabled={busy} onClick={cancelEditMcp}>{t('common.cancel')}</button><button className="secondary-button" disabled={busy || mcpTesting || mcpFormIncomplete} onClick={() => void runMcpProbe()}>{mcpTesting ? t('settings.mcpTesting') : t('settings.mcpTest')}</button><button className="primary-button" disabled={busy || mcpTesting || mcpFormIncomplete} onClick={() => void saveMcp()}><Save size={15} /> {t('settings.mcpSave')}</button></div>}
               </>}
             </div></div></div>}
             {tab === 'language' && <div className="settings-section language-switcher"><div className="section-heading"><div><h3>{t('lang.switchTitle')}</h3><p>{t('lang.switchDesc')}</p></div></div><div className="language-options"><button type="button" className={lang === 'zh' ? 'is-active' : ''} onClick={() => setLang('zh')}>中文</button><button type="button" className={lang === 'en' ? 'is-active' : ''} onClick={() => setLang('en')}>English</button></div></div>}

@@ -385,6 +385,55 @@ class RolesManager:
             role_cfg = yaml.safe_load(file) or {}
         return {**defaults, **role_cfg}
 
+    def iter_role_configs(self, *, include_defaults: bool = False):
+        """逐个产出 ``(role_id, role_type, effective_config)``。
+
+        给「谁引用了某个名字」这类反向查询用（如 MCP 注册表的 ``roles_referencing``）。
+
+        返回的必须是**合并 default 之后**的配置：在 ``default.yaml`` 里声明 mcp、skills
+        这类列表恰恰是最常见的用法，只看角色自己那份会漏掉全部引用者 —— 而漏报的后果是
+        用户以为某个东西没人用，删掉了。默认情况下保持 MCP 查询的历史语义，不把 default
+        本身列为可选角色；需要覆盖节点可选的 default 时显式传入 ``include_defaults``。
+
+        不做成 HTTP 端点：它把每个角色的完整配置都读出来，而 ``list_roles()`` 返回的是给
+        下拉框用的轻量列表。两者用途不同，别混成一条接口。
+        """
+        entries = []
+        if include_defaults:
+            entries.extend(
+                {"id": "default", "type": subdir.lower()}
+                for subdir in _ROLE_SUBDIRS
+            )
+        entries.extend(self.list_roles())
+        for entry in entries:
+            role_id, role_type = entry["id"], entry["type"]
+            try:
+                yield role_id, role_type, self._effective_role_config(role_id, role_type)
+            except yaml.YAMLError as error:
+                # 单个角色的 yaml 坏掉不该让整轮查询失败：调用方问的是「还有谁在引用」，
+                # 一个坏文件不该把其余角色的答案一起吞掉。它本来也跑不起来，会另有报错。
+                logger.warning("Skipping role %s: invalid YAML — %s", role_id, error)
+            except KeyError:
+                continue
+
+    def roles_referencing_skill(self, skill_id: str) -> list[dict[str, str]]:
+        """返回声明该 Skill 的角色，包含两类 default 及其有效配置继承者。"""
+        hits: set[tuple[str, str]] = set()
+        for role_id, role_type, config in self.iter_role_configs(include_defaults=True):
+            skills = config.get("skills") if isinstance(config, dict) else None
+            if isinstance(skills, str):
+                names = [skills]
+            elif isinstance(skills, list):
+                names = [str(item) for item in skills]
+            else:
+                names = []
+            if skill_id in names:
+                hits.add((role_type, role_id))
+        return [
+            {"id": role_id, "type": role_type}
+            for role_type, role_id in sorted(hits)
+        ]
+
     def _get_field_catalog(
         self, role_type: str
     ) -> tuple[dict[str, Any], dict[str, Any]]:

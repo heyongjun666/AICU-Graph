@@ -1,10 +1,14 @@
 """Tests for the multi-session graph API."""
 
+import contextlib
+import json
 import threading
 import time
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import pytest
+import yaml
 from fastapi.testclient import TestClient
 
 from executables.base import Executable, ExecutableContext
@@ -12,6 +16,7 @@ from executables.manager import Manager
 from executables.registry import ExecutableRegistry
 from executables.worker import Worker
 from runtime.models import LogLevel, NodeStatus
+from runtime.repo_paths import REPO_ROOT
 from runtime.role_pools_manager import RolePoolsManager
 from runtime.roles_manager import RolesManager
 from runtime.session_manager import SessionManager
@@ -594,6 +599,10 @@ def test_role_and_skill_crud_use_isolated_managers(session_manager, tmp_path):
         assert [item["id"] for item in client.get("/v1/skills").json()["skills"]] == [
             "focused-review"
         ]
+        detail = client.get("/v1/skills/focused-review")
+        assert detail.status_code == 200
+        assert detail.json()["referencing_roles"] == []
+        assert client.get("/v1/skills/../bad").status_code in {400, 404}
 
 
 def test_session_settings_filter_secrets_and_switch_new_workspace(
@@ -1373,3 +1382,488 @@ def test_deleting_a_pool_leaves_bound_sessions_untouched(session_manager, tmp_pa
 
         assert client.get(url).json()["config"]["candidate_roles"] == ["code", "test"]
         assert session_manager.get_session(session_id).runtime.candidate_roles == ["code", "test"]
+
+
+# =============================================================================
+# MCP 注册表：设置页「MCP」标签页背后的增删改查与连通性测试
+#
+# 隔离手法与角色/技能一致：注册表指向 tmp_path 里的一份临时文件，绝不碰仓库根那份真的
+# mcp_servers.json —— 它随 git 跟踪，被测试写坏会直接进 diff。
+# =============================================================================
+
+#: 仓库自带的探针 server（注册表里的 echo-probe）：真起一次子进程就能验「测试连接」。
+ECHO_SPEC = {"name": "echo-probe", "command": "python3", "args": ["tests/mcp_echo_server.py"]}
+
+
+def _mcp_app(session_manager, tmp_path: Path, servers: dict | None = None, roles=()):
+    """建一个注册表与角色目录都隔离的 app，返回 ``(app, 注册表路径)``。
+
+    ``roles`` 是 ``(role_type, role_id, config)`` 序列，用来测「谁引用了这个 server」。
+    """
+    registry = tmp_path / "mcp_servers.json"
+    registry.write_text(
+        json.dumps(
+            {"_comment": ["keep me"], "servers": servers or {}}, ensure_ascii=False, indent=2
+        ),
+        encoding="utf-8",
+    )
+    roles_dir = tmp_path / "roles"
+    for role_type, role_id, config in roles:
+        target = roles_dir / role_type.capitalize() / f"{role_id}.yaml"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(yaml.safe_dump(config, allow_unicode=True), encoding="utf-8")
+
+    app = create_session_app(
+        session_manager,
+        RolesManager(str(roles_dir)),
+        SkillsManager(str(tmp_path / "skills")),
+        mcp_registry_path=str(registry),
+    )
+    return app, registry
+
+
+def _servers(client) -> list[dict]:
+    return client.get("/v1/mcp/servers").json()["servers"]
+
+
+class TestMcpRegistryEndpoints:
+    def test_crud_round_trip(self, session_manager, tmp_path):
+        app, _ = _mcp_app(session_manager, tmp_path, {"keep": {"command": "node"}})
+
+        with TestClient(app) as client:
+            created = client.post("/v1/mcp/servers", json={**ECHO_SPEC, "description": "探针"})
+            assert created.status_code == 201, created.text
+            assert created.json()["required"] is True
+
+            assert [item["name"] for item in _servers(client)] == ["echo-probe", "keep"]
+
+            updated = client.patch(
+                "/v1/mcp/servers/echo-probe", json={**ECHO_SPEC, "description": "探针", "required": False}
+            )
+            assert updated.status_code == 200
+            assert updated.json()["required"] is False
+
+            assert client.delete("/v1/mcp/servers/echo-probe").status_code == 204
+            assert [item["name"] for item in _servers(client)] == ["keep"]
+
+    def test_duplicate_name_conflicts(self, session_manager, tmp_path):
+        app, _ = _mcp_app(session_manager, tmp_path, {"echo-probe": {"command": "node"}})
+        with TestClient(app) as client:
+            assert client.post("/v1/mcp/servers", json=ECHO_SPEC).status_code == 409
+
+    def test_bad_entry_can_be_repaired_and_new_create_preserves_it(
+        self, session_manager, tmp_path
+    ):
+        """设置页必须能在其它坏条目存在时创建新条目并修复坏条目。"""
+        app, registry = _mcp_app(
+            session_manager, tmp_path, {"broken": {"command": ""}}
+        )
+        with TestClient(app) as client:
+            created = client.post(
+                "/v1/mcp/servers", json={**ECHO_SPEC, "name": "fresh"}
+            )
+            assert created.status_code == 201, created.text
+            raw_after_create = json.loads(registry.read_text(encoding="utf-8"))
+            assert raw_after_create["servers"]["broken"] == {"command": ""}
+            assert "fresh" in raw_after_create["servers"]
+
+            repaired = client.patch(
+                "/v1/mcp/servers/broken",
+                json={**ECHO_SPEC, "name": "broken"},
+            )
+            assert repaired.status_code == 200, repaired.text
+
+        raw_after_repair = json.loads(registry.read_text(encoding="utf-8"))
+        assert raw_after_repair["servers"]["broken"]["command"] == "python3"
+        assert raw_after_repair["servers"]["broken"]["args"] == ECHO_SPEC["args"]
+
+    def test_duplicate_409_does_not_rewrite_a_bad_entry(self, session_manager, tmp_path):
+        app, registry = _mcp_app(
+            session_manager, tmp_path, {"broken": {"command": "", "keep": "me"}}
+        )
+        before = registry.read_bytes()
+        with TestClient(app) as client:
+            rejected = client.post(
+                "/v1/mcp/servers",
+                json={**ECHO_SPEC, "name": "broken"},
+            )
+        assert rejected.status_code == 409
+        assert registry.read_bytes() == before
+
+    def test_malformed_registry_is_400_for_read_create_and_update_without_rewrite(
+        self, session_manager, tmp_path
+    ):
+        registry = tmp_path / "mcp_servers.json"
+        registry.write_text("{ not json", encoding="utf-8")
+        before = registry.read_bytes()
+        app = create_session_app(
+            session_manager,
+            RolesManager(str(tmp_path / "roles")),
+            SkillsManager(str(tmp_path / "skills")),
+            mcp_registry_path=str(registry),
+        )
+        with TestClient(app) as client:
+            responses = [
+                client.get("/v1/mcp/servers"),
+                client.post("/v1/mcp/servers", json=ECHO_SPEC),
+                client.patch("/v1/mcp/servers/echo-probe", json=ECHO_SPEC),
+            ]
+        assert [response.status_code for response in responses] == [400, 400, 400]
+        assert registry.read_bytes() == before
+
+    def test_name_cannot_be_changed(self, session_manager, tmp_path):
+        """名字是注册表的键、也是角色 yaml 里的引用，改它要同步重写所有引用方。
+
+        与角色 id 同一惯例：不可改，要改就是新建 + 删旧。
+        """
+        app, _ = _mcp_app(session_manager, tmp_path, {"echo-probe": {"command": "node"}})
+        with TestClient(app) as client:
+            renamed = client.patch("/v1/mcp/servers/echo-probe", json={**ECHO_SPEC, "name": "other"})
+            assert renamed.status_code == 400
+
+    def test_updating_or_deleting_unknown_name_is_404(self, session_manager, tmp_path):
+        app, _ = _mcp_app(session_manager, tmp_path)
+        with TestClient(app) as client:
+            assert client.patch(
+                "/v1/mcp/servers/nope", json={**ECHO_SPEC, "name": "nope"}
+            ).status_code == 404
+            assert client.delete("/v1/mcp/servers/nope").status_code == 404
+
+    def test_invalid_name_is_rejected_before_it_reaches_the_registry(
+        self, session_manager, tmp_path
+    ):
+        """名字最终会变成 CLI 的配置键（grok 的 TOML 表名、codex 的 -c 键路径）。
+
+        带 `.` 的写法在入口就该挡掉 —— 放过它，错误会延后到某个 CLI 报一句与 MCP 无关的话。
+        """
+        app, registry = _mcp_app(session_manager, tmp_path)
+        with TestClient(app) as client:
+            rejected = client.post("/v1/mcp/servers", json={**ECHO_SPEC, "name": "echo.probe"})
+            assert rejected.status_code == 422
+        assert json.loads(registry.read_text(encoding="utf-8"))["servers"] == {}
+
+    def test_blank_command_is_rejected_by_the_business_layer(self, session_manager, tmp_path):
+        """Pydantic 的 min_length 挡不住全空白串，那要业务层的 validate_server 挡。"""
+        app, registry = _mcp_app(session_manager, tmp_path)
+        with TestClient(app) as client:
+            rejected = client.post("/v1/mcp/servers", json={**ECHO_SPEC, "command": "   "})
+            assert rejected.status_code == 400
+        assert json.loads(registry.read_text(encoding="utf-8"))["servers"] == {}
+
+    def test_saving_does_not_rewrite_relative_paths(self, session_manager, tmp_path):
+        """在界面上保存一次，不能把注册表里的相对路径换成写死在本机的绝对路径。
+
+        相对路径是「clone 下来即可用」这条约定的载体；被换成绝对路径后功能照常，换台机器
+        才炸。顺带守住 _comment —— 那是写给改这个文件的人看的说明。
+        """
+        app, registry = _mcp_app(session_manager, tmp_path)
+        with TestClient(app) as client:
+            assert client.post("/v1/mcp/servers", json=ECHO_SPEC).status_code == 201
+
+        text = registry.read_text(encoding="utf-8")
+        assert "tests/mcp_echo_server.py" in text
+        assert str(REPO_ROOT) not in text, "相对路径被写成了本机绝对路径"
+        assert json.loads(text)["_comment"] == ["keep me"]
+
+    def test_broken_registry_is_a_readable_error_not_a_crash(self, session_manager, tmp_path):
+        registry = tmp_path / "mcp_servers.json"
+        registry.write_text("{ not json", encoding="utf-8")
+        app = create_session_app(
+            session_manager,
+            RolesManager(str(tmp_path / "roles")),
+            SkillsManager(str(tmp_path / "skills")),
+            mcp_registry_path=str(registry),
+        )
+        with TestClient(app) as client:
+            assert client.get("/v1/mcp/servers").status_code == 400
+
+
+class TestMcpRegistryReferencingRoles:
+    """删除确认框里那行「还有谁在用」就是这里返回的东西。"""
+
+    def test_roles_declaring_the_name_are_reported(self, session_manager, tmp_path):
+        app, _ = _mcp_app(
+            session_manager,
+            tmp_path,
+            {"echo-probe": {"command": "node"}},
+            roles=[
+                ("worker", "mcp_probe", {"mcp": ["echo-probe"]}),
+                ("worker", "plain", {"skills": []}),
+            ],
+        )
+        with TestClient(app) as client:
+            assert _servers(client)[0]["referencing_roles"] == [
+                {"id": "mcp_probe", "type": "worker"}
+            ]
+
+    def test_mcp_declared_in_default_yaml_counts_for_every_role_of_that_type(
+        self, session_manager, tmp_path
+    ):
+        """在 default.yaml 里声明 mcp 是最常见的用法 —— 那样该类型下每个角色都在引用。
+
+        只看角色自己那份 yaml 会漏掉全部引用者，用户就会以为这个 server 没人用，删掉。
+        """
+        app, _ = _mcp_app(
+            session_manager,
+            tmp_path,
+            {"echo-probe": {"command": "node"}},
+            roles=[
+                ("worker", "default", {"mcp": ["echo-probe"]}),
+                ("worker", "dev", {}),
+                ("manager", "boss", {}),
+            ],
+        )
+        with TestClient(app) as client:
+            # default 本身不是可选角色（list_roles 跳过），被算作引用者的是继承了它的 dev；
+            # manager 那边没有 default.yaml，不该被算进来。
+            assert _servers(client)[0]["referencing_roles"] == [{"id": "dev", "type": "worker"}]
+
+
+class TestMcpProbeEndpoint:
+    def test_reports_the_tools_the_server_exposes(self, session_manager, tmp_path):
+        """真起一次子进程 —— 「测试连接」按钮背后就是这一条。"""
+        app, _ = _mcp_app(session_manager, tmp_path)
+        with TestClient(app) as client:
+            probed = client.post("/v1/mcp/probe", json=ECHO_SPEC)
+        assert probed.status_code == 200, probed.text
+        assert "probe_echo" in probed.json()["tools"]
+
+    def test_probes_the_submitted_values_not_the_saved_ones(self, session_manager, tmp_path):
+        """改完还没保存就该能测。
+
+        注册表里存的是坏的、请求体里给的是好的，探测必须按请求体走 —— 否则用户每次都得先
+        存下一份自己都不确定对不对的定义，才轮到测。
+        """
+        app, _ = _mcp_app(
+            session_manager,
+            tmp_path,
+            {"echo-probe": {"command": "definitely-not-a-command"}},
+        )
+        with TestClient(app) as client:
+            assert client.post("/v1/mcp/probe", json=ECHO_SPEC).status_code == 200
+
+    def test_reports_an_unstartable_command(self, session_manager, tmp_path):
+        """错误原句来自 probe_server（含命令名与 stderr 尾部），前端不重写。"""
+        app, _ = _mcp_app(session_manager, tmp_path)
+        with TestClient(app) as client:
+            failed = client.post(
+                "/v1/mcp/probe", json={**ECHO_SPEC, "command": "definitely-not-a-command"}
+            )
+        assert failed.status_code == 400
+        assert "definitely-not-a-command" in failed.json()["detail"]
+
+    def test_required_false_does_not_silence_a_manual_test(self, session_manager, tmp_path):
+        """required 只决定节点启动时要不要因它失败，手动点「测试」永远要看到错误。
+
+        走 probe_servers 的话这里会返回 200 空结果，用户读到的就是「测过了，没事」。
+        """
+        app, _ = _mcp_app(session_manager, tmp_path)
+        with TestClient(app) as client:
+            failed = client.post(
+                "/v1/mcp/probe",
+                json={**ECHO_SPEC, "command": "definitely-not-a-command", "required": False},
+            )
+        assert failed.status_code == 400
+
+
+# ---- 远程（Streamable HTTP）条目 ----
+
+REMOTE_SPEC = {
+    "name": "remote-probe",
+    "url": "https://mcp.example.com/mcp",
+    "headers": {"Authorization": "Bearer t"},
+}
+
+
+@contextlib.contextmanager
+def _fake_remote(tools=("remote_echo",)):
+    """一个只在本机、端口由系统分配的假远程 MCP 端点。
+
+    与 tests/test_mcp_client.py 里那个同源，这里要验的是**端点这一层**把注册表里的
+    一条远程定义原样送到了预检手里，所以额外记下收到的请求头 —— 「headers 有没有真的
+    发出去」只有真端点看得见。
+
+    用端口 0 而不是写死：本仓库有一条硬约束，8080 上跑着常驻的 AICU 服务，测试不许碰它。
+    """
+    seen: list[dict] = []
+
+    class Handler(BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
+        def do_POST(self):
+            raw = self.rfile.read(int(self.headers.get("Content-Length") or 0))
+            try:
+                body = json.loads(raw)
+            except json.JSONDecodeError:
+                body = {}
+            seen.append({"headers": dict(self.headers), "body": body})
+            method = body.get("method")
+            if method == "notifications/initialized":
+                self.send_response(202)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
+            if method == "initialize":
+                result = {
+                    "protocolVersion": "2024-11-05",
+                    "capabilities": {},
+                    "serverInfo": {"name": "fake", "version": "1"},
+                }
+            elif method == "tools/list":
+                result = {"tools": [{"name": name} for name in tools]}
+            else:
+                result = None
+            payload = (
+                {"jsonrpc": "2.0", "id": body.get("id"), "result": result}
+                if result is not None
+                else {"jsonrpc": "2.0", "id": body.get("id"), "error": {"code": -32601}}
+            )
+            encoded = json.dumps(payload).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(encoded)))
+            self.end_headers()
+            self.wfile.write(encoded)
+
+        def log_message(self, *args):
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield f"http://127.0.0.1:{server.server_address[1]}/mcp", seen
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+class TestMcpRegistryRemoteEntries:
+    """远程条目与本地条目共用同一套端点，差别全在 validate_server 那一层。"""
+
+    def test_remote_spec_round_trip(self, session_manager, tmp_path):
+        app, registry = _mcp_app(session_manager, tmp_path)
+        with TestClient(app) as client:
+            created = client.post("/v1/mcp/servers", json=REMOTE_SPEC)
+            assert created.status_code == 201, created.text
+            assert created.json()["url"] == REMOTE_SPEC["url"]
+
+            listed = _servers(client)[0]
+            assert listed["url"] == REMOTE_SPEC["url"]
+            assert listed["headers"] == REMOTE_SPEC["headers"]
+
+        # 落到文件里的只有 url/headers —— 不写一个空的 command，否则下次读到的人会以为
+        # 这条定义了命令却没填（_parse_entry 也正是按「有没有 url」判传输）。
+        on_disk = json.loads(registry.read_text(encoding="utf-8"))["servers"]["remote-probe"]
+        assert on_disk["url"] == REMOTE_SPEC["url"]
+        assert "command" not in on_disk and "args" not in on_disk
+
+    def test_remote_and_local_entries_coexist(self, session_manager, tmp_path):
+        app, _ = _mcp_app(session_manager, tmp_path, {"echo-probe": {"command": "node"}})
+        with TestClient(app) as client:
+            assert client.post("/v1/mcp/servers", json=REMOTE_SPEC).status_code == 201
+            by_name = {item["name"]: item for item in _servers(client)}
+
+        assert by_name["remote-probe"]["url"] == REMOTE_SPEC["url"]
+        # 本地条目不带 url/headers：多两个恒为空的键只会让人以为要填。
+        assert "url" not in by_name["echo-probe"]
+
+    def test_remote_entries_can_be_referenced_by_roles(self, session_manager, tmp_path):
+        """「还有谁在用」对远程条目同样要算 —— 否则删除确认框会少报引用者。"""
+        app, _ = _mcp_app(
+            session_manager,
+            tmp_path,
+            {"remote-probe": {"url": REMOTE_SPEC["url"]}},
+            roles=[("worker", "mcp_probe", {"mcp": ["remote-probe"]})],
+        )
+        with TestClient(app) as client:
+            assert _servers(client)[0]["referencing_roles"] == [
+                {"id": "mcp_probe", "type": "worker"}
+            ]
+
+    @pytest.mark.parametrize(
+        "overrides",
+        [
+            pytest.param({"command": "python3"}, id="url-and-command"),
+            pytest.param({"url": None}, id="neither"),
+            pytest.param({"args": ["--x"]}, id="url-and-args"),
+            pytest.param({"env": {"A": "1"}}, id="url-and-env"),
+            pytest.param({"headers": {"X": "1"}, "url": None}, id="headers-without-url"),
+            pytest.param({"url": "ftp://example.com/mcp"}, id="ftp-scheme"),
+            pytest.param({"url": "   "}, id="blank-url"),
+        ],
+    )
+    def test_contradictory_remote_specs_are_rejected(
+        self, session_manager, tmp_path, overrides
+    ):
+        """混着给必须**报错**，不能静默丢掉其中一组。
+
+        静默丢掉的后果是「存进去了但没生效」，用户要到节点起不来时才发现 —— 与本轮
+        修的 _resolve_path 把 `@scope/pkg` 改坏是同一类坏法。
+
+        ``url`` 给 None 是「不传」的意思（pydantic 默认值就是 None），不是空串。
+        """
+        spec = {**REMOTE_SPEC, **overrides}
+        if spec.get("url") is None:
+            spec.pop("url")
+        app, _ = _mcp_app(session_manager, tmp_path)
+        with TestClient(app) as client:
+            rejected = client.post("/v1/mcp/servers", json=spec)
+        assert rejected.status_code == 400, rejected.text
+
+    def test_header_injection_is_refused_with_our_own_message(self, session_manager, tmp_path):
+        """换行会把一个 header 变成两个 —— 错误必须是我们可读的那句，不是 urllib 的原话。"""
+        app, _ = _mcp_app(session_manager, tmp_path)
+        with TestClient(app) as client:
+            rejected = client.post(
+                "/v1/mcp/servers",
+                json={**REMOTE_SPEC, "headers": {"X-Token": "a\r\nX-Evil: 1"}},
+            )
+        assert rejected.status_code == 400, rejected.text
+        assert "换行" in rejected.json()["detail"]
+
+
+class TestMcpProbeEndpointRemote:
+    """「测试连接」按钮对远程条目也要真连一次，并且带上注册表里的 headers。"""
+
+    def test_reports_the_tools_the_remote_server_exposes(self, session_manager, tmp_path):
+        app, _ = _mcp_app(session_manager, tmp_path)
+        with _fake_remote(tools=("remote_echo", "other")) as (url, _):
+            with TestClient(app) as client:
+                probed = client.post("/v1/mcp/probe", json={**REMOTE_SPEC, "url": url})
+        assert probed.status_code == 200, probed.text
+        assert probed.json()["tools"] == ["remote_echo", "other"]
+
+    def test_the_submitted_headers_reach_the_remote_end(self, session_manager, tmp_path):
+        """测的就是请求体里的那份定义 —— headers 没发出去的话，远端会 401，而用户
+        只会看到「连不上」，永远猜不到是凭据没带上。"""
+        app, _ = _mcp_app(session_manager, tmp_path)
+        with _fake_remote() as (url, seen):
+            with TestClient(app) as client:
+                probed = client.post(
+                    "/v1/mcp/probe",
+                    json={**REMOTE_SPEC, "url": url, "headers": {"Authorization": "Bearer abc"}},
+                )
+        assert probed.status_code == 200, probed.text
+        assert seen and all(r["headers"].get("Authorization") == "Bearer abc" for r in seen)
+
+    def test_probes_the_submitted_url_not_the_saved_one(self, session_manager, tmp_path):
+        app, _ = _mcp_app(
+            session_manager, tmp_path, {"remote-probe": {"url": "http://127.0.0.1:1/mcp"}}
+        )
+        with _fake_remote() as (url, _):
+            with TestClient(app) as client:
+                assert client.post(
+                    "/v1/mcp/probe", json={**REMOTE_SPEC, "url": url}
+                ).status_code == 200
+
+    def test_an_unreachable_remote_is_a_readable_error(self, session_manager, tmp_path):
+        """错误原句来自 probe_server（含地址与原因），前端不重写。"""
+        app, _ = _mcp_app(session_manager, tmp_path)
+        with TestClient(app) as client:
+            failed = client.post(
+                "/v1/mcp/probe", json={**REMOTE_SPEC, "url": "http://127.0.0.1:1/mcp"}
+            )
+        assert failed.status_code == 400
+        assert "127.0.0.1:1" in failed.json()["detail"]

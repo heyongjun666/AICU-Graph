@@ -62,11 +62,13 @@ class TestCrud:
         with pytest.raises(KeyError):
             sm.get_skill("ghost")
 
-    @pytest.mark.parametrize("bad", ["Bad", "1x", "a b", ""])
-    def test_save_rejects_invalid_id(self, tmp_path, bad):
+    @pytest.mark.parametrize("bad", ["Bad", "1x", "a b", "", "../x", "x/../y", "/tmp/x"])
+    def test_save_and_get_reject_invalid_id(self, tmp_path, bad):
         sm = SkillsManager(str(tmp_path))
         with pytest.raises(ValueError):
             sm.save_skill(bad, "ok\n")
+        with pytest.raises(ValueError):
+            sm.get_skill(bad)
 
     @pytest.mark.parametrize("content", ["", "   "])
     def test_save_rejects_empty_content(self, tmp_path, content):

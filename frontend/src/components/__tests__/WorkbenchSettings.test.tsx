@@ -1,25 +1,30 @@
 // @vitest-environment jsdom
 import React from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import WorkbenchSettings from '../WorkbenchSettings';
 import * as api from '../../utils/api';
-import { CliInfo, GlobalConfig, ProviderPreset, RoleField, RoleInfo } from '../../types';
+import { CliInfo, GlobalConfig, McpServerInfo, ProviderPreset, RoleField, RoleInfo } from '../../types';
 
 vi.mock('../../utils/api', () => ({
+  createMcpServer: vi.fn(),
   createRole: vi.fn(),
   createRolePool: vi.fn(),
   createSkill: vi.fn(),
+  deleteMcpServer: vi.fn(),
   deleteRolePool: vi.fn(),
   getEffectiveBaseUrl: vi.fn(),
   getGlobalConfig: vi.fn(),
+  getMcpServers: vi.fn(),
   getRole: vi.fn(),
   getRolePools: vi.fn(),
   getRoleSchema: vi.fn(),
   getRoles: vi.fn(),
   getSkill: vi.fn(),
   getSkills: vi.fn(),
+  probeMcpServer: vi.fn(),
   updateGlobalConfig: vi.fn(),
+  updateMcpServer: vi.fn(),
   updateRole: vi.fn(),
   updateRolePool: vi.fn(),
   updateSkill: vi.fn(),
@@ -64,6 +69,7 @@ beforeEach(() => {
     fields,
   });
   vi.mocked(api.getRolePools).mockResolvedValue([]);
+  vi.mocked(api.getMcpServers).mockResolvedValue([]);
   // 生效地址由后端算（真实规则见 tests/test_cli_adapters.py::TestEffectiveBaseUrl）。
   // 这里只回显已配置的地址，判据不落在这份 stub 里 —— 前端本来就不该复刻那套规则。
   vi.mocked(api.getEffectiveBaseUrl).mockImplementation(async ({ apiBaseUrl }) => ({
@@ -882,5 +888,487 @@ describe('WorkbenchSettings Provider 下拉与模型形态', () => {
       api_base_url: 'https://api.openai.com/v1' });
     await waitFor(() => expect(providerSelect().value).toBe('__manual__'));
     expect(addressInput().value).toBe('https://api.openai.com/v1');
+  });
+});
+
+describe('WorkbenchSettings MCP registry', () => {
+  const echoServer: McpServerInfo = {
+    name: 'echo-probe',
+    command: 'python3',
+    args: ['tests/mcp_echo_server.py'],
+    env: { MCP_TOKEN: 'x' },
+    description: '探针',
+    required: true,
+  };
+
+  const renderSettings = () =>
+    render(<WorkbenchSettings open onClose={() => {}} onSaved={() => {}} />);
+
+  /** 顶部导航里的 tab 按钮（正文标题与 tab 同名，直接 getByText 会命中两个）。 */
+  const tabButton = (label: string) =>
+    Array.from(document.querySelectorAll('.settings-nav button'))
+      .find((button) => button.textContent === label) as HTMLButtonElement;
+
+  const openMcpTab = async () => {
+    fireEvent.click(tabButton('MCP'));
+    await waitFor(() => expect(api.getMcpServers).toHaveBeenCalled());
+  };
+
+  /**
+   * 某个字段的控件。
+   *
+   * 限定在 ``.mcp-form label`` 里找，不能按文字全屏找：示例块的行标题与字段同名
+   * （「启动程序」「参数」…）—— 那个同名是**故意**的，用户要的就是字段与例子的对应关系，
+   * 所以该改的是查法，不是界面。
+   */
+  const fieldOf = (label: string) =>
+    (Array.from(document.querySelectorAll('.mcp-form label')) as HTMLLabelElement[])
+      .find((element) => element.textContent?.startsWith(label))
+      ?.querySelector('input, textarea') as HTMLInputElement;
+
+  const buttonOf = (label: string) =>
+    screen.getByText(label).closest('button') as HTMLButtonElement;
+
+  /** section-heading 右侧的「编辑」/「新建」按钮。 */
+  const headingButton = (label: string) =>
+    Array.from(document.querySelectorAll('.section-heading-actions button'))
+      .find((button) => button.textContent?.includes(label)) as HTMLButtonElement;
+
+  const cliOf = (overrides: Partial<CliInfo>): CliInfo => ({
+    id: 'pi', display_name: 'Pi', installed: true, priority: 1, models: [],
+    supports_mcp: false, mcp_unwired_reason: null, ...overrides,
+  });
+
+  it('lists the registry and prefills the form with what the user actually wrote', async () => {
+    vi.mocked(api.getMcpServers).mockResolvedValue([echoServer]);
+    renderSettings();
+    await openMcpTab();
+
+    expect(await screen.findByText('echo-probe')).toBeDefined();
+    expect(fieldOf('名称').value).toBe('echo-probe');
+    // 名字是注册表的键、也是角色 yaml 里的引用，改它要同步重写所有引用方 → 不可改
+    expect(fieldOf('名称').disabled).toBe(true);
+    expect(fieldOf('启动程序').value).toBe('python3');
+    // args 存的是**原始写法**（相对路径照原样显示），解析成绝对路径是运行时的事
+    expect(fieldOf('参数').value).toBe('tests/mcp_echo_server.py');
+    expect(fieldOf('环境变量').value).toBe('MCP_TOKEN=x');
+    expect((fieldOf('连不上时让节点启动失败') as unknown as HTMLInputElement).checked).toBe(true);
+  });
+
+  it('updates the selected server instead of creating a new one', async () => {
+    vi.mocked(api.getMcpServers).mockResolvedValue([echoServer]);
+    vi.mocked(api.updateMcpServer).mockResolvedValue(echoServer);
+    renderSettings();
+    await openMcpTab();
+    fireEvent.click(headingButton('编辑'));
+
+    fireEvent.change(fieldOf('说明'), { target: { value: '改过的说明' } });
+    fireEvent.click(buttonOf('保存 MCP server'));
+
+    await waitFor(() => expect(api.updateMcpServer).toHaveBeenCalled());
+    expect(vi.mocked(api.updateMcpServer).mock.calls[0]).toEqual([
+      'echo-probe',
+      {
+        name: 'echo-probe', command: 'python3', args: ['tests/mcp_echo_server.py'],
+        env: { MCP_TOKEN: 'x' }, description: '改过的说明', required: true,
+      },
+    ]);
+    expect(api.createMcpServer).not.toHaveBeenCalled();
+  });
+
+  it('creates a new server, splitting args one per line so an arg may contain spaces', async () => {
+    vi.mocked(api.createMcpServer).mockResolvedValue({ ...echoServer, name: 'my-probe' });
+    renderSettings();
+    await openMcpTab();
+
+    expect(await screen.findByText('暂无 MCP server，点击「新建 MCP server」创建。')).toBeDefined();
+    // 未选中任何条目时是只读态，保存/删除都不该出现
+    expect(screen.queryByText('保存 MCP server')).toBeNull();
+
+    fireEvent.click(headingButton('新建 MCP server'));
+    fireEvent.change(fieldOf('名称'), { target: { value: 'my-probe' } });
+    fireEvent.change(fieldOf('启动程序'), { target: { value: 'npx' } });
+    // 第二行含空格。按空格分会把它劈成两个参数**且不报错**，用户只能从 server 那边
+    // 一句莫名其妙的报错反推回来 —— 所以必须一行一个。
+    fireEvent.change(fieldOf('参数'), { target: { value: '-y\n--config a b.json\n' } });
+    fireEvent.click(buttonOf('保存 MCP server'));
+
+    await waitFor(() => expect(api.createMcpServer).toHaveBeenCalledWith({
+      name: 'my-probe', command: 'npx', args: ['-y', '--config a b.json'],
+      env: {}, description: '', required: true,
+    }));
+    expect(api.updateMcpServer).not.toHaveBeenCalled();
+  });
+
+  it('refuses an env line without "=" instead of silently dropping it', async () => {
+    vi.mocked(api.getMcpServers).mockResolvedValue([echoServer]);
+    renderSettings();
+    await openMcpTab();
+    fireEvent.click(headingButton('编辑'));
+
+    // 后端只会收到解析结果，这一行会被静默丢掉 —— 用户以为存进去了。所以必须在这里拦。
+    fireEvent.change(fieldOf('环境变量'), { target: { value: 'MCP_TOKEN=x\nBROKEN' } });
+    fireEvent.click(buttonOf('保存 MCP server'));
+
+    expect((await screen.findAllByText('环境变量需写成 KEY=VALUE，变量名以字母或下划线开头')).length)
+      .toBeGreaterThan(0);
+    expect(api.updateMcpServer).not.toHaveBeenCalled();
+  });
+
+  it('names the roles still referencing the server in the delete confirmation', async () => {
+    const confirmMock = vi.fn(() => true);
+    vi.stubGlobal('confirm', confirmMock);
+    vi.mocked(api.getMcpServers)
+      .mockResolvedValueOnce([
+        { ...echoServer, referencing_roles: [{ id: 'mcp_probe', type: 'worker' }] },
+      ])
+      .mockResolvedValue([]);
+    vi.mocked(api.deleteMcpServer).mockResolvedValue(undefined);
+    renderSettings();
+    await openMcpTab();
+    fireEvent.click(headingButton('编辑'));
+    fireEvent.click(buttonOf('删除 MCP server'));
+
+    await waitFor(() => expect(api.deleteMcpServer).toHaveBeenCalledWith('echo-probe'));
+    // 删掉之后那些角色下次启动会当场报错 —— 这一行字是用户唯一的判断依据
+    expect(String(confirmMock.mock.calls[0][0])).toContain('mcp_probe');
+    vi.unstubAllGlobals();
+  });
+
+  it('probes the values on screen, not the saved ones, and shows the exposed tools', async () => {
+    vi.mocked(api.getMcpServers).mockResolvedValue([echoServer]);
+    vi.mocked(api.probeMcpServer).mockResolvedValue(['probe_echo']);
+    renderSettings();
+    await openMcpTab();
+    fireEvent.click(headingButton('编辑'));
+
+    // 改成一个还没保存的值：否则用户每次都得先存下一份自己都不确定对不对的定义，才轮到测
+    fireEvent.change(fieldOf('参数'), { target: { value: 'tests/mcp_echo_server.py\n--verbose' } });
+    fireEvent.click(buttonOf('测试连接'));
+
+    await waitFor(() => expect(api.probeMcpServer).toHaveBeenCalledWith(
+      expect.objectContaining({ args: ['tests/mcp_echo_server.py', '--verbose'] }),
+    ));
+    expect(await screen.findByText('probe_echo')).toBeDefined();
+    expect(api.updateMcpServer).not.toHaveBeenCalled();
+  });
+
+  it('shows the backend sentence verbatim when the probe fails', async () => {
+    // 这句由后端写好（含命令名、超时、stderr 尾部）。前端重写一份的话，两边就会各自漂移。
+    const reason = "MCP server 'echo-probe' 启动失败：找不到命令 'definitely-not-a-command'";
+    vi.mocked(api.getMcpServers).mockResolvedValue([echoServer]);
+    vi.mocked(api.probeMcpServer).mockRejectedValue(new Error(reason));
+    renderSettings();
+    await openMcpTab();
+    fireEvent.click(headingButton('编辑'));
+    fireEvent.click(buttonOf('测试连接'));
+
+    expect((await screen.findAllByText(reason)).length).toBeGreaterThan(0);
+  });
+
+  it('lists the installed CLIs whose MCP is not wired, using the backend-provided reason', async () => {
+    vi.mocked(api.getGlobalConfig).mockResolvedValue({
+      config: { workspace_root: null, cli_name: null, model: null, api_base_url: null, api_key_env: null },
+      clis: [
+        cliOf({ id: 'pi', display_name: 'Pi', mcp_unwired_reason: '需要先安装 pi-mcp 扩展' }),
+        cliOf({ id: 'agy', display_name: 'Agy', installed: false, mcp_unwired_reason: 'AICU 还没接' }),
+        cliOf({ id: 'kimi', display_name: 'Kimi', supports_mcp: true, mcp_unwired_reason: null }),
+      ],
+      default_cli: 'pi',
+    });
+    renderSettings();
+    await openMcpTab();
+
+    // 未安装的 Agy 不列（下拉里根本选不到）；已接入的 Kimi 不列；成因逐字来自后端。
+    expect(await screen.findByText(
+      '这些 CLI 还没接入 MCP：Pi — 需要先安装 pi-mcp 扩展。用它们启动的节点即使角色声明了 MCP 也用不上。',
+    )).toBeDefined();
+  });
+});
+
+describe('WorkbenchSettings MCP 远程条目', () => {
+  const remoteServer: McpServerInfo = {
+    name: 'notion',
+    // 后端对远程条目也回空值，形状与本地保持一致 —— 前端不该靠「有没有这些键」判传输。
+    command: '',
+    args: [],
+    env: {},
+    url: 'https://mcp.example.com/mcp',
+    headers: { Authorization: 'Bearer t' },
+    description: '远程服务',
+    required: true,
+  };
+
+  const renderSettings = () =>
+    render(<WorkbenchSettings open onClose={() => {}} onSaved={() => {}} />);
+
+  const tabButton = (label: string) =>
+    Array.from(document.querySelectorAll('.settings-nav button'))
+      .find((button) => button.textContent === label) as HTMLButtonElement;
+
+  const openMcpTab = async () => {
+    fireEvent.click(tabButton('MCP'));
+    await waitFor(() => expect(api.getMcpServers).toHaveBeenCalled());
+  };
+
+  /**
+   * 表单里某个字段的 <label>。
+   *
+   * 必须限定在 ``.mcp-form label`` 上找，不能直接按文字全屏找：示例块的行标题与字段同名
+   * （「启动程序」「参数」「地址」「请求头」）—— 那个同名是**故意**的，用户要的就是这个对应
+   * 关系，所以撞车的是查法不是界面。同理也不能拿来判断字段在不在。
+   */
+  const formLabel = (label: string) =>
+    (Array.from(document.querySelectorAll('.mcp-form label')) as HTMLLabelElement[])
+      .find((element) => element.textContent?.startsWith(label)) as HTMLLabelElement;
+
+  const fieldOf = (label: string) =>
+    formLabel(label).querySelector('input, textarea') as HTMLInputElement;
+
+  /** 传输下拉：它是这一组字段里唯一的 select，所以按 label 找得到。 */
+  const transportOf = () => formLabel('传输方式').querySelector('select') as HTMLSelectElement;
+
+  const buttonOf = (label: string) =>
+    screen.getByText(label).closest('button') as HTMLButtonElement;
+
+  const headingButton = (label: string) =>
+    Array.from(document.querySelectorAll('.section-heading-actions button'))
+      .find((button) => button.textContent?.includes(label)) as HTMLButtonElement;
+
+  /** 某个字段在不在屏幕上（不在 = 这一组字段被藏起来了）。同样只看 label，不看示例。 */
+  const hasField = (label: string) =>
+    Array.from(document.querySelectorAll('.mcp-form label'))
+      .some((element) => element.textContent?.startsWith(label));
+
+  it('prefills the transport from what was saved rather than from a stored key', async () => {
+    vi.mocked(api.getMcpServers).mockResolvedValue([remoteServer]);
+    renderSettings();
+    await openMcpTab();
+
+    // 传输不另存字段：有没有 url 就是传输本身，与后端 transport_of 同一条判据。
+    expect(transportOf().value).toBe('http');
+    expect(fieldOf('地址').value).toBe('https://mcp.example.com/mcp');
+    expect(fieldOf('请求头').value).toBe('Authorization=Bearer t');
+    // 本地那三个框一个都不在 —— 留着旧 command 挨着 URL，用户就会同时提交两样。
+    expect(hasField('启动程序')).toBe(false);
+    expect(hasField('参数')).toBe(false);
+    expect(hasField('环境变量')).toBe(false);
+  });
+
+  it('sends only the remote fields once the transport is switched', async () => {
+    vi.mocked(api.createMcpServer).mockResolvedValue({ ...remoteServer, name: 'my-remote' });
+    renderSettings();
+    await openMcpTab();
+    fireEvent.click(headingButton('新建 MCP server'));
+
+    fireEvent.change(fieldOf('名称'), { target: { value: 'my-remote' } });
+    fireEvent.change(fieldOf('启动程序'), { target: { value: 'python3' } });
+    fireEvent.change(transportOf(), { target: { value: 'http' } });
+
+    // 切传输要清掉另一组：不清的话那个 python3 会跟着 URL 一起提交，而后端对
+    // 「url 与 command 同时给」是**报错**不是忽略 —— 用户看到的将是一句无从解释的话。
+    expect(hasField('启动程序')).toBe(false);
+    fireEvent.change(fieldOf('地址'), { target: { value: 'https://example.com/mcp' } });
+    fireEvent.change(fieldOf('请求头'), { target: { value: 'X-Api-Key=k\n' } });
+    fireEvent.click(buttonOf('保存 MCP server'));
+
+    await waitFor(() => expect(api.createMcpServer).toHaveBeenCalledWith({
+      name: 'my-remote',
+      url: 'https://example.com/mcp',
+      headers: { 'X-Api-Key': 'k' },
+      description: '',
+      required: true,
+    }));
+  });
+
+  it('keeps the stdio payload byte-for-byte what it was before', async () => {
+    vi.mocked(api.getMcpServers).mockResolvedValue([
+      { name: 'echo-probe', command: 'npx', args: ['-y', 'pkg'], env: { A: '1' }, description: 'x', required: false },
+    ]);
+    vi.mocked(api.updateMcpServer).mockResolvedValue({
+      name: 'echo-probe', command: 'npx', args: ['-y', 'pkg'], env: { A: '1' }, description: 'x', required: false,
+    });
+    renderSettings();
+    await openMcpTab();
+    fireEvent.click(headingButton('编辑'));
+    fireEvent.click(buttonOf('保存 MCP server'));
+
+    // 一次都没碰过传输下拉的条目，提交的仍该是原来那五个键 —— 不许凭空多出 url/headers。
+    await waitFor(() => expect(api.updateMcpServer).toHaveBeenCalledWith('echo-probe', {
+      name: 'echo-probe', command: 'npx', args: ['-y', 'pkg'], env: { A: '1' },
+      description: 'x', required: false,
+    }));
+  });
+
+  it('refuses a URL that is empty or not http(s)', async () => {
+    renderSettings();
+    await openMcpTab();
+    fireEvent.click(headingButton('新建 MCP server'));
+    fireEvent.change(fieldOf('名称'), { target: { value: 'my-remote' } });
+    fireEvent.change(transportOf(), { target: { value: 'http' } });
+
+    // 地址空着时按钮就是灰的：这里只判「空没空」，格式对不对留到点下去时说。
+    expect(buttonOf('保存 MCP server').disabled).toBe(true);
+
+    fireEvent.change(fieldOf('地址'), { target: { value: 'ftp://example.com/mcp' } });
+    fireEvent.click(buttonOf('保存 MCP server'));
+    expect((await screen.findAllByText('地址需以 http:// 或 https:// 开头')).length).toBeGreaterThan(0);
+    expect(api.createMcpServer).not.toHaveBeenCalled();
+  });
+
+  it('refuses a header line without "=" instead of silently dropping it', async () => {
+    renderSettings();
+    await openMcpTab();
+    fireEvent.click(headingButton('新建 MCP server'));
+    fireEvent.change(fieldOf('名称'), { target: { value: 'my-remote' } });
+    fireEvent.change(transportOf(), { target: { value: 'http' } });
+    fireEvent.change(fieldOf('地址'), { target: { value: 'https://example.com/mcp' } });
+    fireEvent.change(fieldOf('请求头'), { target: { value: 'Authorization=Bearer t\nBROKEN' } });
+    fireEvent.click(buttonOf('保存 MCP server'));
+
+    // 同样的理由：后端只收到解析结果，这一行会被静默丢掉，用户以为凭据带上了。
+    expect((await screen.findAllByText('请求头需写成 NAME=VALUE，一行一个')).length).toBeGreaterThan(0);
+    expect(api.createMcpServer).not.toHaveBeenCalled();
+  });
+
+  it('probes the remote entry through the same button', async () => {
+    vi.mocked(api.getMcpServers).mockResolvedValue([remoteServer]);
+    vi.mocked(api.probeMcpServer).mockResolvedValue(['search']);
+    renderSettings();
+    await openMcpTab();
+    fireEvent.click(headingButton('编辑'));
+    fireEvent.change(fieldOf('地址'), { target: { value: 'https://other.example.com/mcp' } });
+    fireEvent.click(buttonOf('测试连接'));
+
+    // 测的是屏幕上这份：改了地址还没保存就该能测，且请求体里只有远程那组字段。
+    await waitFor(() => expect(api.probeMcpServer).toHaveBeenCalledWith(
+      expect.objectContaining({
+        url: 'https://other.example.com/mcp',
+        headers: { Authorization: 'Bearer t' },
+      }),
+    ));
+    const payload = vi.mocked(api.probeMcpServer).mock.calls[0][0];
+    expect(payload.command).toBeUndefined();
+    expect(await screen.findByText('search')).toBeDefined();
+  });
+
+  it('spells out that only Streamable HTTP works, so an SSE server is not a mystery', async () => {
+    renderSettings();
+    await openMcpTab();
+    fireEvent.click(headingButton('新建 MCP server'));
+    fireEvent.change(transportOf(), { target: { value: 'http' } });
+
+    // 文档里写着 SSE 的远程 server 会硬失败。不说清楚的话，第一个 bug 报告就是
+    // 「我的远程 server 不能用」，而答案在别处。
+    expect(screen.getByText(/只支持 Streamable HTTP/)).toBeDefined();
+    expect(screen.getByText(/SSE/)).toBeDefined();
+  });
+
+  it('shows a worked example of both transports, and swaps it with the transport', async () => {
+    renderSettings();
+    await openMcpTab();
+    fireEvent.click(headingButton('新建 MCP server'));
+
+    // 逐字段的占位符只教语法（「启动程序」框里填程序），而用户卡住的是**一整条定义长什么样**。
+    // 所以这里守的是：例子给出的是可以直接照抄的一整组值，不是一个字段一个提示。
+    expect(screen.getByText('照这样填')).toBeDefined();
+    expect(screen.getByText('npx')).toBeDefined();
+
+    // 按 getAllByText 的规矩，查出的是**空白已归一**的元素，所以这里用空格连写查。
+    // 换行本身另测（见下面那两行）：能不能看见「一行一个」靠的是值里的换行加上
+    // CSS 的 white-space: pre-line，归一之后查得到只说明三个词按序都在。
+    const args = screen.getByText('-y @modelcontextprotocol/server-filesystem /要开放的目录');
+    expect(args.tagName).toBe('CODE');
+    expect(args.textContent?.split('\n')).toEqual([
+      '-y', '@modelcontextprotocol/server-filesystem', '/要开放的目录',
+    ]);
+
+    fireEvent.change(transportOf(), { target: { value: 'http' } });
+
+    expect(screen.getByText('https://mcp.example.com/mcp')).toBeDefined();
+    expect(screen.getByText('Authorization=Bearer 你的令牌')).toBeDefined();
+    // 上一种传输的例子必须跟着消失，否则用户会照着 npx 那组值去填远程表单。
+    expect(screen.queryByText('npx')).toBeNull();
+  });
+
+  it('keeps the example out of the read-only view, where the real values are already shown', async () => {
+    vi.mocked(api.getMcpServers).mockResolvedValue([remoteServer]);
+    renderSettings();
+    await openMcpTab();
+
+    expect(screen.queryByText('照这样填')).toBeNull();
+  });
+});
+
+describe('WorkbenchSettings MCP loading isolation', () => {
+  it('keeps the other settings usable when the MCP registry is unavailable', async () => {
+    vi.mocked(api.getMcpServers).mockRejectedValue(new Error('registry is invalid'));
+    render(<WorkbenchSettings open onClose={() => {}} onSaved={() => {}} />);
+
+    await waitFor(() => expect(within(document.querySelector('.settings-nav') as HTMLElement).getByText('连接')).toBeDefined());
+    fireEvent.click(within(document.querySelector('.settings-nav') as HTMLElement).getByText('MCP'));
+    expect(await screen.findByText('registry is invalid')).toBeDefined();
+    expect(screen.getByText('新建 MCP server')).toBeDefined();
+
+    fireEvent.click(within(document.querySelector('.settings-nav') as HTMLElement).getByText('连接'));
+    expect(document.querySelector('.settings-section h3')?.textContent).toBe('连接');
+  });
+});
+
+describe('WorkbenchSettings 角色侧的 MCP 选择器', () => {
+  /**
+   * 角色字段的可见范围由「default.yaml 的键 ∪ 同类角色用过的键」决定，所以这份 schema
+   * 就代表「mcp 已经进了 default.yaml」之后的样子。
+   */
+  const mcpFields: RoleField[] = [
+    { name: 'mcp', label: 'mcp', type: 'list', default: [], has_default: true },
+  ];
+
+  const mcpServers: McpServerInfo[] = [
+    { name: 'notion', command: '', args: [], env: {}, url: 'https://mcp.example.com/mcp', description: '知识库检索', required: true },
+    { name: 'github', command: 'npx', args: ['-y', 'pkg'], env: {}, description: '仓库操作', required: true },
+  ];
+
+  const renderRoles = async (servers: McpServerInfo[] = mcpServers) => {
+    vi.mocked(api.getRoleSchema).mockResolvedValue({ role_type: 'manager', defaults: {}, fields: mcpFields });
+    vi.mocked(api.getMcpServers).mockResolvedValue(servers);
+    render(<WorkbenchSettings open onClose={() => {}} onSaved={() => {}} />);
+    await waitFor(() => expect(api.getMcpServers).toHaveBeenCalled());
+    // 角色 tab 默认加载的是 worker 的 schema，manager 那份要切过去才会用到。
+    fireEvent.click(screen.getByText('角色'));
+    fireEvent.click(await screen.findByText('新建角色'));
+  };
+
+  it('renders a picker instead of a textarea once mcp is a known field', async () => {
+    await renderRoles();
+
+    // 从前这里是个三行文本框，手打名字、打错不拦。有下拉才谈得上「能挂上」。
+    expect(document.querySelector('.role-field .skill-select')).not.toBeNull();
+    expect(document.querySelector('.role-field textarea')).toBeNull();
+    expect(screen.getByText('未挂载任何 MCP server，可直接勾选')).toBeDefined();
+  });
+
+  it('lists servers, filters by description, and shows the picked one as a chip', async () => {
+    await renderRoles();
+    fireEvent.click(document.querySelector('.skill-select-trigger') as HTMLButtonElement);
+
+    expect(screen.getByText('notion')).toBeDefined();
+    expect(screen.getByText('github')).toBeDefined();
+
+    // 描述不上屏（摆进行里会把菜单撑变形），但要能当搜索关键字 —— 用户记得的是「能干嘛」。
+    fireEvent.change(document.querySelector('.skill-select-search input') as HTMLInputElement, {
+      target: { value: '知识库' },
+    });
+    expect(screen.queryByText('github')).toBeNull();
+
+    fireEvent.click(document.querySelector('.skill-select-item input') as HTMLInputElement);
+    expect(document.querySelector('.skill-select-chip')?.textContent).toBe('notion');
+  });
+
+  it('says so when the registry is empty rather than showing a blank menu', async () => {
+    await renderRoles([]);
+    fireEvent.click(document.querySelector('.skill-select-trigger') as HTMLButtonElement);
+
+    expect(screen.getByText('无匹配 MCP server')).toBeDefined();
   });
 });

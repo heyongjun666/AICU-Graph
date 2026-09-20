@@ -11,6 +11,7 @@ from typing import Callable, Optional, Dict, List, Sequence, Set, Tuple
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from claude_code_agent import ClaudeCodeAgent, CCExecutionError, ModelImageInputError
+from cli_adapters import skills_enabled_clis
 from runtime.mcp_client import probe_servers
 from runtime.mcp_manager import resolve_servers
 from runtime.repo_paths import REPO_ROOT, resolve_repo_relative
@@ -383,8 +384,9 @@ class AICU:
         # skills_dir: skill 源目录（默认 ~/.claude/skills，角色 yaml 可覆盖；
         # 相对路径按项目根解析，如 "skills"）
         # skills: 要启用的 skill 名称列表，从 skills_dir 中查找子目录，
-        # 为每个 CC workspace 创建 .claude/skills/ 软链接，并通过
-        # --setting-sources project 限定 CC 只加载这些 project-level skill。
+        # 为每个 CC 在**它那个 CLI 的项目级 skill 目录**下创建软链接（claude 系是
+        # .claude/skills/ 外加 --setting-sources project；qwen 是 .qwen/skills/，
+        # 依此类推 —— 位置由 adapter.skills_workspace_dir 声明）。
         self.skills: List[str] = list(
             skills if skills is not None else self.role_config.get("skills") or []
         )
@@ -401,6 +403,10 @@ class AICU:
             mcp if mcp is not None else self.role_config.get("mcp") or []
         )
         self._mcp_servers = resolve_servers(self.mcp)
+
+        # 「skills 在这个 CLI 上接不上」的告警只发一次：_install_skills_to_cc 每个 CC
+        # 调一次，N 个 CC 会刷 N 行同样的话。
+        self._skills_unwired_warned = False
 
         # 执行配置由节点/会话在边界传入；密钥只保存环境变量名，不读取或记录真实值。
         self.output_callback = output_callback
@@ -429,8 +435,9 @@ class AICU:
         # ---- 将 role_md 写入每个 CC 的 CLAUDE.md ----
         # AICU 自己写 CLAUDE.md（不依赖 ClaudeCodeAgent 的 instruction_md_path），
         # 因为多个 CC 共享同一个 role_md
-        # 同时按 self.skills 为每个 CC 准备 .claude/skills/ 软链接，
-        # 并通过 enable_project_skills=True 限定 CC 只加载这些 skill
+        # 同时按 self.skills 为每个 CC 准备**它那个 CLI 的**项目级 skill 目录软链接，
+        # 并由 enable_project_skills=True 给 claude 系补上 --setting-sources project
+        # （其余 CLI 没有这个 argv 口子，只走目录）。
         enable_skills = bool(self.skills)
         if enable_skills:
             # 校验 skills_dir 存在
@@ -494,9 +501,9 @@ class AICU:
             if role_context:
                 claude_md = cc.workspace / "CLAUDE.md"
                 claude_md.write_text(role_context, encoding='utf-8')
-            # 写入 .claude/skills/ 软链接（仅当配置了 skills）
+            # 写入该 CLI 自己的项目级 skill 目录（仅当配置了 skills）
             if enable_skills:
-                self._install_skills_to_cc(cc.workspace)
+                self._install_skills_to_cc(cc)
             # 创建交付物子目录（deliverable_dir 指定时），技能内部产物自然隔离
             # V3-2.1：shared_target 模式下 CC 直写共享分区（产物唯一权威），
             # 不建私有 deliverables 死目录（避免 cc_{i}/deliverables 空壳）。
@@ -534,21 +541,44 @@ class AICU:
             return ws / self.deliverable_dir
         return ws
 
-    def _install_skills_to_cc(self, cc_workspace: Path) -> None:
+    def _install_skills_to_cc(self, cc) -> None:
+        """把 self.skills 送进这个 CC 的 CLI 能读到的项目级 skill 目录。
+
+        目录由 adapter 声明（``skills_workspace_dir``），因为**每家读的位置不一样**：
+        claude / internal 读 ``.claude/skills``（另加 ``--setting-sources project``），
+        codebuddy 读 ``.codebuddy/skills``，kimi / codex 读 ``.agents/skills``，
+        qwen 读 ``.qwen/skills``，pi 读 ``.pi/skills``，gemini 读 ``.gemini/skills``，
+        cursor 读 ``.cursor/skills``。
+
+        修复前的形状是把 ``.claude/skills`` 写死、对**所有** CLI 照建 —— 非 claude 系上
+        那是一堆死文件：建了，永远不生效，用户以为配好了。这正是 ``mcp_workspace_files``
+        的 docstring 里记着的那个教训。
+
+        接不上的 CLI（adapter 没声明目录）**只告警、照常跑**，不报错 —— 与 MCP 的硬门禁
+        刻意不同。理由是两者的代价不对称：MCP 没接上时工具根本不存在，任务会以一种
+        看不出原因的方式失败；skills 没接上只是少一份能力加成，任务本身照做。
         """
-        在 CC workspace 下创建 .claude/skills/ 目录，
-        为 self.skills 中每个 skill 创建一个软链接指向 skills_dir/{name}/。
-        已存在的链接/目录会被清空重建，确保 idempotent。
-        """
-        target_dir = cc_workspace / ".claude" / "skills"
-        if target_dir.exists():
-            shutil.rmtree(target_dir)
-        target_dir.mkdir(parents=True, exist_ok=True)
-        for skill_name in self.skills:
-            src = self._user_skills_dir / skill_name
-            dst = target_dir / skill_name
-            # 用软链接，避免拷贝整份 skill 文件；CC 会跟随链接读取 SKILL.md
-            dst.symlink_to(src.resolve())
+        adapter = cc.adapter
+        if adapter.skills_workspace_dir is None:
+            self._warn_skills_unwired(adapter)
+            return
+        adapter.skills_workspace_files(cc.workspace, self._user_skills_dir, self.skills)
+        # 有的 CLI 光摆好目录不算数，还得先「授信」这个项目（现在只有 pi，见
+        # PiAdapter.skills_workspace_trust）。默认实现什么都不做。
+        adapter.skills_workspace_trust(cc.workspace)
+
+    def _warn_skills_unwired(self, adapter) -> None:
+        """角色配了 skills、但这个 CLI 接不上时，告警一次（每个 CC 都会调到这里）。"""
+        if self._skills_unwired_warned:
+            return
+        self._skills_unwired_warned = True
+        print(
+            f"[警告] CLI '{adapter.id}' 的 project-level skill "
+            f"{adapter.skills_unwired_reason()}，"
+            f"本次运行声明的 skill {self.skills} 在它上面不会生效。"
+            f"本次也可以改用已接入 skill 的 CLI"
+            f"（{', '.join(skills_enabled_clis())}）。"
+        )
 
     # ========== CC 调用容错 ==========
 
@@ -822,6 +852,13 @@ class AICU:
     # 非代码目录（缓存/编译产物/环境目录，不是 CC 写的产出）
     NONCODE_DIRS = {
         '__pycache__', '.pytest_cache', 'node_modules', '.git', '.claude',
+        # 各 CLI 的项目级 skill 目录 —— AICU 往这些目录里建 skills 软链（见
+        # _install_skills_to_cc）。不加进来的话，SKILL.md 会被当成 CC 写的代码：
+        # 它是 .md（不在 NONCODE_EXTENSIONS 里）、也不在 NONCODE_FILENAMES 里，
+        # 于是被复制进最优方案目录并出现在 _INDEX.md 的文件清单里。
+        # 代价是「CC 处理的项目里恰好有同名目录时不收」—— 这几个本来就是各家 CLI
+        # 自己的配置目录，排除掉更符合预期。（.claude 早就在这份名单里，同一条理由。）
+        '.qwen', '.pi', '.gemini', '.cursor', '.opencode', '.codebuddy', '.agents',
         '.codegraph', '.venv', 'venv', 'env', '.env', 'dist', 'build', '.next', '.nuxt',
         'target', 'bin', 'obj', '.idea', '.vscode', '.cache', 'coverage',
         '.tox', '.mypy_cache', '.ruff_cache', '__pypackages__',

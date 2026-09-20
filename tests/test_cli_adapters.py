@@ -2134,6 +2134,99 @@ class TestMcpSupportFlag:
         }
 
 
+class TestSkillsSupportFlag:
+    """``skills_workspace_dir`` 的不变量：**声明了就必须真的能把 skill 送到 CLI 手上**。
+
+    与 ``TestMcpSupportFlag`` 守的是同一类东西，但**判据必须另写一套**：那家的
+    ``_injects_anything`` 只枚举四个 MCP 口子（mcp_flags / build_env /
+    mcp_workspace_files / build_base_command+mcp_servers），一个都没覆盖 skill。
+
+    这个属性的性质与 ``supports_mcp`` 不同：它**同时**是能力声明与落盘路径（没有 pi
+    那种运行时探测的维度），所以「声明了却没实现」在类型上不可能，只可能「声明错了」
+    —— 路径是对的但 CLI 不认。那一条靠真机验证守，这里守的是**接线本身是通的**。
+    """
+
+    # 与 claude 系那套 argv 通道同名，但只有它能用这个口子：其余几家有逐字节 argv
+    # 断言，加 flag 会立刻红（见 test_only_claude_family_uses_the_argv_channel）。
+    _ARGV_CHANNEL_IDS = {"claude", "internal", "codebuddy"}
+
+    @staticmethod
+    def _make_skill_dir(tmp_path):
+        """真的建一个目录：基类实现要 ``symlink_to(src.resolve())``，源必须存在。"""
+        skills_dir = tmp_path / "src-skills"
+        # 一条用例里每个 adapter 调一次，同一个 tmp_path 复用 —— 幂等
+        (skills_dir / "guard-probe").mkdir(parents=True, exist_ok=True)
+        (skills_dir / "guard-probe" / "SKILL.md").write_text(
+            "---\nname: guard-probe\ndescription: 探针\n---\n", encoding="utf-8"
+        )
+        return skills_dir
+
+    def _injects_skills(self, adapter, tmp_path) -> bool:
+        """两个口子挨个问一遍：落盘建链接，或 argv 里加 ``--setting-sources``。
+
+        两个都要查 —— 只查落盘的话，一个「目录声明好了但从没被写」的 adapter 会溜过去；
+        只查 argv 的话，非 claude 系全军覆没。
+        """
+        skills_dir = self._make_skill_dir(tmp_path)
+        workspace = tmp_path / "ws"
+        if adapter.skills_workspace_files(workspace, skills_dir, ["guard-probe"]):
+            return True
+        base = dict(model=None, skip_permissions=False, mcp_servers=None)
+        return (
+            adapter.build_base_command(**base, enable_project_skills=True)
+            != adapter.build_base_command(**base, enable_project_skills=False)
+        )
+
+    def test_declared_support_actually_injects(self, tmp_path):
+        for adapter in cli_adapters._ADAPTERS:
+            if adapter.skills_workspace_dir is None:
+                continue
+            assert self._injects_skills(adapter, tmp_path), (
+                f"{adapter.id} 声明了 skills_workspace_dir={adapter.skills_workspace_dir}，"
+                f"但既没落盘也没 argv —— 角色配了 skills 会静默失效"
+            )
+
+    def test_undeclared_support_never_injects(self, tmp_path):
+        """反过来也要守：没接线的 CLI 不得偷偷建目录（否则用户读到「未接入」却在生效）。"""
+        for adapter in cli_adapters._ADAPTERS:
+            if adapter.skills_workspace_dir is not None:
+                continue
+            assert not self._injects_skills(adapter, tmp_path), (
+                f"{adapter.id} 的 skills_workspace_dir 是 None，但有口子仍在注入"
+            )
+
+    def test_only_claude_family_uses_the_argv_channel(self, tmp_path):
+        """``--setting-sources project`` 只能出现在 claude 族的 argv 里。
+
+        其余几家的 ``build_base_command`` 有**逐字节**断言盯着（gemini / antigravity /
+        codex 各一条），有人为了「让 gemini 也生效」往那儿加 flag，那三条会立刻红。
+        这条用例把同一件事再说明白一次：非 claude 系只能走工作区文件这条路。
+        """
+        base = dict(model=None, skip_permissions=False, mcp_servers=None)
+        for adapter in cli_adapters._ADAPTERS:
+            changed = (
+                adapter.build_base_command(**base, enable_project_skills=True)
+                != adapter.build_base_command(**base, enable_project_skills=False)
+            )
+            assert changed == (adapter.id in self._ARGV_CHANNEL_IDS), (
+                f"{adapter.id} 的 enable_project_skills 通道与预期不符"
+            )
+
+    def test_hidden_clis_are_covered_by_the_matrix(self):
+        """隐藏只是「不下发到下拉」，不等于能力缺失 —— 别把 gemini/cursor 漏出验证矩阵。
+
+        这两家在 ``_HIDDEN_CLI_IDS`` 里，前端选不到，但 adapter 仍可被显式指定
+        （会话配置里写 cli_name=gemini）。它们的 skills_workspace_dir 必须是真值，
+        否则那条路径上 skills 会静默失效而没人发现。
+        """
+        by_id = {a.id: a for a in cli_adapters._ADAPTERS}
+        for cli_id in ("gemini", "cursor"):
+            assert cli_id in cli_adapters._HIDDEN_CLI_IDS
+            assert by_id[cli_id].skills_workspace_dir is not None, (
+                f"{cli_id} 是隐藏但可显式指定的 CLI，skills 不该是未接线状态"
+            )
+
+
 class TestMcpWiringGuard:
     """角色配了 mcp、落到 AICU 还没接线的 CLI 上时，必须在建 CC 这一步就报错。
 

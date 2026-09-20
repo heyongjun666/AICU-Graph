@@ -304,7 +304,7 @@ Shared FS（共享分区）是产物单一事实源。
 | `runtime/roles_manager.py` | 扫描 `roles/Manager/` + `roles/Worker/` YAML；`list_roles`（跳过 default.yaml）、`get_role_schema`、`get_role`、`add_role/update_role`；role_id 模式 `^[a-z][a-z0-9_]*$` |
 | `runtime/skills_manager.py` | 扫描带 `SKILL.md` 的目录（主目录 + 额外目录）；`list_skills / get_skill / save_skill` |
 | `runtime/mcp_manager.py` | MCP server 注册表（仓库根 `mcp_servers.json`）读取与名字解析：`load_registry` / `resolve_servers`；`McpServer` 中立表示（command 与 args 分开存，各 CLI 自己序列化）；相对路径按仓库根解析 |
-| `runtime/mcp_client.py` | MCP server 的 stdio 预检：`probe_server`（initialize → notifications/initialized → tools/list）、`probe_servers`（逐个预检，`required=false` 连不上只告警）；连完即收子进程 |
+| `runtime/mcp_client.py` | MCP server 的 stdio 与 Streamable HTTP 预检：`probe_server`（initialize → notifications/initialized → tools/list）、`probe_servers_detailed`（返回 configured / active / tools / failures 三态报告；`required=false` 失败保留告警但不下发 CLI，空工具仍算 active）、`probe_servers`（兼容的工具映射）；stdio 子进程连完即收 |
 | `runtime/repo_paths.py` | `REPO_ROOT` 与 `resolve_repo_relative`（`~` 展开 / 绝对原样 / 相对按仓库根）—— 角色 yaml `skills_dir` 与 MCP 注册表路径共用的唯一一份实现 |
 | `runtime/persistence.py` | `graph.json` 快照的 save/load；graph_version 单调性 |
 | `runtime/sse_manager.py` | `SSEManager` 订阅 EventBus `"*"`，`deque(maxlen=10000, ttl=1800)`，微批合并（同 type <200ms 合并），`get_events_since`（空 → snapshot 回退）、`get_snapshot_event`、`get_stats`、`format_sse` |
@@ -379,7 +379,14 @@ Shared FS（共享分区）是产物单一事实源。
 - **角色配置数据驱动**：加载 `roles/Manager|Worker/{role}.yaml` 覆盖 `default.yaml`；占位符 `{available_roles}` 展开。
 - **Sentinel 语义**：None 哨兵（num_ccs/model/cli_name/audit_rounds 未配置）vs `_UNSET` 哨兵（output_file/final_file/modular_output/generate_instruction 显式未提供）。
 - **`shared_target`**：canonical abs 路径；所有 CC（含多 CC 编排）直写同一共享分区，产物权威 = 分区本身。
-- **工作区结构**：`cc_0..cc_{N-1}/`，每个包含 `CLAUDE.md`（role_md）、`.claude/skills/` 软链 + `--setting-sources project`。
+- **工作区结构**：`cc_0..cc_{N-1}/`，每个包含 `CLAUDE.md`（role_md）、**该 CLI 自己的**项目级
+  skill 目录软链（claude/internal `.claude/skills/`、codebuddy `.codebuddy/skills/`、kimi
+  `.agents/skills/`、codex `.agents/skills/`、qwen `.qwen/skills/`、pi `.pi/skills/`、
+  gemini `.gemini/skills/`、cursor `.cursor/skills/`；claude 系另加 `--setting-sources
+  project`）。以上目录都是真机 A/B 实测的结论，不是从各家文档抄的 —— 目录由
+  `CliAdapter.skills_workspace_dir` 声明，未声明的 CLI（grok/opencode）只告警不报错；
+  pi 另需一份项目信任记录（`CliAdapter.skills_workspace_trust`），否则它的信任门禁会
+  **静默**不加载项目 skill。
   - `cc_N/{output_file}`、`review.json`、`vote_round_M.json`、`audit.json`；
   - `parent/{final_file}`、`aicu_result.json`。
 - 协作产物：`vote_round_M.json`（peer 投票）、`review.json`（评审）、`audit.json`（审计），最终 `aicu_result.json`。
@@ -502,6 +509,8 @@ Shared FS（共享分区）是产物单一事实源。
 | `roles/Worker/default.yaml` | Worker 基类配置 |
 | `roles/Worker/acceptance.yaml` `architecture.yaml` `code.yaml` `data_analysis.yaml` `deploy.yaml` `dev_lead.yaml` `dev_member.yaml` `document.yaml` `grill.yaml` `incremental_plan.yaml` `prototype.yaml` `requirements.yaml` `test.yaml` | 具体 Worker 角色 |
 | `roles/system_role/default.yaml` `roles/system_role/router.yaml` | 系统级角色配置 |
+
+MCP 联调 lab 角色使用 `roles/**/_mcp_lab_*.yaml` 命名，仅供仓库内的本地联调/回归夹具使用；下划线前缀使它们不会进入 AICU 的生产角色面板。生产面板只暴露正常角色，例如 `roles/Worker/mcp_probe.yaml`。仓库根 `mcp_servers.json` 的生产注册表同样只保留可验证的 `echo-probe` 条目，lab 需要的其它通道必须放在测试自己的临时注册表中，不能混入生产配置。
 
 ### 10.7 测试体系（两套后端 + 一套前端）
 

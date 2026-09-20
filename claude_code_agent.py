@@ -123,7 +123,9 @@ class ClaudeCodeAgent:
         :param enable_project_skills: 是否启用 project-level skill 加载。
             True 时命令追加 --setting-sources project，使 CC 只加载 workspace
             下 .claude/skills/ 中的 skill，不加载用户级 ~/.claude/skills/。
-            调用方需自行在 workspace/.claude/skills/ 准备好 skill 软链接/拷贝。
+            **只有 claude 系 CLI 走这条 argv 通道**；其余 CLI 各自读自己名字下的
+            项目级 skill 目录（.qwen/skills、.pi/skills、…），由 AICU 侧按
+            ``CliAdapter.skills_workspace_dir`` 落盘，与这个参数无关。
         :param mcp_servers: 要下发给 CLI 的 MCP server 列表（``list[McpServer]``），
             由 AICU 侧完成注册表解析（runtime/mcp_manager.py）与连通性预检
             （runtime/mcp_client.py）。
@@ -161,7 +163,9 @@ class ClaudeCodeAgent:
 
         # 角色声明了 MCP 但落到一个 AICU 还没接线的 CLI 上时，直接报错而不是静默忽略。
         # 静默忽略的后果是最坏的：任务跑完了、看起来正常，但工具从来不存在 ——
-        # 用户以为配好了。skill 在非 claude 系 CLI 上就是这个问题（软链照建，永不生效）。
+        # 用户以为配好了。skill 曾经就是这个问题（软链照建、永不生效），区别在于
+        # skills 那侧刻意**只告警不报错**（少份参考资料 vs 工具根本不存在，见 aicu.py
+        # 的 _warn_skills_unwired）。
         #
         # 文案刻意说「尚未接入」而不是「不支持」：codex / qwen / agy 这些自己都有 MCP，
         # 只是注入方式各不相同、AICU 还没接线。说成「该 CLI 不支持」是关于 CLI 的假话，

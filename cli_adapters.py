@@ -858,8 +858,8 @@ class CliAdapter:
     #     （实测过程见 AntigravityAdapter）。两者混为一谈会让用户在界面和报错里读到
     #     一句关于 CLI 的假话，然后跑去换 CLI。
     #     角色如果声明了 mcp 而落到这类 CLI 上，AICU 会直接报错而不是静默忽略 ——
-    #     skill 就吃过这个亏：软链对所有 CLI 照建，非 claude 系 CLI 上那是死文件，
-    #     建了但永远不生效。
+    #     skill 曾经吃过这个亏（软链对所有 CLI 照建，非 claude 系上是死文件，建了但
+    #     永远不生效），现已按 CLI 分开接线，见下面的 skills_workspace_dir。
     #   子类可以把它改成 @property：pi 的答案是「看本机装没装那个扩展」，没法用一个
     #     类属性写死（见 _mcp_capability）。
     supports_mcp = False
@@ -870,6 +870,22 @@ class CliAdapter:
     # 只描述路径；内容由 _mcp_workspace_payload 决定。需要往一处写**多个**文件、
     # 或路径不由 workspace 直接决定的 CLI，自己覆盖 mcp_workspace_files 即可。
     mcp_workspace_config: Optional[tuple] = None
+
+
+    # 项目级 skills 目录，**相对 CC 的 workspace 逐段给出**。
+    #   None（默认）—— 这个 CLI 拿不到 AICU 下发的 skill。注意这不等于「该 CLI 不支持
+    #     skill」：codex / opencode / agy 各家都有自己的项目级 skill 机制，只是入口各不
+    #     相同、AICU 还没接线。两者混为一谈会让用户在日志里读到一句关于 CLI 的假话。
+    #   (".qwen", "skills") 这样 —— 基类的 skills_workspace_files 照此建链接。
+    #
+    # 这里**只用一个属性**，不像 MCP 那样「能力布尔 + 路径」两个。因为 MCP 那两个是
+    # 正交的（pi 的 supports_mcp 是运行时探测：路径写死了，本机装没装那个扩展要看
+    # 子进程的输出），而 skills 没有这个维度 —— 「认不认项目级目录」是每家一个常量，
+    # 不随本机装的东西变。路径的有无**就是**能力本身；再加一个 supports_skills 只能是
+    # 它的派生副本，而派生量迟早对不上，那正是 AICU 反复要消灭的 bug 类。
+    #
+    # 真正消灭「声明了却没实现」的是测试不变量（TestSkillsSupportFlag），不是字段个数。
+    skills_workspace_dir: Optional[tuple] = None
 
     def mcp_flags(self, mcp_servers: list) -> list:
         """argv 形式的 MCP 注入，追加在命令末尾（默认不注入，返回空）。
@@ -950,6 +966,60 @@ class CliAdapter:
         return "尚未接入 AICU"
 
     # ---- 环境变量 ----
+
+    # ---- 项目级 skill ----
+
+    def skills_workspace_files(self, workspace, skills_dir, skill_names: list) -> list:
+        """把 ``skill_names`` 链接进 ``<workspace>/<skills_workspace_dir>/``，返回落盘路径。
+
+        ``skills_workspace_dir`` 为 None 时返回空（= 这个 CLI 拿不到 AICU 下发的 skill，
+        调用方据此告警）。默认实现建**软链**：skill 是多文件目录（含脚本与引用），拷一份
+        不值当；pi 的 ``canonicalizePath`` 明确解软链查重，说明官方就是按链接设计的。
+
+        覆盖点是留给 opencode 那种「塞目录不够」的 CLI —— 它的项目级 skill 要走配置键
+        ``skills.paths``，光有目录是假接线。与 ``mcp_workspace_files`` 同一手法。
+
+        与 ``mcp_workspace_files`` 的**生命周期不同**：MCP 的文件是每次运行前写、跑完就删
+        （``_drop_transient``）；skill 是 AICU 构造期建一次、长期留存，所以调用方是
+        ``AICU._install_skills_to_cc`` 而不是 ``ClaudeCodeAgent.chat``。
+        """
+        if not skills_dir or not skill_names or not self.skills_workspace_dir:
+            return []
+        target_dir = Path(workspace).joinpath(*self.skills_workspace_dir)
+        # 幂等：清空重建，与 AICU 一直以来的语义一致（重复构造同一个 workspace 不叠加）
+        if target_dir.exists():
+            shutil.rmtree(target_dir)
+        target_dir.mkdir(parents=True, exist_ok=True)
+        written = []
+        for name in skill_names:
+            dst = target_dir / name
+            # 用软链，避免拷贝整份 skill 文件；CLI 会跟随链接读取 SKILL.md
+            dst.symlink_to((Path(skills_dir) / name).resolve())
+            written.append(dst)
+        return written
+
+    def skills_workspace_trust(self, workspace) -> Optional[Path]:
+        """落盘 skill 之外，这个 CLI 还要不要一份**项目信任记录**？默认不要。
+
+        与 ``mcp_workspace_files`` 的「顺带补一条信任记录」是同一件事，但这里的默认是
+        「不要」而不是「要」：目前只有 pi 有这道门禁，其余各家的项目级目录是先信任后读
+        （kimi 的信任门禁只卡 MCP，不卡 skill —— 2026-09-20 去掉信任记录后 A/B 仍然 PASS）。
+
+        返回「本次新写出来的那条记录」（或 None）。**与 MCP 那条的差别在生命周期**：
+        MCP 的信任记录跟着一次性配置一起被 ``_drop_transient`` 删掉；skill 是长期留存的，
+        所以这条记录也留着 —— 删了下次运行还得再写一遍，而它必须**在 CLI 启动前**就在。
+        """
+        return None
+
+    def skills_unwired_reason(self) -> str:
+        """``skills_workspace_dir`` 为 None 时，一个能直接嵌进
+        ``"CLI 'x' 的 project-level skill ___"`` 这句话里的**原因短语**。
+
+        默认是「尚未接入 AICU」—— 绝大多数情况下这是实话。与 ``mcp_unwired_reason``
+        同一条纪律：说「AICU 还没接」，不说「该 CLI 不支持」。后者是关于 CLI 的假话
+        （各家都有自己的项目级 skill 机制），用户读了会跑去换 CLI。
+        """
+        return "尚未接入 AICU"
 
     def build_env(
         self,
@@ -1291,6 +1361,77 @@ def _write_kimi_trust(workspace) -> Optional[Path]:
     return record
 
 
+def _write_pi_trust(workspace) -> Optional[Path]:
+    """写一条 pi 的 workspace 信任记录并返回路径；**已经是 true 则返回 None**。
+
+    为什么需要它 —— 源码级证据在 ``dist/core/project-trust.js`` 的 resolveProjectTrusted：
+
+        if (options.trustOverride !== undefined) return options.trustOverride;
+        if (!hasTrustRequiringProjectResources(cwd)) return true;
+        const decision = trustStore.get(cwd);      // 查 trust.json 里最近的一条
+        if (decision !== null) return decision;
+        switch (options.defaultProjectTrust ?? "ask") { ... }
+        if (!options.projectTrustContext.hasUI) return false;   // ← 无头模式走到这里
+
+    而 ``hasTrustRequiringProjectResources``（同上目录的 trust-manager.js）看的是
+    ``<cwd>/.pi/<entry>``，entry 来自 ``TRUST_REQUIRING_PROJECT_CONFIG_RESOURCES`` ——
+    里面**明写着 "skills"**。也就是说：项目里一有 ``.pi/skills/``，这个项目就变成
+    「需要授信」；AICU 跑的 ``pi -p`` 没有 UI，于是 ``hasUI`` 为假、直接返回 false，
+    **项目技能一个都不加载**。
+
+    实测与此吻合（2026-09-20，同一份 ``.pi/skills/`` 软链，只差这条记录）：
+      没有记录 → A 组 8 轮全空，连内置清单都没列出来（正是「整个项目层被跳过」的样子）
+      有记录   → A 组答出金丝雀，B 组没有
+
+    ``defaultProjectTrust`` 那个设置项能把默认值改成 always，但它是**用户级**的、
+    且会作用于用户的所有项目 —— 为了跑通 AICU 去改用户的安全默认值，不是我们该做的事。
+    按项目写一条精确的记录才是等价的、更窄的动作。
+
+    顺带解释了「为什么这个问题一直没被发现」：受信清单里**没有 mcp.json**，所以 pi 的
+    MCP 一路都正常，只有 skill 撞上这道门禁 —— 而它撞上之后的症状是「目录建了、
+    ``ls`` 看着对、永远不生效」。
+
+    信任库是 ``<agent dir>/trust.json``，形状 ``{"<canonical 绝对路径>": true}``；
+    判定时从 cwd 一路往上找最近的一条（``findNearestTrustEntry``）。
+
+    agent dir 按 ``getAgentDir`` 的同序取：``PI_CODING_AGENT_DIR`` 优先，否则
+    ``~/.pi/agent``。跟着这个变量走是必须的 —— pi 从同一个目录读 settings 与信任记录。
+
+    与 ``_write_kimi_trust`` 的两处差别，都是有意的：
+      - **不删**。kimi 那条跟着一次性 MCP 配置被删掉；skill 是长期留存的，删了下次
+        运行还得再写一遍，而它必须在 CLI 启动前就在。代价是 ``trust.json`` 会随运行
+        次数攒下条目 —— 每条形如一行 ``"<workspace>": true``，且指向的是 AICU 自己的
+        workspace，不是用户的项目。
+      - **不认识的文件不动**。``trust.json`` 是 pi 自己的文件（用户可能手工编辑过、
+        也可能来自更新的 pi 版本）。读不出 dict 就整体放弃，绝不覆盖 —— 它是用户的
+        数据，我们只是往里加一行。
+    """
+    agent_dir = os.environ.get("PI_CODING_AGENT_DIR") or str(Path.home() / ".pi" / "agent")
+    trust_path = Path(agent_dir) / "trust.json"
+    # pi 的 canonicalizePath 就是 realpathSync：解软链再比。AICU 给的 workspace 本来
+    # 就是 resolve 过的，这里再 resolve 一次是为了让「探针直接传原串」也成立。
+    key = os.path.realpath(str(workspace))
+    try:
+        data = {}
+        if trust_path.exists():
+            data = json.loads(trust_path.read_text(encoding="utf-8") or "{}")
+            if not isinstance(data, dict):
+                return None
+        if data.get(key) is True:
+            return None
+        data[key] = True
+        trust_path.parent.mkdir(parents=True, exist_ok=True)
+        # 缩进 2 + 尾换行 —— 与 pi 自己 writeTrustFile 的写法同形（它还会按键排序，
+        # 这里不排：键的先后 pi 不关心，而排序会把用户的原有顺序也一并改掉）
+        trust_path.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n",
+                              encoding="utf-8")
+    except (OSError, ValueError):
+        # 与 _write_kimi_trust 同一条纪律：写不进去不该让整次运行失败，退化成
+        # 「skill 不生效」（用户会收到 AICU 的告警），而不是变成一个硬故障。
+        return None
+    return trust_path
+
+
 def _mcp_servers_settings_json(servers: list) -> str:
     """qwen 项目级 ``.qwen/settings.json`` 里的 ``mcpServers`` 段。
 
@@ -1372,7 +1513,8 @@ class ClaudeCodeAdapter(CliAdapter):
             cmd.extend(self.allowed_tools_flag(allowed_tools))
             cmd.extend(["--permission-mode", "dontAsk"])
         if enable_project_skills:
-            # 限定只加载 workspace/.claude/skills/ 中的 project-level skill
+            # 限定只加载项目级 skill —— 落到哪儿由子类的 skills_workspace_dir 决定
+            # （codebuddy 虽共用本类，目录是 .codebuddy/skills；argv 这一段它照样要）
             cmd.extend(["--setting-sources", "project"])
         return cmd
 
@@ -1407,6 +1549,14 @@ class ClaudeCodeAdapter(CliAdapter):
         return ([], True)
 
     supports_mcp = True
+
+    # claude 与 internal 的项目级 skill 目录（**codebuddy 覆盖成 ``.codebuddy/skills``**，
+    # 见 CodeBuddyAdapter —— 三个 CLI 共用这个类，目录却只有两个相同）。
+    #
+    # 这一族也是唯一走 argv 通道的：目录 + ``--setting-sources project``
+    # （见 build_base_command）。其余 CLI 都只走目录，因为它们的 argv 有逐字节断言
+    # 盯着，不许加 flag。
+    skills_workspace_dir = (".claude", "skills")
 
     def mcp_flags(self, mcp_servers: list) -> list:
         if not mcp_servers:
@@ -1540,6 +1690,22 @@ class CodeBuddyAdapter(ClaudeCodeAdapter):
 
     def __init__(self):
         super().__init__("codebuddy", "CodeBuddy Code", "codebuddy")
+
+    # codebuddy 的项目级 skill 目录是 ``.codebuddy/skills``，**不是**父类的
+    # ``.claude/skills`` —— 尽管它自称 Claude Code 协议克隆、也照收 ``--setting-sources``。
+    #
+    # 2026-09-20 真机 A/B 对照（同一份软链，只换目录；各 8 轮，因为**单轮的 FAIL 不可信**
+    # —— 模型会时不时无视清单直接答 NONE，见探针模块说明）：
+    #   ``.claude/skills``    → 8 轮全无金丝雀，且有几轮**列出了非空清单**（对照组在，
+    #                           所以这是有效 FAIL，不是测量失效）
+    #   ``.codebuddy/skills`` → 第 2 轮答出金丝雀，B 组没有 ⇒ PASS
+    # 它自己的包里也把这一条钉死了：``.codebuddy/skills`` 出现 16 次、
+    # ``.claude/skills`` **0 次**（``.claude/agents``/``.claude/commands`` 倒是有，
+    # 那是兼容旧路径的读入，不是技能目录）。包内字面量是确定性证据，A/B 是佐证。
+    #
+    # 这一处正是「复用父类会静默失效」的样板：三个 CLI 共用 ClaudeCodeAdapter，
+    # 目录却只有两个相同。所以它必须是子类的覆盖，而不是父类的默认值。
+    skills_workspace_dir = (".codebuddy", "skills")
 
     def build_env(
         self,
@@ -1678,6 +1844,25 @@ class CodexAdapter(CliAdapter):
 
     supports_mcp = True
 
+    # 项目级 skill：``.agents/skills``（2026-09-20 真机 A/B 实测 PASS）。
+    #
+    # 这段注释改过三次，过程本身比结论值钱，所以留着：
+    #   1. 最初写的是「codex 无 project-level skill 概念」—— 错的，它在二进制里有
+    #      ``repo skills root`` 与 ``.agents/skills``。
+    #   2. 然后单轮 A/B 两轮都答 NONE，于是判成「试过了，这么接是错的」，写成了 None。
+    #      那个 FAIL 是**测量失效**：``codex exec --json`` 那一轮里模型直接回了一句
+    #      NONE，A、B 都是 —— 对照组是空的，什么都证明不了。
+    #   3. 加了重复轮次（探针的 --repeat）之后，A 组在同一份 ``.agents/skills/`` 上
+    #      原样答出金丝雀，B 组没有 ⇒ PASS。
+    #
+    # 教训：**单轮的 FAIL 不可信，单轮的 PASS 可信** —— 金丝雀是个生造串，没被加载的
+    # CLI 不可能凭空答出来，但「加载了而模型懒得列」随时会发生（见探针模块说明）。
+    #
+    # 另外 codex 的技能还有一条 **Agent Plugin** 通道
+    # （``<repo-root>/.agents/plugins/marketplace.json``、``$CODEX_HOME/skills``），
+    # 与本目录是两条并行的路；我们只走后者，因为它与 AICU 的「往工作区落软链」同构。
+    skills_workspace_dir = (".agents", "skills")
+
     def build_base_command(
         self, *, model: Optional[str], skip_permissions: bool, enable_project_skills: bool,
         mcp_servers: Optional[list] = None,
@@ -1692,7 +1877,10 @@ class CodexAdapter(CliAdapter):
         if skip_permissions:
             # 等价于 Claude Code 的 skip_permissions；文档警示仅在专用沙箱 VM 内使用
             cmd.append("--dangerously-bypass-approvals-and-sandbox")
-        # codex 无 project-level skill 概念，enable_project_skills 忽略
+        # ``enable_project_skills`` 是 claude 系的 argv 通道（`--setting-sources project`），
+        # codex 不走它 —— 它的 skill 由 AICU 落到 <cwd>/.agents/skills/ 生效。
+        # 曾在这里写过「codex 无 project-level skill 概念」，是错的：它在二进制里有
+        # `repo skills root` 与 `.agents/skills` 这个概念。
         return cmd
 
     def print_flags(self, streaming: bool) -> list:
@@ -1908,6 +2096,20 @@ class KimiAdapter(CliAdapter):
     # MCP」，是两件事。
     supports_mcp = True
 
+    # kimi 的项目级 skill 目录是 ``.agents/skills``。
+    #
+    # **曾经写成 ``.claude/skills``**，理由是「与 claude 系同目录、少维护一个路径」。
+    # 2026-09-20 真机 A/B 证伪了它：同一份 skill 软链，放 ``.claude/skills`` 时 kimi
+    # 的技能清单里只有 Built-in，放 ``.agents/skills`` 时清单里多出 ``Project`` 一节、
+    # 金丝雀原样答出。kimi 自己的 bundle 里也从来只有 ``.agents/skills`` 与
+    # ``.kimi-code/skills`` 两个字面量，``.claude/skills`` 一次都没出现 —— 当初那个
+    # 「kimi 读三个目录」的说法是**推出来的**，不是查出来的（它的 import 技能只说明
+    # 能从 ``.claude`` **迁移**进来，迁移与读取是两件事）。
+    #
+    # 这也正是本项目最怕的那种失效：目录建了、``ls`` 看着对、用户以为配好了，实际
+    # 一个字节都没进模型上下文。挑目录不能靠「跟别家一致」推断，只能查字面量 + 真机验。
+    skills_workspace_dir = (".agents", "skills")
+
     def mcp_workspace_files(self, workspace, mcp_servers: Optional[list]) -> list:
         """项目级 ``mcp.json`` 之外，**再补一条 workspace 信任记录**。
 
@@ -2075,6 +2277,13 @@ class QwenAdapter(CliAdapter):
 
     supports_mcp = True
 
+    # 项目级 skill：``<cwd>/.qwen/skills/<name>/SKILL.md``。qwen 自己的文档与提示词里
+    # 都按这个路径写（``.qwen/skills/commit/SKILL.md``、自动生成的 skill 也落在
+    # ``.qwen/skills/``）。``--experimental-skills`` 那个 flag 官方已标为废弃
+    # （"Skills are now enabled by default. This flag is ignored."），所以不需要 argv，
+    # 目录建好即可 —— 这也正合「非 claude 系不走 argv」那条约束。
+    skills_workspace_dir = (".qwen", "skills")
+
     def mcp_workspace_files(self, workspace, mcp_servers: Optional[list]) -> list:
         """写 ``<workspace>/.qwen/settings.json``（qwen 的**项目级**配置）。
 
@@ -2111,7 +2320,9 @@ class QwenAdapter(CliAdapter):
         cmd.extend(["--auth-type", "openai"])
         if skip_permissions:
             cmd.append("--yolo")
-        # qwen 无 Claude project-level skill 概念，enable_project_skills 忽略
+        # ``enable_project_skills`` 是 claude 系的 argv 通道；qwen 的 skill 由 AICU 落到
+        # <cwd>/.qwen/skills/ 生效，不需要也不能加 flag（`--experimental-skills` 已废弃，
+        # 而且这家有逐字节 argv 断言）。曾写的「无 project-level skill 概念」是错的。
         return cmd
 
     def print_flags(self, streaming: bool) -> list:
@@ -2403,6 +2614,18 @@ class OpenCodeAdapter(CliAdapter):
     # 多厂商 CLI，无单一认证 env；sk 注入按模型厂商走 api_key_env_for_model 映射
     api_key_env = None
 
+    # 项目级 skill：**不接线**。opencode 与上面几家不同 —— 它**没有**「把 skill 放进某个
+    # 目录就自动加载」的项目级行为：外部自动加载只认家目录级的 ``~/.claude/skills`` 与
+    # ``~/.agents/skills``；项目级要走配置键 ``skills.paths``。所以接它必须覆盖
+    # ``skills_workspace_files`` 去写配置（同 ``_opencode_config_content`` 那条
+    # ``OPENCODE_CONFIG_CONTENT`` 通道），**光建一个目录是假接线**。
+    #
+    # 2026-09-20 真机 A/B 坐实了这个判断：往工作区塞 ``.opencode/skills/``，A、B 两组的
+    # 清单**逐条相同**（都只有 opencode 自带的 ``customize-opencode``），A 组没有多出
+    # 金丝雀。注意这一家的对照组非空 —— 说明它的技能注入链路本身是通的，模型确实看得见
+    # 一份清单，只是那个目录不在它的加载路径上。这条 FAIL 是有效结论，不是没测出来。
+    skills_workspace_dir = None
+
     def api_key_env_for_model(self, model: Optional[str]) -> Optional[str]:
         return api_key_env_for_vendor(vendor_of_model(model))
 
@@ -2440,7 +2663,9 @@ class OpenCodeAdapter(CliAdapter):
             cmd.extend(["--model", model])
         if skip_permissions:
             cmd.append("--auto")
-        # opencode 无 project-level skill 概念，enable_project_skills 忽略
+        # ``enable_project_skills`` 是 claude 系的 argv 通道；opencode 的项目级 skill
+        # 要走配置键 ``skills.paths``（见 skills_workspace_dir 处的说明），不是往 argv
+        # 加参数。曾写的「无 project-level skill 概念」是错的。
         return cmd
 
     def print_flags(self, streaming: bool) -> list:
@@ -2556,6 +2781,20 @@ class PiAdapter(CliAdapter):
     # 项目层（`/mcp disable` 写的也是它）。
     mcp_workspace_config = (".pi", "mcp.json")
 
+    # 项目级 skill：``<cwd>/.pi/skills``（``CONFIG_DIR_NAME=".pi"`` 与
+    # ``projectSkillsDir = resolve(cwd, CONFIG_DIR_NAME, "skills")``）。
+    # pi 是这一轮最稳的一家：它的 ``canonicalizePath`` 明确**解软链**再查重，说明
+    # 官方就是按「链接进来的 skill」设计的，不像别家要赌扫描器跟不跟软链。
+    skills_workspace_dir = (".pi", "skills")
+
+    def skills_workspace_trust(self, workspace) -> Optional[Path]:
+        """pi 还有一道项目信任门禁，光把目录摆好**不会生效** —— 见 ``_write_pi_trust``。
+
+        这是本适配器与其余各家的唯一区别：别家「目录在 = 生效」，pi 是「目录在 ∧ 授过信
+        = 生效」。所以这一条不是可选增强，而是这条接线**能不能通**的前提。
+        """
+        return _write_pi_trust(workspace)
+
     def api_key_env_for_model(self, model: Optional[str]) -> Optional[str]:
         return api_key_env_for_vendor(vendor_of_model(model))
 
@@ -2588,7 +2827,9 @@ class PiAdapter(CliAdapter):
             cmd.extend(["--model", model])
         if skip_permissions:
             cmd.append("--approve")
-        # pi 无 project-level skill 概念，enable_project_skills 忽略
+        # ``enable_project_skills`` 是 claude 系的 argv 通道；pi 的 skill 由 AICU 落到
+        # <cwd>/.pi/skills/ 生效。曾写的「无 project-level skill 概念」是错的 ——
+        # pi 不但有，还是唯一明确支持软链的一家。
         return cmd
 
     def print_flags(self, streaming: bool) -> list:
@@ -2698,6 +2939,12 @@ class GeminiAdapter(CliAdapter):
     # 走基类的通用实现即可 —— 内容就是标准的 {"mcpServers": {...}}。
     mcp_workspace_config = (".gemini", "settings.json")
 
+    # 项目级 skill：``<project>/.gemini/skills``（全局那份是 ``~/.gemini/skills``，也是
+    # 官方的 skill 安装位置记录点，所以项目级这个路径是同一套命名，不是猜的）。
+    # gemini 另有 ``skills.disabled`` 设置用于禁用，但那与我们「装上就启用」的语义相反，
+    # 不需要写 —— 不写就是不禁用。
+    skills_workspace_dir = (".gemini", "skills")
+
     def mcp_flags(self, mcp_servers: list) -> list:
         """把本次下发的 server 名逐个塞进允许名单。
 
@@ -2730,7 +2977,9 @@ class GeminiAdapter(CliAdapter):
             cmd.append("--yolo")
         # Gemini headless 模式还要求显式信任当前工作目录。
         cmd.append("--skip-trust")
-        # gemini 无 project-level skill 概念，enable_project_skills 忽略
+        # ``enable_project_skills`` 是 claude 系的 argv 通道；gemini 的 skill 由 AICU 落到
+        # <project>/.gemini/skills/ 生效（它另有 <project>/.gemini/settings.json 那条
+        # MCP 路径，两者同一容器）。曾写的「无 project-level skill 概念」是错的。
         return cmd
 
     def print_flags(self, streaming: bool) -> list:
@@ -2817,6 +3066,11 @@ class CursorAdapter(CliAdapter):
     # 项目级 MCP 配置（官方文档：project-specific tools 放 <project>/.cursor/mcp.json，
     # 全局那份在 ~/.cursor/mcp.json）。内容就是标准的 {"mcpServers": {...}}。
     mcp_workspace_config = (".cursor", "mcp.json")
+
+    # 项目级 skill：``<project>/.cursor/skills``。cursor 同时读 ``.claude/skills`` 与
+    # ``.agents/skills``，取自己的 `.cursor` 是因为同名的 MCP 配置也走这条路径容器 ——
+    # 一个 CLI 的所有项目级配置待在同一个目录下，用户翻起来只找一处。
+    skills_workspace_dir = (".cursor", "skills")
 
     def build_base_command(
         self, *, model: Optional[str], skip_permissions: bool, enable_project_skills: bool,
@@ -3145,6 +3399,23 @@ def mcp_enabled_clis() -> list[str]:
         adapter.id
         for adapter in _ADAPTERS
         if adapter.supports_mcp and adapter.id not in _HIDDEN_CLI_IDS
+    ]
+
+
+def skills_enabled_clis() -> list[str]:
+    """已接入 skills 下发、**且用户在下拉里选得到**的 CLI id（按注册顺序）。
+
+    与 ``mcp_enabled_clis`` 同一套纪律，同样的两个理由：从 adapter 派生而不是写死名单；
+    滤掉 ``_HIDDEN_CLI_IDS``，免得把用户指到一个他选不到的 CLI 上。
+
+    差别只在于判据 —— 这里问的是 ``skills_workspace_dir is not None``（路径即能力，
+    见基类该属性的说明），而不是 ``supports_mcp`` 那个可以独立存在的布尔。
+    """
+    return [
+        adapter.id
+        for adapter in _ADAPTERS
+        if adapter.skills_workspace_dir is not None
+        and adapter.id not in _HIDDEN_CLI_IDS
     ]
 
 

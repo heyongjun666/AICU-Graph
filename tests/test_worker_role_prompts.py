@@ -21,6 +21,7 @@
 """
 
 import hashlib
+import json
 import os
 import re
 from pathlib import Path
@@ -33,7 +34,11 @@ from aicu import AICU, _CHECKLIST_APPLICABILITY_NOTE
 
 ROOT = Path(__file__).resolve().parents[1]
 WORKER_DIR = ROOT / "roles" / "Worker"
-ALL_ROLES = sorted(p.stem for p in WORKER_DIR.glob("*.yaml"))
+# 下划线开头的 MCP lab 角色是仓库内联调夹具，不是生产候选角色；它们必须与
+# 正常角色的提示词契约隔离，尤其不能被 Manager 的 available_roles 面板暴露。
+ALL_ROLES = sorted(
+    p.stem for p in WORKER_DIR.glob("*.yaml") if not p.stem.startswith("_")
+)
 
 # pytest 收集期即保证目录存在且非空，避免后续断言静默通过
 assert ALL_ROLES, f"未找到任何 Worker 角色 YAML: {WORKER_DIR}"
@@ -789,3 +794,162 @@ class TestCandidateRolePoolPanel:
         panel = build_available_roles_text(tmp_path / "nope", {"code"})
 
         assert panel == _ROLE_POOL_INVALID_NOTICE
+
+
+# ============================================================================
+# 13. 面板暴露角色的外部工具通道（mcp）
+#
+# Manager 选角色时能看到的只有这个面板（summary / suitable_for / not_for / mcp），
+# 而 suitable_for 是按领域语义写的、**不承载工具通道**。于是「两个角色领域重叠、
+# 只有一个接得上目标系统」时，面板文字对 Manager 完全一样 —— 它只能挑领域最近的，
+# 然后那个角色手上根本没有对应工具。本组钉住的是「通道这一事实必须出现在面板里」。
+#
+# 与之配套的语义解释（`mcp:` 是什么、该怎么据它选角色）在 _ROLE_MCP_NOTICE 里，
+# 同组一并钉；它**只在面板里真出现带通道的角色时才插入**。
+# ============================================================================
+
+from runtime.roles_manager import _ROLE_MCP_NOTICE  # noqa: E402
+
+
+def _roles_dir(tmp_path, **by_subdir):
+    """按 {子目录: {角色名: yaml 文本}} 建一棵临时 roles/ 树。"""
+    for subdir, roles in by_subdir.items():
+        (tmp_path / subdir).mkdir(exist_ok=True)
+        for role_id, body in roles.items():
+            (tmp_path / subdir / f"{role_id}.yaml").write_text(body, encoding="utf-8")
+    return tmp_path
+
+
+class TestRolePanelExposesMcpChannels:
+    def test_unbound_panel_is_byte_identical_to_the_two_arg_default(self, tmp_path):
+        """向后兼容回归钉：未绑池 + 无通道角色的面板必须与历史行为逐字一致。"""
+        root = _roles_dir(
+            tmp_path,
+            Worker={"plain": "summary: 普通角色\nsuitable_for:\n- 写代码\nmcp: []\n"},
+        )
+        panel = build_available_roles_text(root, None)
+
+        assert panel == (
+            "  ### Worker 角色（可用于 exec_type=\"worker\" 的 step）\n"
+            "  格式说明:每条含summary/suitable_for/not_for三件套,"
+            "选角色时须综合判断task关键词是否落在 suitable_for 范围且不被 not_for 否决.\n"
+            "  - **plain**:\n"
+            "      summary: 普通角色\n"
+            "      suitable_for: 写代码\n"
+        )
+        assert _ROLE_MCP_NOTICE not in panel
+
+    def test_role_with_channel_renders_the_line(self, tmp_path):
+        root = _roles_dir(tmp_path, Worker={
+            "coded": "summary: 带通道的角色\nmcp: [github, jira]\n",
+        })
+
+        panel = build_available_roles_text(root, None)
+
+        assert "      mcp: github, jira\n" in panel
+
+    def test_channel_line_sits_under_its_own_role(self, tmp_path):
+        """两个角色一个带通道一个不带：mcp 行不能串到隔壁。"""
+        root = _roles_dir(tmp_path, Worker={
+            "with_ch": "summary: 有通道\nmcp: [github]\n",
+            "without": "summary: 没通道\nmcp: []\n",
+        })
+
+        panel = build_available_roles_text(root, None)
+        with_block = panel.split("  - **with_ch**:")[1].split("  - **without**:")[0]
+        without_block = panel.split("  - **without**:")[1]
+
+        assert "mcp: github" in with_block
+        assert "mcp:" not in without_block
+
+    def test_notice_is_inserted_only_when_some_role_has_a_channel(self, tmp_path):
+        """没有带通道的角色时**不插入**引导 —— 未挂 MCP 的部署提示词不该白白变长。"""
+        root = _roles_dir(tmp_path, Worker={"plain": "summary: 普通\nmcp: []\n"})
+
+        assert _ROLE_MCP_NOTICE not in build_available_roles_text(root, None)
+
+        (root / "Worker" / "wired.yaml").write_text(
+            "summary: 接了通道\nmcp: [github]\n", encoding="utf-8"
+        )
+        assert _ROLE_MCP_NOTICE in build_available_roles_text(root, None)
+
+    def test_notice_follows_the_pool_notice(self, tmp_path):
+        """两条引导都在时，池引导在前（先说候选范围，再说怎么读候选）。"""
+        root = _roles_dir(
+            tmp_path,
+            Manager={"default": "summary: 基类\nmcp: []\n"},
+            Worker={"wired": "summary: 接了通道\nmcp: [github]\n"},
+        )
+
+        panel = build_available_roles_text(root, {"wired"})
+
+        assert panel.index(_ROLE_POOL_NOTICE) < panel.index(_ROLE_MCP_NOTICE)
+
+    def test_role_with_channel_but_no_summary_still_lists_the_channel(self, tmp_path):
+        """没有 summary 但有通道：不能连通道一起吞掉（那正是「配了等于没配」）。
+
+        注意这里走进的是**另一条分支** —— 原兜底句让人去读 role_md，而 role_md 在
+        workspace 边界之外，Manager 读不到。所以有通道时必须自己把通道列出来。
+        """
+        root = _roles_dir(tmp_path, Worker={"bare": "mcp: [monitoring]\n"})
+
+        panel = build_available_roles_text(root, None)
+
+        assert "      mcp: monitoring\n" in panel
+        assert "请直接阅读其 role_md" not in panel
+
+    def test_real_repo_panel_lists_the_probe_channels(self):
+        """真实 roles/ 目录：唯一带通道的 mcp_probe 必须把它列出来。"""
+        panel = _panel(None)
+
+        assert "  - **mcp_probe**:" in panel
+        assert "      mcp: echo-probe\n" in panel
+        assert _ROLE_MCP_NOTICE in panel
+
+    def test_stale_pool_alarm_still_wins_over_the_notice(self, tmp_path):
+        """池全失效时只输出告警 —— 通道引导不能挤进来。"""
+        root = _roles_dir(tmp_path, Worker={"wired": "summary: 接了通道\nmcp: [github]\n"})
+
+        panel = build_available_roles_text(root, {"ghost"})
+
+        assert panel == _ROLE_POOL_INVALID_NOTICE
+
+    def test_notice_contract_explains_external_capability_selection(self, tmp_path):
+        root = _roles_dir(
+            tmp_path,
+            Worker={"wired": "summary: 接了通道\nmcp: [github]\n"},
+        )
+        panel = build_available_roles_text(root, None)
+
+        assert _ROLE_MCP_NOTICE in panel
+        for phrase in (
+            "外部工具通道",
+            "任务要对接的外部系统",
+            "必须选带该通道的角色",
+            "候选缺失",
+        ):
+            assert phrase in _ROLE_MCP_NOTICE
+
+
+class TestRealRepositoryRoleAndMcpContracts:
+    def test_probe_role_is_visible_but_private_lab_roles_are_not(self):
+        panel = _panel(None)
+
+        assert "  - **mcp_probe**:" in panel
+        assert "      mcp: echo-probe\n" in panel
+        assert "_mcp_lab_local" not in panel
+        assert "_mcp_lab_remote" not in panel
+        assert "_mcp_lab_synth" not in panel
+
+    def test_repository_registry_contains_only_the_valid_probe_server(self):
+        registry_path = ROOT / "mcp_servers.json"
+        raw = json.loads(registry_path.read_text(encoding="utf-8"))
+
+        assert set(raw["servers"]) == {"echo-probe"}
+        echo = raw["servers"]["echo-probe"]
+        assert echo["command"] == "python3"
+        assert echo["args"] == ["tests/mcp_echo_server.py"]
+        assert echo["required"] is True
+
+
+# End of real-role/MCP contract tests.

@@ -90,6 +90,22 @@ _ROLE_POOL_INVALID_NOTICE = (
     "  请勿改用池外的角色；请先在会话中重新绑定候选角色池，或如实说明候选角色缺失。"
 )
 
+# 面板里**出现带 mcp 的角色时**才插入的引导（一个都没有时不插入，未挂 MCP 的部署提示词逐字不变，
+# 与 _ROLE_POOL_NOTICE 同一个纪律）。为什么非要有这一段：`mcp:` 这一行是角色可用的**外部系统**
+# 通道（issue 追踪、知识库、监控……），而 suitable_for/not_for 是按领域语义写的、不承载通道。
+# 于是「两个角色领域重叠、只有一个接得上目标系统」时，面板里的文字对 Manager 完全一样 ——
+# 它没有任何依据做区分，只能挑一个领域最近的，然后那个角色手上根本没有对应工具。
+# 这一段的落点必须是「选角色」这一步：等节点建出来再补救就已经选错了人。
+_ROLE_MCP_NOTICE = (
+    "  【外部工具通道】下方部分角色带 `mcp:` 行，列出该角色可用的**外部系统工具**"
+    "（如 issue 追踪、知识库、监控平台）。\n"
+    "  选角色时把「任务要对接的外部系统」也当作一项 Capability 来核对：任务明确要求读写某个"
+    "外部系统时，必须选带该通道的角色，不要选一个领域最近、却只能靠命令行或 HTTP 自己绕过去的角色"
+    "（那样做出来的产物对不上真系统，且从产物里看不出来它绕过）。\n"
+    "  若清单内没有任何角色带所需通道，如实标注候选缺失，不要强行套用最近邻。\n"
+    "  （审查阶段同样按这一条核对：只看 suitable_for 会放过「领域对口、却接不上目标系统」的选择。）"
+)
+
 
 def build_available_roles_text(
     roles_parent: Path, allowed_roles: Optional[Set[str]] = None
@@ -162,9 +178,8 @@ def build_available_roles_text(
         return ""
 
     lines = []
-    if allowed_roles is not None:
-        lines.append(_ROLE_POOL_NOTICE)
     matched = 0                 # 池内真实存在（可渲染）的角色数，用于 fail-loud 判定
+    has_mcp_role = False        # 面板里有没有带外部工具通道的角色（决定插不插 _ROLE_MCP_NOTICE）
     for subdir_name in _ROLE_SUBDIRS:
         subdir = roles_parent / subdir_name
         if not subdir.is_dir():
@@ -206,6 +221,13 @@ def build_available_roles_text(
             suit_list = _normalize_list(data.get("suitable_for"))
             nfor_list = _normalize_list(data.get("not_for"))
 
+            # ---- 提取 mcp（外部系统通道）----
+            # 这一行是 Manager 唯一能据以「按工具通道选角色」的依据，见 _ROLE_MCP_NOTICE。
+            # 为空时**不输出**：绝大多数角色都是 mcp: []，它们的面板必须逐字节不变。
+            mcp_list = _normalize_list(data.get("mcp"))
+            if mcp_list:
+                has_mcp_role = True
+
             if summary:
                 lines.append(f"  - **{r}**:")
                 indent = "      "
@@ -214,6 +236,15 @@ def build_available_roles_text(
                     lines.append(f"{indent}suitable_for: {', '.join(suit_list)}")
                 if nfor_list:
                     lines.append(f"{indent}not_for: {', '.join(nfor_list)}")
+                if mcp_list:
+                    lines.append(f"{indent}mcp: {', '.join(mcp_list)}")
+            elif mcp_list:
+                # 没有 summary 但有通道：不能连通道一起吞掉 —— 那正是这里要修的
+                # 「配了等于没配」。原来的兜底句让人去读 role_md，而 role_md 在
+                # workspace 边界之外，Manager 读不到。
+                lines.append(f"  - **{r}**:")
+                indent = "      "
+                lines.append(f"{indent}mcp: {', '.join(mcp_list)}")
             else:
                 lines.append(f"  - **{r}**: （未提供描述信息，请直接阅读其 role_md 内容判断适用边界）")
         lines.append("")
@@ -226,7 +257,15 @@ def build_available_roles_text(
     if not lines:
         return "  （暂无可用角色）"
 
-    return "\n".join(lines)
+    # 前缀按需拼：未绑池时不插池引导；面板里没有带 mcp 的角色时不插通道引导。
+    # 两条都属于「这段文字只在相关时才该出现」，写死会让绝大多数会话的提示词白白变长。
+    prefix = []
+    if allowed_roles is not None:
+        prefix.append(_ROLE_POOL_NOTICE)
+    if has_mcp_role:
+        prefix.append(_ROLE_MCP_NOTICE)
+
+    return "\n".join(prefix + lines)
 
 
 def _id_to_display_name(role_id: str) -> str:

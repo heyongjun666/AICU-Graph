@@ -69,6 +69,15 @@ skills_dir: skills
 #   - 具体角色应按任务需要声明领域 Skill
 skills: []
 
+# mcp: 该角色 CC 可用的 MCP server 名称列表（在仓库根 mcp_servers.json 中定义）
+#   - 空列表 [] 表示不启用任何 MCP server（CC 行为与未配 MCP 完全一致）
+#   - 这里只写**名字**：command/args/url 等细节集中在 mcp_servers.json 一处维护，
+#     免得同一段将被执行的命令散落在每个角色文件里
+#   - 列表里的名字不存在时，建 CC 那一步会直接报错并列出可用的名字（不静默忽略）
+#   - 例如: mcp: [echo-probe, github]
+#   - 设置页的角色编辑面板与这里读写的是同一份配置
+mcp: []
+
 # ---- 产出文件 ----
 # output_file: CC 生成结果写入的文件名（CC 自己负责写入）
 output_file: output

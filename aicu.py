@@ -12,8 +12,8 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from claude_code_agent import ClaudeCodeAgent, CCExecutionError, ModelImageInputError
 from cli_adapters import skills_enabled_clis
-from runtime.mcp_client import probe_servers
-from runtime.mcp_manager import resolve_servers
+from runtime.mcp_client import probe_servers_detailed
+from runtime.mcp_manager import TRANSPORT_STDIO, resolve_servers
 from runtime.repo_paths import REPO_ROOT, resolve_repo_relative
 from runtime.roles_manager import build_available_roles_text
 
@@ -83,6 +83,74 @@ _CHECKLIST_APPLICABILITY_NOTE = (
     "仅当所有适用项通过（无 high/medium 缺陷）时才 approved=true；审计位以无 high/medium 缺陷为准。\n"
     "N/A 不得用于规避真实缺陷。"
 )
+
+
+# ========== MCP 能力说明（只在该角色确实挂了 MCP server 时注入） ==========
+# 为什么需要显式说明：工具本身是以真名 `mcp__<server>__<tool>` 注册进 CLI 工具表的，
+# 模型每轮都看得见 —— 缺的从来不是「存在性」，而是**规范性**。没有这一段时，一个挂着
+# github MCP 的代码角色遇到「提个 issue」，完全可能自己拼个 curl 绕过去，而且不解释为什么
+# 不用。正式角色 mcp_probe 需要在 role_md 里手写「必须真的调用工具」；这里做统一兜底，
+# 联调 lab 则只作为显式命名的测试夹具存在。
+#
+# 预检后的 active 列表只包含本次确实连通的 server；optional server 失败时记录在
+# report.failures，并从 active 列表移除，但仍可在能力说明中告知模型。
+# 成功但没有工具的 server 仍保留（tools 映射中存在该名字，工具列表为空）。
+#
+# 末尾的「不要为了用而用」不是客气话：只写「要优先用」会诱发为用而用 —— 硬凑一次调用
+# 好显得用上了，那比不用更糟，因为它污染产物。
+def _render_mcp_capability_note(
+    servers: list,
+    probed: Dict[str, List[str]],
+    failures: Optional[Dict[str, str]] = None,
+) -> str:
+    """渲染「本次可用的 MCP 工具」块；没有 server 时返回 **空串**。
+
+    调用方必须把空串当「不注入」处理（拼 prompt 时过滤掉、写 CLAUDE.md 时跳过），
+    不要原样拼进去 —— 否则 `mcp: []` 的角色会凭空多出空行，改变既有产物的字节
+    （绝大多数角色都是 `mcp: []`，它们的提示词必须逐字不变）。
+
+    :param servers: 已配置并解析的 server 对象列表。
+    :param probed:  active server 名 → 工具名列表。
+    :param failures: optional server 名 → 本次预检错误；失败 server 不会下发给 CLI。
+    """
+    if not servers:
+        return ""
+    lines = [
+        "# 可用工具通道 (MCP)",
+        "",
+        "本次配置声明了以下 MCP server；成功连通的工具会注册在你的工具表里"
+        "（真名形如 mcp__<server>__<tool>），未连通的通道会明确标出：",
+        "",
+    ]
+    for server in servers:
+        where = "本地 stdio" if server.transport == TRANSPORT_STDIO else "远程 Streamable HTTP"
+        tools = probed.get(server.name)
+        failure = (failures or {}).get(server.name)
+        if failure is not None or tools is None:
+            detail = f"失败原因：{failure}。" if failure else ""
+            lines.append(
+                f"- {server.name}（{where}）：**本次未连通**，这些工具现在不在你的工具表里。"
+                f"{detail}不要指望它们，更不要凭任务描述假装调用过；确实需要就走你手上现有的工具，"
+                "并在产物里说明这条通道没通。"
+            )
+        elif not tools:
+            lines.append(
+                f"- {server.name}（{where}）：连上了，但对方没有暴露任何工具。"
+            )
+        else:
+            lines.append(f"- {server.name}（{where}）：{' / '.join(tools)}")
+    lines += [
+        "",
+        "动手之前先扫一眼上面这些工具能不能直接完成你要做的某一步：",
+        "",
+        "- 能用就用它们，不要自己用 OS 工具或命令行把同一件事再实现一遍；",
+        "- 调用它们不需要额外确认，权限已经放行；",
+        "- 真的调用了，就在产物里留下可核对的痕迹（原始返回的逐字片段），"
+        "而不是「我调用成功了」这类转述 —— 转述是你说的，原始返回是它说的；",
+        "- 上面没有哪个工具适合当前步骤时，照常用你自己的工具，**不要为了用而用**："
+        "硬凑一次调用会污染产物，比不用更糟。",
+    ]
+    return "\n".join(lines)
 
 
 class AICU:
@@ -399,10 +467,19 @@ class AICU:
         # mcp: 要启用的 MCP server 名字列表，在仓库根 mcp_servers.json 中定义。
         # 这里只做「名字 → server 定义」的解析（名字写错立刻报错并列出可用的），
         # 真正的连通性预检在建 CC 之前（见下方 mcp 预检）。
-        self.mcp: List[str] = list(
-            mcp if mcp is not None else self.role_config.get("mcp") or []
-        )
-        self._mcp_servers = resolve_servers(self.mcp)
+        raw_mcp = mcp if mcp is not None else self.role_config.get("mcp")
+        if raw_mcp is None:
+            raw_mcp = []
+        elif isinstance(raw_mcp, str):
+            # YAML 里写成 mcp: echo-probe 时，它表示一个 server，不是字符序列。
+            raw_mcp = [raw_mcp]
+        elif not isinstance(raw_mcp, list):
+            raise ValueError("mcp 配置必须是 server 名称字符串或名称列表")
+        if any(not isinstance(name, str) for name in raw_mcp):
+            raise ValueError("mcp 配置中的 server 名称必须是字符串")
+        self.mcp: List[str] = list(raw_mcp)
+        self._configured_mcp_servers = resolve_servers(self.mcp)
+        self._mcp_servers = list(self._configured_mcp_servers)
 
         # 「skills 在这个 CLI 上接不上」的告警只发一次：_install_skills_to_cc 每个 CC
         # 调一次，N 个 CC 会刷 N 行同样的话。
@@ -465,12 +542,22 @@ class AICU:
         # 失败时的路径和 skill 一样：AICU 构造抛异常 → Worker 捕获 → 节点 FAILED +
         # 可读日志 → 用户把 server 起来 → Continue 原地重跑（那时会重新构造 AICU，
         # 也就重新预检一次）。
+        # 没挂 MCP 时 `_mcp_capability_note` 是空串，发送口与 CLAUDE.md 都据此跳过 ——
+        # 绝大多数角色都是 `mcp: []`，它们的提示词必须逐字节不变。
+        self._mcp_capability_note = ""
         if self._mcp_servers:
-            probe_servers(self._mcp_servers)
+            # 预检的返回值是 server 名 → 工具名，正好是能力说明要写的东西 —— 接住它，
+            # 不额外多探一次。（预检失败的 server 不在返回值里，那正是「配了但没连通」。）
+            probe_report = probe_servers_detailed(self._configured_mcp_servers)
+            configured_mcp_servers = probe_report.configured
+            self._mcp_servers = probe_report.active
+            self._mcp_capability_note = _render_mcp_capability_note(
+                configured_mcp_servers, probe_report.tools, probe_report.failures
+            )
             # 预检过了才往下发。下发的是 server 对象本身（不是预先拼好的 JSON 串）：
             # 各 CLI 的配置形态不同，序列化是 adapter 的事（见 claude_code_agent.py 的
             # mcp_servers 参数说明）。落到没接线的 CLI 上会在建 CC 时直接报错。
-            print(f"[AICU] mcp: {self.mcp} (预检通过，内联下发)")
+            print(f"[AICU] mcp: {[server.name for server in self._mcp_servers]} (预检通过，内联下发)")
 
         self.ccs: List[ClaudeCodeAgent] = []
         for i in range(num_ccs):
@@ -493,6 +580,10 @@ class AICU:
             )
             # 写入一次性的角色与长期决策上下文；输出格式由每轮生成请求显式携带。
             role_context = self.role_md_content
+            # MCP 能力说明夹在 role_md 与「长期生成规则」之间：它属于「我是谁、手上有什么」，
+            # 而长期生成规则（Manager 那份 300 行）是输出契约 —— 排在它后面会被埋掉。
+            if self._mcp_capability_note:
+                role_context += "\n\n---\n\n" + self._mcp_capability_note
             if self._stable_generation_instruction:
                 role_context += (
                     "\n\n---\n\n# 长期生成规则 (Stable Generation Rules)\n\n"
@@ -684,8 +775,18 @@ class AICU:
                 # 工作区域边界：在发送点附加，而不是在函数顶部加一次 —— 下面的重试分支
                 # 会整体替换 prompt（读图恢复指令 / 重置后的新 prompt），顶部加的会静默丢失。
                 # 读取用 getattr 兜底：AICU.__new__ 形态的测试 CC 没有该属性 → 不加块。
-                _boundary = getattr(cc, "_workspace_boundary", "")
-                _outgoing = f"{_boundary}\n\n{prompt}" if _boundary else prompt
+                # MCP 能力说明与它同挂发送口，理由是同一个的两面：
+                #   - 重试分支整体替换 prompt，挂在顶部的会丢；
+                #   - CLAUDE.md 只有 Claude 系 CLI 会读（gemini 不读，见
+                #     tests/test_workspace_boundary.py 的说明），而 MCP 工具是各家 CLI
+                #     都能拿到的 —— 只写 CLAUDE.md 等于在一半 CLI 上静默失效。
+                # 空串过滤后再 join：没挂 MCP 时产出的字节与加这段之前完全相同。
+                _prefixes = [
+                    p for p in (getattr(cc, "_workspace_boundary", ""),
+                                getattr(self, "_mcp_capability_note", ""))
+                    if p
+                ]
+                _outgoing = "\n\n".join([*_prefixes, prompt])
                 response = cc.chat(_outgoing, max_turns=max_turns, timeout=timeout)
                 self._emit_cc_activity(cc, "completed", prompt, "finished")
                 return response

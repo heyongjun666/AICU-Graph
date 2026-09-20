@@ -26,7 +26,13 @@ from cli_adapters import (
 )
 from claude_code_agent import ClaudeCodeAgent
 from runtime.credentials import CredentialStore, set_credential_store, vendor_of_model
-from runtime.mcp_manager import McpServer, load_registry, resolve_servers
+from runtime.mcp_manager import (
+    TRANSPORT_HTTP,
+    McpConfigError,
+    McpServer,
+    load_registry,
+    resolve_servers,
+)
 
 
 def _mcp_servers(*names, **kwargs) -> list:
@@ -39,6 +45,24 @@ def _mcp_servers(*names, **kwargs) -> list:
     """
     return [
         McpServer(name=name, command="python3", args=["/tmp/echo.py"], **kwargs)
+        for name in names
+    ]
+
+
+REMOTE_URL = "https://mcp.example.com/mcp"
+
+
+def _remote_servers(*names, **kwargs) -> list:
+    """按名字造一批**远程**（Streamable HTTP）McpServer。
+
+    与 ``_mcp_servers`` 并列而不是给它加个参数：一份「本地」的服务器列表和一个
+    「远程」的，在断言里读起来是两件事，而加参数会让每条断言都先在心里解一层
+    transport 从哪来。``transport`` 照真实构造点那样显式给（运行时由
+    ``mcp_manager.transport_of`` 从 url 派生，adapter 只读结果）。
+    """
+    kwargs.setdefault("headers", {"Authorization": "Bearer t"})
+    return [
+        McpServer(name=name, command="", url=REMOTE_URL, transport=TRANSPORT_HTTP, **kwargs)
         for name in names
     ]
 
@@ -975,6 +999,178 @@ class TestProjectFileMcp:
         assert not tmp_path.joinpath(*parts[:-1]).exists()
 
 
+class TestRemoteMcpSerialization:
+    """远程（Streamable HTTP）条目在七家序列化器里的形状。
+
+    **各家对「远程地址」那个键的叫法并不统一**，这是接远程 MCP 最容易写错的一处：
+    ``url``（claude/codebuddy/codex/kimi/pi/cursor/opencode）与 ``httpUrl``
+    （gemini/qwen）。写错不报错、不警告，只是静默连到另一条传输上（这两家的 ``url``
+    表示 SSE）或让条目被整条跳过。所以下面把每一家的形状逐字钉住，而不是只测
+    「url 出现在某处」—— 那种断言对上面两种错法都是绿的。
+
+    gemini 与 grok 不在下拉里（``_HIDDEN_CLI_IDS``），但仍然测：隐藏只影响界面，
+    不妨碍有人把它们翻出来用；而且 gemini 正是 ``httpUrl`` 那个坑本身。
+    """
+
+    @pytest.fixture(autouse=True)
+    def _pi_gate_open(self, monkeypatch):
+        """pi 的 supports_mcp 要看本机装没装扩展，这里统一当作装了（同 TestProjectFileMcp）。"""
+        monkeypatch.setattr(cli_adapters, "_mcp_capability", lambda *a, **k: True)
+
+    @pytest.mark.parametrize("cli_id", ["claude", "internal", "codebuddy"])
+    def test_cc_family_needs_the_type_discriminator(self, cli_id):
+        """``type: "http"`` 是必填：claude 把「有 url 却没有 type」当配置错误，跳过整个 server。
+
+        走 ``mcp_flags`` 这个**真入口**而不是直接调 ``_cc_mcp_json`` —— 后者测不到
+        「flag 拼没拼对、有没有被 ``--strict-mcp-config`` 一起带上」。
+        """
+        flags = get_adapter(cli_id).mcp_flags(_remote_servers("remote"))
+        assert flags[1] == "--strict-mcp-config"
+        config = json.loads(flags[0].removeprefix("--mcp-config="))
+        assert config == {
+            "mcpServers": {
+                "remote": {
+                    "type": "http",
+                    "url": REMOTE_URL,
+                    "headers": {"Authorization": "Bearer t"},
+                }
+            }
+        }
+
+    def test_codex_uses_url_and_http_headers(self):
+        pairs = self._codex_pairs(_remote_servers("remote", headers={"X-Api-Key": "k"}))
+        assert f'mcp_servers.remote.url="{REMOTE_URL}"' in pairs
+        assert 'mcp_servers.remote.http_headers={"X-Api-Key": "k"}' in pairs
+
+    def test_codex_never_sends_a_command_for_a_remote_entry(self):
+        """``.command`` 与 ``.url`` 是两条并列的连接方式，同时给等于让 codex 自己挑一条。
+
+        那一挑就不再由我们决定：它可能真去起一个 ``""`` 的子进程，也可能报一句与
+        MCP 无关的错。远程条目一个 command 相关的键都不发。
+        """
+        pairs = self._codex_pairs(_remote_servers("remote"))
+        assert not [p for p in pairs if ".command=" in p]
+        assert not [p for p in pairs if ".args=" in p]
+        assert not [p for p in pairs if ".env." in p]
+
+    def test_codex_headers_key_only_when_there_are_headers(self):
+        """``http_headers`` 空就不发；注意**不是** ``env_http_headers`` —— 后者的值是
+        环境变量名，用错等于把 token 换成它的名字发出去。"""
+        pairs = self._codex_pairs(_remote_servers("remote", headers={}))
+        assert pairs == [f'mcp_servers.remote.url="{REMOTE_URL}"']
+        assert not [p for p in pairs if "headers" in p]
+
+    @pytest.mark.parametrize("cli_id,parts", [
+        ("kimi", (".kimi-code", "mcp.json")),
+        ("pi", (".pi", "mcp.json")),
+        ("cursor", (".cursor", "mcp.json")),
+    ])
+    def test_project_file_clis_write_url_without_a_type(self, tmp_path, cli_id, parts):
+        """这三家按「给了哪个连接字段」推传输，**没有 type 字段**可写。"""
+        entry = self._project_entries(get_adapter(cli_id), tmp_path, parts)["remote"]
+        assert entry == {"url": REMOTE_URL, "headers": {"Authorization": "Bearer t"}}
+
+    def test_gemini_uses_http_url_not_url(self, tmp_path):
+        """**这是本轮最容易写错的一处。** gemini 没有 type 字段、传输由键名决定：
+        ``url`` 是 SSE（被 Streamable HTTP 取代的旧传输），``httpUrl`` 才是我们要的。
+
+        写成 ``url`` 不报错，只是连到一条我们并不支持的传输上 —— 单测里唯一的防线
+        就是这条断言。
+        """
+        entry = self._project_entries(
+            get_adapter("gemini"), tmp_path, (".gemini", "settings.json")
+        )["remote"]
+        assert "url" not in entry
+        assert entry == {"httpUrl": REMOTE_URL, "headers": {"Authorization": "Bearer t"}}
+
+    def test_qwen_uses_http_url_not_url(self, tmp_path):
+        """qwen 与 gemini 同一个坑（没有 type、键名即传输），且还要带 ``trust``。"""
+        data = self._qwen_settings(tmp_path, _remote_servers("remote"))
+        entry = data["mcpServers"]["remote"]
+        assert "url" not in entry
+        assert entry == {
+            "httpUrl": REMOTE_URL,
+            "headers": {"Authorization": "Bearer t"},
+            "trust": True,
+        }
+
+    def test_qwen_keeps_trust_on_remote_entries_too(self, tmp_path):
+        """``trust`` 是批准门禁、与传输无关：远程条目漏了它，工具同样永远批不下来。"""
+        data = self._qwen_settings(tmp_path, _remote_servers("a"))
+        assert data["mcpServers"]["a"]["trust"] is True
+
+    def test_opencode_uses_the_remote_variant_with_type(self):
+        """opencode 的 ``local`` / ``remote`` 是两个形状不同的联合类型，键不能混。
+
+        顶层键也别忘了是 ``mcp`` 而不是别人用的 ``mcpServers``。
+        """
+        env = get_adapter("opencode").build_env(
+            {}, api_base_url=None, api_key_env=None, mcp_servers=_remote_servers("remote")
+        )
+        config = json.loads(env["OPENCODE_CONFIG_CONTENT"])
+        assert config["mcp"]["remote"] == {
+            "type": "remote",
+            "url": REMOTE_URL,
+            "headers": {"Authorization": "Bearer t"},
+            "enabled": True,
+        }
+
+    def test_opencode_remote_entry_has_no_command_key(self):
+        """``command`` 是 ``local`` 那一支的键，混进来 opencode 会拒掉整份配置。"""
+        env = get_adapter("opencode").build_env(
+            {}, api_base_url=None, api_key_env=None, mcp_servers=_remote_servers("remote")
+        )
+        entry = json.loads(env["OPENCODE_CONFIG_CONTENT"])["mcp"]["remote"]
+        assert "command" not in entry and "environment" not in entry
+
+    def test_headers_key_is_omitted_when_empty_everywhere(self, tmp_path):
+        """空 headers 不写空对象：写个 ``{}`` 是另一种意思，而且会进每一份配置文件。"""
+        servers = _remote_servers("remote", headers={})
+        assert get_adapter("claude").mcp_flags(servers)[0].count('"headers"') == 0
+        assert "headers" not in self._project_entries(
+            get_adapter("cursor"), tmp_path, (".cursor", "mcp.json"), servers=servers
+        )["remote"]
+        assert "headers" not in self._qwen_settings(tmp_path, servers)["mcpServers"]["remote"]
+
+    def test_one_list_can_hold_both_kinds(self, tmp_path):
+        """同一次下发里两种混着来是常态（角色既挂本地探针又挂远程服务），
+        所以分支必须写在**每条条目**上，而不是「这批全是本地就按本地来」。"""
+        entries = self._project_entries(
+            get_adapter("cursor"),
+            tmp_path,
+            (".cursor", "mcp.json"),
+            servers=_mcp_servers("local") + _remote_servers("remote"),
+        )
+        assert entries["local"] == {"command": "python3", "args": ["/tmp/echo.py"]}
+        assert entries["remote"] == {"url": REMOTE_URL, "headers": {"Authorization": "Bearer t"}}
+
+    # ---- 取配置的三个小工具（各家注入点不同，取法也就不同） ----
+
+    @staticmethod
+    def _codex_pairs(servers) -> list:
+        cmd = get_adapter("codex").build_base_command(
+            model=None, skip_permissions=False, enable_project_skills=False, mcp_servers=servers
+        )
+        return [cmd[i + 1] for i, arg in enumerate(cmd) if arg == "-c"]
+
+    @staticmethod
+    def _project_entries(adapter, tmp_path, parts, servers=None) -> dict:
+        """落盘那份配置里的 ``mcpServers`` 段（这几家都是这个顶层键）。
+
+        按相对路径挑而不是断言「列表恰好一项」：kimi 除了配置还会写一条 workspace
+        信任记录（那是它自己另一件事，见 KimiAdapter），列表本来就不止一项。
+        """
+        paths = adapter.mcp_workspace_files(tmp_path, servers or _remote_servers("remote"))
+        matched = [p for p in paths if p.parts[-len(parts):] == parts]
+        assert len(matched) == 1, f"没找到 {parts}，实际写了 {paths}"
+        return json.loads(matched[0].read_text(encoding="utf-8"))["mcpServers"]
+
+    @staticmethod
+    def _qwen_settings(tmp_path, servers) -> dict:
+        paths = get_adapter("qwen").mcp_workspace_files(tmp_path, servers)
+        return json.loads(paths[0].read_text(encoding="utf-8"))
+
+
 class TestGrokToml:
     """grok 是这批里唯一读 TOML 的，形状与转义都得逐字节对。
 
@@ -1012,6 +1208,23 @@ class TestGrokToml:
 
     def test_no_env_no_line(self, tmp_path):
         assert "env" not in self._text(tmp_path, _mcp_servers("a"))
+
+    def test_remote_entry_raises_instead_of_writing_an_empty_command(self, tmp_path):
+        """远程条目在这里**当场炸**，而不是写出一份 ``command = ""`` 的配置。
+
+        今天不可达（grok 的 supports_mcp 是 False，基类门禁先挡住了），所以本类把
+        开关拨开才走得到——拨开之后正是将来真去接线时的处境。若不拦，下面几行会照常
+        执行：grok 读得进去、不报错、server 永远连不上，用户手里唯一的线索是空命令。
+        """
+        with pytest.raises(McpConfigError) as excinfo:
+            self._text(tmp_path, _remote_servers("remote"))
+        assert "remote" in str(excinfo.value)
+
+    def test_remote_and_local_mixed_still_raises(self, tmp_path):
+        """混着来时也必须炸——写一半的配置比整份不写更糟：看起来接上了。"""
+        with pytest.raises(McpConfigError):
+            self._text(tmp_path, _mcp_servers("local") + _remote_servers("remote"))
+        assert not (tmp_path / ".grok" / "config.toml").exists()
 
     def test_empty_args_stay_an_empty_array(self, tmp_path):
         """``args = []`` 而不是省略这一行：grok 的 command 是必填、args 可选，
@@ -2080,14 +2293,14 @@ class TestMcpSupportFlag:
         monkeypatch.setattr(cli_adapters, "_mcp_capability", lambda *a, **k: request.param)
 
     @staticmethod
-    def _injects_anything(adapter, tmp_path) -> bool:
+    def _injects_anything(adapter, tmp_path, servers=None) -> bool:
         """四个注入口子挨个问一遍，任何一个产出东西就算「注入了」。
 
         正向与反向两条不变量共用它 —— 只查一半口子的话，一个
         ``supports_mcp=False`` 却从 ``build_base_command`` / ``build_env`` 偷偷注入的
         adapter 会在两条用例之间溜过去。
         """
-        servers = _mcp_servers("guard-probe")
+        servers = _mcp_servers("guard-probe") if servers is None else servers
         base = dict(model=None, skip_permissions=False, enable_project_skills=False)
         if adapter.mcp_flags(servers):
             return True
@@ -2108,6 +2321,22 @@ class TestMcpSupportFlag:
                 assert self._injects_anything(adapter, tmp_path), (
                     f"{adapter.id}（门禁={capability}）声明了 supports_mcp=True，"
                     f"但四种注入口子都不产出任何东西 —— 角色配了 mcp 会静默失效"
+                )
+
+    def test_declared_support_actually_injects_remote_entries_too(self, tmp_path, capability):
+        """同一个不变量，换成**远程**条目再问一遍。
+
+        单有上面那条不够：一个「本地分支写好了、远程分支直接 continue 掉了」的
+        adapter 在它那里照样是绿的 —— 而远程被静默丢弃正是这一轮最可能引入的坏法
+        （本地那条路早就接好了，改的时候最容易只顾着一支）。
+        """
+        for adapter in cli_adapters._ADAPTERS:
+            if adapter.supports_mcp:
+                assert self._injects_anything(
+                    adapter, tmp_path, servers=_remote_servers("guard-probe")
+                ), (
+                    f"{adapter.id}（门禁={capability}）声明了 supports_mcp=True，"
+                    f"但一条远程 server 四种口子都产不出东西 —— 会被静默丢弃"
                 )
 
     def test_undeclared_support_never_injects(self, tmp_path, capability):

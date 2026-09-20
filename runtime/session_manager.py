@@ -15,6 +15,7 @@ from typing import Any, Optional
 from executables.registry import ExecutableRegistry
 from runtime.credentials import CredentialStore, set_credential_store
 from runtime.event_bus import SSEEvent
+from runtime.jsonio import atomic_write_json as _atomic_write_json
 from runtime.models import NUM_CCS_TIERS
 from runtime.persistence import Persistence
 from runtime.runtime import Runtime
@@ -94,21 +95,6 @@ def _normalize_candidate_roles(value: Any) -> Optional[list[str]]:
 
 # 哨兵：update_settings 的 shared_workspace 三态（_UNSET=不修改 / None 或 ""=清除 / 路径=设置）。
 _UNSET = object()
-
-
-def _atomic_write_json(path: str, payload: Any) -> None:
-    """把 payload 以 JSON 原子写入 path。
-
-    写 tmp + flush + fsync + os.replace：会话索引与全局配置是重启后**唯一**的
-    恢复依据，半截文件会让整个会话列表读不出来，所以必须落盘后再替换。
-    调用方负责持锁（本模块内两处调用都在 self._lock 内）。
-    """
-    tmp_path = path + ".tmp"
-    with open(tmp_path, "w", encoding="utf-8") as file:
-        json.dump(payload, file, ensure_ascii=False, indent=2)
-        file.flush()
-        os.fsync(file.fileno())
-    os.replace(tmp_path, path)
 
 
 def validate_shared_workspace(path: str, workspace_root: str, runtime_dir: str) -> str:

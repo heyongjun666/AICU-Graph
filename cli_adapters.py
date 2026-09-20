@@ -48,6 +48,9 @@ from runtime.credentials import (
     resolve_internal_username,
     vendor_of_model,
 )
+# 只取这一个常量：传输的名字由 mcp_manager 定义，adapter 这边比较时用同一个名字，
+# 免得两处各写一份 "http" 字面量。
+from runtime.mcp_manager import TRANSPORT_HTTP, McpConfigError
 
 # 各 CLI 的已知模型清单集中维护在 cli_models.json（便于后续增删模型）。
 _MODELS_FILE = Path(__file__).with_name("cli_models.json")
@@ -596,18 +599,30 @@ def _opencode_config_content(
             }
         }
     if servers:
-        # opencode 的 server 条目：`command` 是**数组**（程序 + 参数一起放），
+        # opencode 的本地 server 条目：`command` 是**数组**（程序 + 参数一起放），
         # 与 claude 系的 `command` 字符串 + `args` 数组不是一回事，所以不能复用
         # _cc_mcp_json。`type` 与 `enabled` 都是必填/推荐项。
-        config["mcp"] = {
-            server.name: {
+        #
+        # 远程条目是 `type: "remote"` + url + headers —— 与 `local` 是两个形状不同的
+        # 联合类型（`command` 与 `url` 各自只属于其中一支），所以这里也必须分支而不是
+        # 统一塞键。注意顶层键是 `mcp`（**不是** `mcpServers`），这是 opencode 独有的
+        # 写法，见 _opencode_config_content 的调用方。
+        entries: dict = {}
+        for server in servers:
+            if server.transport == TRANSPORT_HTTP:
+                entries[server.name] = {
+                    "type": "remote",
+                    **_remote_fields(server, "url"),
+                    "enabled": True,
+                }
+                continue
+            entries[server.name] = {
                 "type": "local",
                 "command": [server.command, *server.args],
                 "enabled": True,
                 **({"environment": dict(server.env)} if server.env else {}),
             }
-            for server in servers
-        }
+        config["mcp"] = entries
     return json.dumps(config, ensure_ascii=False)
 
 
@@ -871,6 +886,14 @@ class CliAdapter:
     # 或路径不由 workspace 直接决定的 CLI，自己覆盖 mcp_workspace_files 即可。
     mcp_workspace_config: Optional[tuple] = None
 
+    # 落盘配置里「远程地址」那个键叫什么。默认 ``url``。
+    #
+    # 参数化的唯一原因是 gemini/qwen 这一系：这两家**没有 type 字段，传输由键名决定**
+    # —— ``url`` 表示 SSE（已被 Streamable HTTP 取代的旧传输），``httpUrl`` 才是
+    # Streamable HTTP。写成 ``url`` 不报错，只静默连到一条我们并不支持的传输上。
+    # 只有 GeminiAdapter 覆盖它（qwen 连路径容器都不一样、自己整个覆盖了函数）。
+    # 与 ``mcp_workspace_config`` 是同一个手法：差异收敛成一个类属性，而不是抄一份。
+    mcp_url_key = "url"
 
     # 项目级 skills 目录，**相对 CC 的 workspace 逐段给出**。
     #   None（默认）—— 这个 CLI 拿不到 AICU 下发的 skill。注意这不等于「该 CLI 不支持
@@ -944,8 +967,9 @@ class CliAdapter:
         """写进 ``mcp_workspace_config`` 那个文件的字节内容。
 
         默认 = 四家共用的 ``mcpServers`` JSON。grok 覆盖它返回 TOML（见 GrokAdapter）。
+        远程地址的键名经 ``mcp_url_key`` 传下去 —— gemini 要 ``httpUrl``。
         """
-        return _mcp_servers_project_json(mcp_servers)
+        return _mcp_servers_project_json(mcp_servers, url_key=self.mcp_url_key)
 
     def mcp_unwired_reason(self) -> str:
         """``supports_mcp`` 为假时，一个能直接嵌进 ``"CLI 'x' 的 MCP ___，但……"``
@@ -1084,16 +1108,44 @@ class CliAdapter:
         return None
 
 
+def _remote_fields(server, url_key: str) -> dict:
+    """远程（Streamable HTTP）条目里那不变的两样：地址与请求头。
+
+    键名由调用方给，因为**各家对「远程地址」的键名并不统一**，这是接远程 MCP 最容易
+    写错的一处：claude/codebuddy/codex/kimi/pi/cursor/opencode 用 ``url``，
+    gemini/qwen 用 ``httpUrl``。后者尤其要小心 —— 它们没有 type 字段、传输由键名决定，
+    ``url`` 在那边表示的是 **SSE**（被 Streamable HTTP 取代的旧传输），写错会静默
+    走成另一种传输。
+
+    ``headers`` 为空时整个键都不写，与 stdio 那边 ``env`` 的处理一致。
+    """
+    entry = {url_key: server.url}
+    if server.headers:
+        entry["headers"] = dict(server.headers)
+    return entry
+
+
 def _cc_mcp_json(servers: list) -> str:
     """Claude Code 协议族的 ``mcpServers`` 配置串。
 
-    形状是 ``{"mcpServers": {<name>: {command, args, env?}}}`` —— ``command`` 是
+    本地形状是 ``{"mcpServers": {<name>: {command, args, env?}}}`` —— ``command`` 是
     字符串、参数单独放 ``args``。注意这**不是**通用形状：opencode 要的是
     ``command: [程序, ...参数]`` 的数组形式，所以那边另写一份（见
     ``_opencode_config_content``）。共用一个序列化器只会让两边都错。
+
+    远程形状是 ``{"type": "http", "url": ..., "headers": {...}}``。``type`` **必须写**：
+    claude 把「有 url 却没有 type」的条目当成配置错误，会跳过整个 server 并报一句
+    「has a "url" but no "type"」。本地条目则不能补 ``type: "stdio"`` —— 那是改动既有
+    配置的字节。
+
+    internal 与 codebuddy 走同一条路径（同一个类 / 子类），也照这个形状发。internal 的远程
+    形状没有公开文档可核，是按「同为 Claude Code 协议族」推定的 —— 未经真机验证。
     """
     entries: dict = {}
     for server in servers:
+        if server.transport == TRANSPORT_HTTP:
+            entries[server.name] = {"type": "http", **_remote_fields(server, "url")}
+            continue
         entry: dict = {"command": server.command, "args": list(server.args)}
         if server.env:
             entry["env"] = dict(server.env)
@@ -1101,12 +1153,17 @@ def _cc_mcp_json(servers: list) -> str:
     return json.dumps({"mcpServers": entries}, ensure_ascii=False)
 
 
-def _mcp_servers_project_json(servers: list) -> str:
+def _mcp_servers_project_json(servers: list, url_key: str = "url") -> str:
     """项目级 ``mcpServers`` 配置文件的内容（gemini / cursor / pi / kimi 同形）。
 
-    形状与 ``_cc_mcp_json`` 一样是 ``command`` 字符串 + ``args`` 数组 + 可选 ``env``，
+    本地形状与 ``_cc_mcp_json`` 一样是 ``command`` 字符串 + ``args`` 数组 + 可选 ``env``，
     差别只在渲染：这里是**落盘给 CLI 解析的文件**，所以缩进 2 空格并带尾换行（与
     ``_mcp_servers_settings_json`` 的落盘风格一致）。
+
+    远程形状是 ``{"<url_key>": ..., "headers": {...}}``，**没有 type 字段**：这四家都
+    按「给了哪个连接字段」推传输。``url_key`` 因此是参数而不是写死的 —— gemini 用
+    ``httpUrl``（``url`` 在它那里表示 SSE，见 ``GeminiAdapter``），其余三家用 ``url``。
+    两家的差异收敛成一个类属性，与 ``mcp_workspace_config`` 同一思路。
 
     为什么另起一份而不是复用/参数化上面那两个：
 
@@ -1125,6 +1182,9 @@ def _mcp_servers_project_json(servers: list) -> str:
     """
     entries: dict = {}
     for server in servers:
+        if server.transport == TRANSPORT_HTTP:
+            entries[server.name] = _remote_fields(server, url_key)
+            continue
         entry: dict = {"command": server.command, "args": list(server.args)}
         if server.env:
             entry["env"] = dict(server.env)
@@ -1194,9 +1254,22 @@ def _grok_mcp_toml(servers: list) -> str:
     ``[mcp_servers.x.env]`` 之后父表就不能再补键，顺序写错即非法。
     env 的值直接写解析好的字面量，**不套 grok 自己的 ``${VAR}`` 插值** ——
     那会让 grok 再查一次环境变量，而 AICU 给的已经是解析好的值。
+
+    远程条目在这里**直接抛错**。这不是可达路径：grok 的 ``supports_mcp`` 是 False，
+    基类的门禁根本走不到这个函数（见 ``mcp_workspace_files`` 的第一个 if）。留着它
+    是为了让以后有人把 ``supports_mcp`` 翻成 True 时**当场炸** —— 那时若不拦，下面几行
+    会照常执行，写出一份 ``command = ""``、``args = []`` 的配置：grok 读得进去、不报错、
+    server 永远连不上，而用户手里唯一的线索是一个空命令。远程的 TOML 形状（grok 是否
+    用 ``url``、要不要 ``transport`` 键）没有核实过，所以这里不猜着写，只拦住。
     """
     lines: list = []
     for server in servers:
+        if server.transport == TRANSPORT_HTTP:
+            raise McpConfigError(
+                f"grok 的远程（Streamable HTTP）MCP 尚未接入 AICU：server '{server.name}' "
+                f"只有 url 没有 command，写进 config.toml 会变成一条空命令。"
+                f"请改用已支持远程的 CLI，或把这个 server 配成本地型"
+            )
         lines.append(f"[mcp_servers.{_toml_key(server.name)}]")
         lines.append(f"command = {_toml_string(server.command)}")
         lines.append("args = [" + ", ".join(_toml_string(a) for a in server.args) + "]")
@@ -1435,7 +1508,7 @@ def _write_pi_trust(workspace) -> Optional[Path]:
 def _mcp_servers_settings_json(servers: list) -> str:
     """qwen 项目级 ``.qwen/settings.json`` 里的 ``mcpServers`` 段。
 
-    与 ``_cc_mcp_json`` 只差一个 ``trust``：这里同样是 ``command`` 字符串 +
+    与 ``_cc_mcp_json`` 只差一个 ``trust``：本地形状同样是 ``command`` 字符串 +
     ``args`` 数组（**不是** opencode 那种数组合一形式），但必须带 ``trust: true``。
 
     ``trust`` 不是可选项。qwen 把项目级 server 默认置为 "Pending approval" 状态
@@ -1444,9 +1517,17 @@ def _mcp_servers_settings_json(servers: list) -> str:
     工作区里跳过该 server 的工具调用确认」，与 ``--yolo`` 是两回事。
 
     形状按 qwen 自己 ``mcp add -s project`` 写出来的文件对齐（已实测比对）。
+
+    远程条目用 **``httpUrl``**，不是 ``url`` —— qwen 没有 type 字段，传输**由键名决定**：
+    ``url`` 表示 SSE（已被 Streamable HTTP 取代的旧传输），``httpUrl`` 才是 Streamable
+    HTTP。写成 ``url`` 不会报错，只会静默连到一条我们并不支持的传输上，然后以一句与
+    传输无关的超时告终。``trust`` 在远程条目上同样要写（批准门禁与传输无关）。
     """
     entries: dict = {}
     for server in servers:
+        if server.transport == TRANSPORT_HTTP:
+            entries[server.name] = {**_remote_fields(server, "httpUrl"), "trust": True}
+            continue
         entry: dict = {
             "command": server.command,
             "args": list(server.args),
@@ -1800,12 +1881,22 @@ def _codex_mcp_args(servers: Optional[list]) -> list:
     值统一用 ``json.dumps`` 序列化：TOML 的字符串与数组字面量和 JSON 恰好同形
     （``"x"`` / ``["a","b"]``），而手写引号极易在含空格或引号的路径上翻车。
     本机实测 ``-c 'mcp_servers.x.args=["-c","pass"]'`` 被正确解析成两个 argv。
+
+    远程条目走 ``.url=`` + ``.http_headers=``，**不发** command/args/env。三者是
+    codex 配置里两条并列的连接方式，同时给等于让 codex 自己挑一条 —— 那时它到底
+    起不起子进程就不再由我们决定了。头是 ``http_headers``（字面量映射）而不是
+    ``env_http_headers``：后者的值是**环境变量名**，写错等于把 token 换成它的名字发出去。
     """
     if not servers:
         return []
     args: list = []
     for server in servers:
         prefix = f"mcp_servers.{server.name}"
+        if server.transport == TRANSPORT_HTTP:
+            args.extend(["-c", f"{prefix}.url={json.dumps(server.url)}"])
+            if server.headers:
+                args.extend(["-c", f"{prefix}.http_headers={json.dumps(dict(server.headers))}"])
+            continue
         args.extend(["-c", f"{prefix}.command={json.dumps(server.command)}"])
         if server.args:
             args.extend(["-c", f"{prefix}.args={json.dumps(list(server.args))}"])
@@ -2938,6 +3029,10 @@ class GeminiAdapter(CliAdapter):
     # 项目级设置文件（gemini 的 getWorkspaceSettingsPath() = <project>/.gemini/settings.json）。
     # 走基类的通用实现即可 —— 内容就是标准的 {"mcpServers": {...}}。
     mcp_workspace_config = (".gemini", "settings.json")
+    # **必须是 httpUrl**：gemini 的 server 条目没有 type 字段，传输由键名决定 ——
+    # ``url`` 是 SSE（旧的 HTTP+SSE 传输），``httpUrl`` 才是 Streamable HTTP。
+    # 写成 ``url`` 不报错、不警告，只是连到一条我们并不支持的传输上。
+    mcp_url_key = "httpUrl"
 
     # 项目级 skill：``<project>/.gemini/skills``（全局那份是 ``~/.gemini/skills``，也是
     # 官方的 skill 安装位置记录点，所以项目级这个路径是同一套命名，不是猜的）。

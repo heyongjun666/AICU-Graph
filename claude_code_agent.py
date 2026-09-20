@@ -530,6 +530,12 @@ class ClaudeCodeAgent:
             model=kwargs.get('model', self.model),
             skip_permissions=kwargs.get('skip_permissions', self.skip_permissions),
             cli_name=kwargs.get('cli_name', self.cli_name),
+            enable_project_skills=kwargs.get(
+                'enable_project_skills', self.enable_project_skills
+            ),
+            api_base_url=kwargs.get('api_base_url', self.api_base_url),
+            api_key_env=kwargs.get('api_key_env', self.api_key_env),
+            mcp_servers=kwargs.get('mcp_servers', self.mcp_servers),
         )
         return child_agent
 

@@ -371,6 +371,44 @@ class TestTransientMcpFilesPerAdapter(_TransientMcpAgentFixture):
 
 
 
+class TestSpawnChildConfiguration:
+    def test_inherits_agent_capabilities_and_allows_overrides(self, tmp_path, monkeypatch):
+        captured = {}
+
+        class FakeAgent:
+            def __init__(self, **kwargs):
+                captured.update(kwargs)
+
+        parent = ClaudeCodeAgent.__new__(ClaudeCodeAgent)
+        parent.workspace = tmp_path / "parent"
+        parent.model = "deepseek-chat"
+        parent.skip_permissions = True
+        parent.cli_name = "qwen"
+        parent.enable_project_skills = True
+        parent.api_base_url = "https://example.invalid/v1"
+        parent.api_key_env = "DEEPSEEK_API_KEY"
+        parent.mcp_servers = _mcp_servers("echo-probe")
+
+        monkeypatch.setattr("claude_code_agent.ClaudeCodeAgent", FakeAgent)
+        parent.spawn_child(
+            "child",
+            model="override-model",
+            api_key_env="OTHER_API_KEY",
+        )
+
+        assert captured == {
+            "workspace_path": str(tmp_path / "parent" / "child"),
+            "instruction_md_path": None,
+            "model": "override-model",
+            "skip_permissions": True,
+            "cli_name": "qwen",
+            "enable_project_skills": True,
+            "api_base_url": "https://example.invalid/v1",
+            "api_key_env": "OTHER_API_KEY",
+            "mcp_servers": parent.mcp_servers,
+        }
+
+
 # ---- is_model_image_input_error ----
 
 

@@ -354,6 +354,18 @@ class RolesManager:
                 if role_id == "default":
                     continue
 
+                # 文件名不是一个合法 role_id 的，跳过不列。这类文件**列出来也打不开**
+                # （``_role_path`` 判它非法、接口返 400），却会被 ``iter_role_configs``
+                # 拿去逐个读取 —— 于是它会先把「谁引用了这个 mcp / skill」这类遍历整轮
+                # 的查询带崩，症状是完全无关的接口返 500。典型来源是 ``_`` 开头的临时
+                # 角色文件（``build_available_roles_text`` 也是明确跳过它们的）。
+                if not _ROLE_ID_PATTERN.fullmatch(role_id):
+                    logger.warning(
+                        "Skipping role file %s: '%s' is not a valid role_id",
+                        os.path.join(subdir_path, name), role_id,
+                    )
+                    continue
+
                 file_path = os.path.join(subdir_path, name)
                 data = _parse_role_yaml(file_path)
                 description = _extract_description(data) if data else ""

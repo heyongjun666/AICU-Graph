@@ -605,6 +605,50 @@ def test_role_and_skill_crud_use_isolated_managers(session_manager, tmp_path):
         assert client.get("/v1/skills/../bad").status_code in {400, 404}
 
 
+def test_a_junk_role_filename_does_not_poison_unrelated_endpoints(
+    session_manager, tmp_path
+):
+    """文件名不是合法 role_id 的角色，不该把「遍历全部角色」的那些接口带崩。
+
+    出处是一次真实的故障：实验遗留的 ``roles/Worker/_mcp_lab_local.yaml`` 让
+    ``/v1/mcp/servers`` 返 500、让**每一个** skill 的详情页返 400 —— 用户点开一个
+    完全正常的 skill，读到的却是一句「Invalid role_id」。``_`` 开头正是
+    ``build_available_roles_text`` 明确跳过的临时角色写法，所以它在
+    ``list_roles()`` 这一步就该被挡住，而不是等到逐个读取时才炸。
+    """
+    roles_dir = tmp_path / "roles"
+    worker_dir = roles_dir / "Worker"
+    worker_dir.mkdir(parents=True)
+    (worker_dir / "code.yaml").write_text("mcp: []\n", encoding="utf-8")
+    (worker_dir / "_scratch.yaml").write_text("mcp: []\n", encoding="utf-8")
+    registry = tmp_path / "mcp_servers.json"
+    registry.write_text(
+        json.dumps({"servers": {"keep": {"command": "node"}}}), encoding="utf-8"
+    )
+
+    app = create_session_app(
+        session_manager,
+        RolesManager(str(roles_dir)),
+        SkillsManager(str(tmp_path / "skills")),
+        mcp_registry_path=str(registry),
+    )
+
+    with TestClient(app) as client:
+        created = client.post("/v1/skills", json={"skill_id": "tdd", "content": "# tdd\n"})
+        assert created.status_code == 201, created.text
+
+        # 非法文件名既不进列表，也不该被当成一个能读的角色
+        assert [role["id"] for role in client.get("/v1/roles").json()["roles"]] == ["code"]
+
+        registry_response = client.get("/v1/mcp/servers")
+        assert registry_response.status_code == 200, registry_response.text
+        assert registry_response.json()["servers"][0]["referencing_roles"] == []
+
+        detail = client.get("/v1/skills/tdd")
+        assert detail.status_code == 200, detail.text
+        assert detail.json()["referencing_roles"] == []
+
+
 def test_session_settings_filter_secrets_and_switch_new_workspace(
     session_client, session_manager, tmp_path, monkeypatch
 ):

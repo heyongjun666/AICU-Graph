@@ -291,16 +291,20 @@ def create_session_app(
 
     @app.get("/v1/skills/{skill_id}")
     def get_skill(skill_id: str):
+        # ``referencing_roles`` 刻意留在 try 之外：它由 roles 那一侧算，抛出来的也是
+        # 角色的问题。混进下面这两个 except 里，读 skill 的人会收到一句关于 role_id
+        # 的 400 —— 明明请求的是一个完全正常的 skill，报错却指向另一个维度。真要炸，
+        # 就该按服务端故障炸出来，而不是伪装成「你的 skill_id 写错了」。
         try:
             detail = skills_manager.get_skill(skill_id)
-            return {
-                **detail,
-                "referencing_roles": roles_manager.roles_referencing_skill(skill_id),
-            }
         except KeyError as error:
             raise _http_error(404, error) from error
         except ValueError as error:
             raise _http_error(400, error) from error
+        return {
+            **detail,
+            "referencing_roles": roles_manager.roles_referencing_skill(skill_id),
+        }
 
     @app.post("/v1/skills", status_code=201)
     def create_skill(body: SkillRequest):

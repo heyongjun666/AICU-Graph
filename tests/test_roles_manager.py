@@ -54,6 +54,21 @@ class TestListRoles:
         roles = RolesManager(str(tmp_path)).list_roles()
         assert roles[0]["description"] == ("长" * 80)
 
+    def test_skips_filenames_that_cannot_be_a_role_id(self, tmp_path):
+        """文件名不是一个合法 role_id 的，不列为角色。
+
+        这类文件列出来也打不开（``_role_path`` 判非法、接口返 400），却会被
+        ``iter_role_configs`` 拿去逐个读 —— 于是一个临时文件就能把「谁引用了这个
+        mcp / skill」这类整轮遍历的查询带崩。``_`` 开头是其中最常见的一种：
+        ``build_available_roles_text`` 也是明确跳过它们的。
+        """
+        _write_role_yaml(tmp_path, "worker", "code", "summary: 正常角色\n")
+        _write_role_yaml(tmp_path, "worker", "_scratch", "summary: 临时文件\n")
+        _write_role_yaml(tmp_path, "manager", "bad-name", "summary: 连字符\n")
+
+        roles = RolesManager(str(tmp_path)).list_roles()
+        assert [(r["id"], r["type"]) for r in roles] == [("code", "worker")]
+
 
 class TestSkillReferences:
     def test_reports_effective_skill_references_and_explicit_empty_override(self, tmp_path):
@@ -67,6 +82,18 @@ class TestSkillReferences:
             {"id": "default", "type": "manager"},
             {"id": "default", "type": "worker"},
             {"id": "plain", "type": "worker"},
+        ]
+
+    def test_a_junk_role_filename_does_not_break_the_whole_pass(self, tmp_path):
+        """一个读不出来的角色文件，不该把其余角色的答案一起吞掉。
+
+        这条与 ``iter_role_configs`` 已有的「坏 YAML 只跳过这一个」是同一个口径；
+        ``_`` 开头的文件走的是 id 校验那条路，症状是**整轮查询抛异常**（而不是少一条）。
+        """
+        _write_role_yaml(tmp_path, "worker", "code", "skills: [tdd]\n")
+        _write_role_yaml(tmp_path, "worker", "_scratch", "skills: [tdd]\n")
+        assert RolesManager(str(tmp_path)).roles_referencing_skill("tdd") == [
+            {"id": "code", "type": "worker"}
         ]
 
 

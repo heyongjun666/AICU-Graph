@@ -53,7 +53,7 @@ class MockRuntimeGateway:
 
     def __init__(self, graph: Optional[Graph] = None):
         self.graph = graph
-        self.revise_calls: list[tuple[str, str]] = []
+        self.revise_calls: list[tuple[str, str, str]] = []
 
     def submit_plan(self, node_id: str, plan: Any) -> None:
         pass
@@ -79,14 +79,15 @@ class MockRuntimeGateway:
         pass
 
     def revise_worker_node(
-        self, node_id: str, task: str, config: Optional[dict] = None
+        self, node_id: str, task: str, config: Optional[dict] = None,
+        *, reason: str = "revise",
     ) -> str:
         """Mock of runtime.revise_worker_node：记录调用，节点 FAILED→WAITING 待续跑。
 
         保留缓存与产物（不弹 Worker._aicu_cache、不删 artifact），只镜像
         _reactivate_reused_worker 的状态簿记；iteration_count 由调度器回写。
         """
-        self.revise_calls.append((node_id, task))
+        self.revise_calls.append((node_id, task, reason))
         if self.graph is not None:
             node = self.graph.get_node(node_id)
             if node is not None:
@@ -345,10 +346,14 @@ class TestAutoRetry:
                 # 走 Revise：调用 runtime.revise_worker_node 且任务携带失败原因
                 assert len(self.runtime.revise_calls) == 1, \
                     "Worker auto-retry should call runtime.revise_worker_node exactly once"
-                called_id, called_task = self.runtime.revise_calls[0]
+                called_id, called_task, called_reason = self.runtime.revise_calls[0]
                 assert called_id == "W1"
                 assert "失败原因" in called_task and "不要重头开始" in called_task, \
                     "revise task should carry failure feedback and forbid full restart"
+                # reason 必须与用户手点的 Revise 区分开：界面上「你上一轮执行失败了…」
+                # 这条任务得说清是谁写进来的（否则看的人以为是用户自己写的）。
+                assert called_reason == "retry", \
+                    "auto-retry must tag the revise as 'retry', not 'revise'"
 
                 # pending_context 标记为 revise 增量续跑
                 node = self.graph.get_node("W1")

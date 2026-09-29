@@ -21,7 +21,7 @@ import { useGraphStore } from '../stores/GraphStore';
 import { useSessionStore } from '../stores/SessionStore';
 import { useUIStateStore } from '../stores/UIStateStore';
 import { useEventStore } from '../stores/EventStore';
-import { GraphNode, LogEntry, LogLevel, NodeConfig, NodeStatus, WorkspaceFile, WorkspaceListing } from '../types';
+import { GraphNode, LogEntry, LogLevel, NodeConfig, NodeStatus, TASK_HISTORY_REASONS, WorkspaceFile, WorkspaceListing } from '../types';
 import {
   continueNode,
   controlSessionNode,
@@ -242,6 +242,45 @@ const NodeInspector: React.FC = () => {
     [logs, logLevel, visibleLogStart],
   );
 
+  /**
+   * 任务链：原始任务在最上面，之后每被改写一次就在下面补一条，当前任务收尾。
+   *
+   * 后端存的是「被顶替掉的那条」—— `entry.at` 是**它被换掉**的时间，`entry.reason`
+   * 是**它被换掉**的原因。所以某一条的「到达时间 / 到达原因」是它**前一条**的
+   * at / reason，不是它自己的。照搬 entry.reason 当这一条的标签会张冠李戴：
+   * 一次「自动重试」会被标在**被换掉的旧**任务上，而该标的是重试换来的**新**任务。
+   *
+   * 原始任务没有到达原因，单独给标签。`task_history` 为空（旧会话、从未改过任务）
+   * 时返回 null，调用方退回单条任务渲染 —— 那种节点与今天完全一致。
+   */
+  const taskChain = useMemo(() => {
+    const chain = node?.task_history || [];
+    if (chain.length === 0) return null;
+    // 认不出的 slug 直接显示 slug 本身。宁可显示 `resequenced` 这种生词，
+    // 也不要显示 `inspector.taskReason.resequenced` 这种内部 key。
+    const reasonLabel = (reason: string) => (
+      TASK_HISTORY_REASONS.includes(reason as (typeof TASK_HISTORY_REASONS)[number])
+        ? t(`inspector.taskReason.${reason}`)
+        : reason
+    );
+    const rows = chain.map((entry, index) => ({
+      key: `${entry.at}-${index}`,
+      label: index === 0 ? t('inspector.taskOrigin') : reasonLabel(chain[index - 1].reason),
+      at: index === 0 ? node?.created_at : chain[index - 1].at,
+      task: entry.task,
+      current: false,
+    }));
+    const last = chain[chain.length - 1];
+    rows.push({
+      key: 'current',
+      label: reasonLabel(last.reason),
+      at: last.at,
+      task: node?.task || '',
+      current: true,
+    });
+    return rows;
+  }, [node, t]);
+
   useEffect(() => {
     setVisibleLogStart(0);
   }, [selectedNodeId]);
@@ -454,7 +493,32 @@ const NodeInspector: React.FC = () => {
       <div className="inspector-content">
         {tab === 'overview' && (
           <div className="detail-stack">
-            <section><h3>{t('node.task')}</h3><p className="task-copy">{node.task || t('inspector.noTaskDescription')}</p></section>
+            <section>
+              <h3>{t('node.task')}</h3>
+              {/*
+                `task` 是「现在该执行什么」，会被 Revise / 增量复用 / 评审修复 /
+                界面改任务 整条盖掉。被盖掉的那条只存在 task_history 里 —— 没有它，
+                一个被改过三次的节点看上去就是凭空冒出来的一条增量任务，看不出本来
+                干什么的。所以整条链一起渲染：原始任务打头，后续每条补在后面，
+                当前任务收尾。**不给折叠** —— 折起来的恰恰是最该看见的「这活本来是什么」。
+              */}
+              {taskChain ? (
+                <ol className="task-chain">
+                  {taskChain.map((row) => (
+                    <li key={row.key} className={row.current ? 'is-current' : ''}>
+                      <div className="task-chain-meta">
+                        <span className="task-chain-label">{row.label}</span>
+                        {row.at && <time>{new Date(row.at).toLocaleString()}</time>}
+                        {row.current && <span className="task-chain-badge">{t('inspector.taskCurrent')}</span>}
+                      </div>
+                      <p className="task-copy">{row.task}</p>
+                    </li>
+                  ))}
+                </ol>
+              ) : (
+                <p className="task-copy">{node.task || t('inspector.noTaskDescription')}</p>
+              )}
+            </section>
             <section><h3>{t('inspector.configuration')}</h3><pre>{JSON.stringify(node.config || {}, null, 2)}</pre></section>
             {node.error && <section className="error-section"><h3>{t('common.error')}</h3><p>{node.error}</p></section>}
             <section className="metadata-grid">

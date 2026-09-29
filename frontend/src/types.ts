@@ -55,6 +55,20 @@ export enum SSEClientStatus {
 // 数据接口
 // ============================================================================
 
+/** 一条被顶替掉的任务。reason 是后端给的 slug（见 TASK_HISTORY_REASONS）。 */
+export interface TaskHistoryEntry {
+  task: string;
+  at: string;
+  reason: string;
+}
+
+/**
+ * 后端的 reason 取值。与 runtime/models.py 的 TASK_HISTORY_REASONS 同源 ——
+ * 两边各写一份的话，后端加一个值前端就显示裸 key。界面只认这几个，
+ * 认不出的一律回退显示 slug 原文（总比显示 `inspector.taskReason.xxx` 强）。
+ */
+export const TASK_HISTORY_REASONS = ['revise', 'retry', 'reuse', 'repair', 'manual'] as const;
+
 /** 图节点（业务数据） */
 export interface GraphNode {
   id: string;
@@ -63,6 +77,12 @@ export interface GraphNode {
   exec_type: 'M' | 'W'; // Manager | Worker
   role?: string;
   task?: string;
+  /**
+   * task 被顶替掉的历史，时间正序。`task` 是「现在该执行什么」，这里存的是
+   * 它之前是什么、以及为什么被换掉（reason 见 TASK_HISTORY_REASONS）。
+   * 旧会话与从未改过任务的节点是空数组。
+   */
+  task_history?: TaskHistoryEntry[];
   config?: NodeConfig;
   parent_id?: string | null;
   subtree_root?: string | null;

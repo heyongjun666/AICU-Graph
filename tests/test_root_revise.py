@@ -580,6 +580,11 @@ class TestReactivateReusedWorker:
             assert pc["collaboration_type"] == "revise"
             assert pc["incremental_task"] == "t"
             assert pc["activated_by"] == mgr_id
+            # 这条路径整体替换 pending_context，原任务在节点上再无留痕，
+            # 任务链是唯一的记录。默认 reason 是 reuse（Manager 增量规划复用子节点）。
+            assert [e["reason"] for e in node.task_history] == ["reuse"]
+            assert node.task_history[0]["task"] == "Task W1"
+            assert node.task == "t"
         finally:
             with Worker._aicu_cache_lock:
                 Worker._aicu_cache.pop(child.id, None)

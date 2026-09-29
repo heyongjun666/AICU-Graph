@@ -139,6 +139,16 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .detail-stack { padding: 16px; display: flex; flex-direction: column; gap: 20px; }
 .detail-stack section h3 { margin: 0 0 8px; color: #6f7680; font-size: 11px; text-transform: uppercase; }
 .task-copy { color: #34383e; font-size: 13px; line-height: 1.65; white-space: pre-wrap; }
+/* ---- 任务链：原始任务打头，每被改写一次补一条，当前任务收尾（V3-2.3） ----
+   不折叠。折起来的恰恰是「这活本来是什么」，而那正是这条链存在的理由。 */
+.task-chain { margin: 8px 0 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 12px; }
+.task-chain > li { position: relative; padding-left: 10px; border-left: 2px solid #e6e8eb; }
+.task-chain > li.is-current { border-left-color: #4d8d7c; }
+.task-chain-meta { display: flex; align-items: baseline; gap: 8px; margin-bottom: 3px; }
+.task-chain-label { color: #4a5a70; font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.02em; }
+.task-chain-meta time { color: #8a9099; font-size: 10px; }
+.task-chain-badge { margin-left: auto; padding: 1px 7px; border-radius: 9px; background: #e7f1ed; color: #176b55; font-size: 10px; font-weight: 700; }
+.task-chain > li:not(.is-current) .task-copy { color: #6f7680; font-size: 12px; }
 .detail-stack pre { overflow: auto; padding: 12px; border: 1px solid #e6e8eb; border-radius: 6px; background: #f7f8f9; color: #353a40; font: 11px/1.6 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap; word-break: break-word; }
 .artifact-tab { min-height: 0; display: flex; flex: 1; flex-direction: column; }
 .artifact-toolbar { min-height: 38px; display: grid; grid-template-columns: 30px minmax(0, 1fr) 30px; align-items: center; gap: 6px; padding: 4px 8px; border-bottom: 1px solid var(--border); }

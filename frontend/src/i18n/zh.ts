@@ -639,6 +639,15 @@ export const zh: Dict = {
   'inspector.workerRevising': 'Worker 修订中',
   'inspector.noTaskDescription': '无任务描述',
   'inspector.configuration': '配置',
+  // 任务链：`task` 是「现在该执行什么」，被它盖掉的那几条存在这里。
+  // 下面 5 个 reason 必须与 runtime/models.py 的 TASK_HISTORY_REASONS 对齐。
+  'inspector.taskOrigin': '原始任务',
+  'inspector.taskCurrent': '当前',
+  'inspector.taskReason.revise': '增量修订',
+  'inspector.taskReason.retry': '自动重试',
+  'inspector.taskReason.reuse': '增量复用',
+  'inspector.taskReason.repair': '评审修复',
+  'inspector.taskReason.manual': '手动修改',
   'inspector.created': '创建',
   'inspector.started': '开始',
   'inspector.finished': '完成',

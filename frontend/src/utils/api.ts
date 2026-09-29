@@ -126,6 +126,10 @@ export function mapNodeFromBackend(raw: any): GraphNode {
     exec_type: feExecType,
     role: raw.role,
     task: raw.task,
+    // 这个函数是**手搭的对象字面量**，不是 spread：漏一个字段就是界面永远拿不到它。
+    // 而且 NodeInspector 渲染的是本地 node state（来自 getSessionNode → 这里），
+    // 不是 graph store 里那份 —— 光在后端快照里加是不够的。
+    task_history: raw.task_history,
     config: raw.config,
     parent_id: raw.parent_id,
     manager_phase: raw.manager_phase,

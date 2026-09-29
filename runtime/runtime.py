@@ -35,6 +35,7 @@ from runtime.models import (
     Step,
     non_whitelisted_config_keys,
     non_whitelisted_config_message,
+    superseded_task_history,
     task_too_long_message,
 )
 from runtime.persistence import Persistence
@@ -863,6 +864,14 @@ class Runtime(RuntimeGateway, SchedulerDelegate):
                 "pending_context": fix_ctx,
                 "log": [],
             }
+            # 修复计划经常原样回显子节点 task（executables/manager.py 那条
+            # `original.get("task", ...)` 分支），未变化时 superseded_task_history
+            # 返回 None，这里整个跳过该 key，免得记出一条与当前任务逐字相同的"历史"。
+            history = superseded_task_history(
+                child.task_history, child.task, step.task, "repair"
+            )
+            if history is not None:
+                updates["task_history"] = history
             role_changed = child is not None and step.role != child.role
             if role_changed:
                 updates["role"] = step.role
@@ -990,6 +999,20 @@ class Runtime(RuntimeGateway, SchedulerDelegate):
         if not any(s.reuse_step_ref for s in plan.steps):
             return {}
         children = self.graph.children(parent_node_id)
+        # 没有任何既有子节点时，「复用某个子节点」是空命题：既没有可解析的目标，
+        # 也没有可被覆盖的职责。正常增量一定有候选块，走到这里只有一种情况 ——
+        # Manager 被增量通道驱动（pending_revise）但名下没有子节点，而它从
+        # 「增量任务」文本里读出了复用意图。此时按「无复用」处理，让计划照常
+        # 新建节点；抛错会让该节点在每一次重试里确定性地死掉，且没有任何
+        # 可选的补救动作（计划是 LLM 生成的，用户改不动）。
+        if not children:
+            logger.warning(
+                "Node '%s' submitted a revision plan with reuse_step_ref but has no "
+                "child node to reuse; falling back to fresh steps for: %s",
+                parent_node_id,
+                ", ".join(sorted({s.reuse_step_ref for s in plan.steps if s.reuse_step_ref})),
+            )
+            return {}
         # 仅「未被复用的新 step」进入 new_step_ids —— step 自身携带 reuse_step_ref
         # （如 step_id="backend" 复用同名的既有子节点）是合法复用，不属于「指向本计划新 step」。
         new_step_ids = {
@@ -1214,7 +1237,8 @@ class Runtime(RuntimeGateway, SchedulerDelegate):
         self.graph.update_node(node_id, execution_plan=plan)
 
     def _reactivate_reused_worker(
-        self, node: Node, new_step: Step, prepared_config: dict
+        self, node: Node, new_step: Step, prepared_config: dict,
+        *, reason: str = "reuse",
     ) -> None:
         """把被复用的子节点重置为可执行状态，注入增量上下文。
 
@@ -1223,6 +1247,12 @@ class Runtime(RuntimeGateway, SchedulerDelegate):
           1) role 变更（原会话上下文属于旧角色）；
           2) AICU 相关 config 变更（cli_name/model/api_base_url/api_key_env/skills）；
           3) 节点工作区目录不存在（workspace 失效，resume 无地基）。
+
+        Args:
+            reason: 记进任务链的原因标签（``reuse`` / ``revise`` / ``retry``）。
+                仅关键字且有默认值 —— 本方法已有 4 处位置调用方与一个测试替身。
+                三条调用链在这里合流（Manager 增量复用 / 用户 Revise / 自动重试），
+                在源头分开标记，界面上才能说清这条任务是被谁换掉的。
         """
         from executables.worker import Worker
 
@@ -1271,6 +1301,12 @@ class Runtime(RuntimeGateway, SchedulerDelegate):
             "activation_count": getattr(node, "activation_count", 0) + 1,
             "iteration_count": 0,
         }
+        # 这条路径整体替换 pending_context，原任务在节点上再无留痕 —— 任务链是唯一的记录。
+        history = superseded_task_history(
+            node.task_history, node.task, new_step.task, reason
+        )
+        if history is not None:
+            common["task_history"] = history
         if node.exec_type == "manager":
             # 复用的子 Manager → 自身重进 expand，递归复用其子节点
             common["manager_phase"] = "expand"
@@ -1516,21 +1552,26 @@ class Runtime(RuntimeGateway, SchedulerDelegate):
             self.scheduler.clear_manager_notification(node_id)
             # Revise 的上下文是当前增量请求的完整上下文，保持替换语义；
             # artifact_path 也按原行为保留，供子节点复用时继续使用。
-            self.graph.update_node(
-                node_id,
-                manager_phase="expand",
-                pending_revise=True,
-                task=task,
-                config=merged_config,
-                pending_context=pending_context,
-                iteration_count=0,
-                activation_count=0,
-                routing_history=[],
-                pending_routing=None,
-                error=None,
-                started_at=None,
-                finished_at=None,
+            updates: dict[str, Any] = {
+                "manager_phase": "expand",
+                "pending_revise": True,
+                "task": task,
+                "config": merged_config,
+                "pending_context": pending_context,
+                "iteration_count": 0,
+                "activation_count": 0,
+                "routing_history": [],
+                "pending_routing": None,
+                "error": None,
+                "started_at": None,
+                "finished_at": None,
+            }
+            history = superseded_task_history(
+                node.task_history, node.task, task, "revise"
             )
+            if history is not None:
+                updates["task_history"] = history
+            self.graph.update_node(node_id, **updates)
             self.scheduler.reactivate(
                 node_id,
                 target_status=NodeStatus.WAITING,
@@ -1544,7 +1585,8 @@ class Runtime(RuntimeGateway, SchedulerDelegate):
         return node_id
 
     def revise_worker_node(
-        self, node_id: str, task: str, config: Optional[dict] = None
+        self, node_id: str, task: str, config: Optional[dict] = None,
+        *, reason: str = "revise",
     ) -> str:
         """增量续跑已完成 Worker 节点（Revise，保留产物/原 CC Agent 会话）。
 
@@ -1559,6 +1601,8 @@ class Runtime(RuntimeGateway, SchedulerDelegate):
             node_id: 目标 Worker 节点 ID。
             task: 增量任务描述。
             config: 配置覆盖项。
+            reason: 任务链的原因标签。默认 ``revise``（用户发起）；自动重试那条链
+                经这里进 _reactivate_reused_worker，会显式传 ``retry``。
 
         Returns:
             原节点 ID。
@@ -1582,7 +1626,9 @@ class Runtime(RuntimeGateway, SchedulerDelegate):
             prepared_config = self._prepare_node_config(
                 node.id, merged_config, node.parent_id
             )
-            self._reactivate_reused_worker(node, incremental_step, prepared_config)
+            self._reactivate_reused_worker(
+                node, incremental_step, prepared_config, reason=reason
+            )
             # 清理残留终态簿记（镜像 continue_node / revise_manager_node）
             self.graph.update_node(
                 node_id, error=None, started_at=None, finished_at=None
@@ -1824,6 +1870,14 @@ class Runtime(RuntimeGateway, SchedulerDelegate):
         self, node_id: str, status: NodeStatus, **updates: Any
     ) -> None:
         """RuntimeGateway.update_node_status — 更新节点状态并发布事件。"""
+        # 通用透传，**不是**改 task 的入口：今天没有调用方传 task，将来有人传就会
+        # 绕过任务链，让一条任务悄无声息地消失。改 task 请走 update_node_task /
+        # update_manual_node / revise_*，它们会记历史。
+        if "task" in updates:
+            raise ValueError(
+                "update_node_status does not accept 'task'; use update_node_task "
+                "or update_manual_node so the superseded task is recorded"
+            )
         if updates.get("artifact_path"):
             artifact = str(updates["artifact_path"])
             workspace = os.path.realpath(self.get_node_workspace(node_id))
@@ -2482,6 +2536,10 @@ class Runtime(RuntimeGateway, SchedulerDelegate):
                     key: value for key, value in (n.config or {}).items()
                     if not key.startswith("_")
                 },
+                # 被 task 顶替掉的历史。这个方法是**手写 key 字面量**，不写这一行
+                # 新字段就到不了前端 —— _node_detail 的 to_json 全字段泄漏在另一条
+                # 路上，两条路各写各的。
+                "task_history": n.task_history or [],
             })
         edges = []
         for e in self.graph.all_edges():
@@ -2506,7 +2564,14 @@ class Runtime(RuntimeGateway, SchedulerDelegate):
             ValueError: 节点不存在。
         """
         node = self._require_node(node_id)
-        self.graph.update_node(node_id, task=task)
+        history = superseded_task_history(
+            node.task_history, node.task, task, "manual"
+        )
+        if history is None:
+            # task 没变：不发这次更新。这会让"无变化的写入"不再产生
+            # node_updated 事件 —— 本来也没有任何东西变了。
+            return
+        self.graph.update_node(node_id, task=task, task_history=history)
 
     def create_manual_node(
         self,
@@ -2572,11 +2637,30 @@ class Runtime(RuntimeGateway, SchedulerDelegate):
             )
         allowed = {"task", "role", "exec_type", "config"}
         safe_updates = {key: value for key, value in updates.items() if key in allowed}
+        if "task" in safe_updates:
+            # 这是界面上真正在用的改任务入口（PATCH …/nodes/{nid}）。编辑框每次保存
+            # 都会把 task 一起重发 —— 只改模型名也会走到这里 —— 所以"没变就不记"
+            # 这条规则不是锦上添花，是防每次改配置都多一条重复历史。
+            history = superseded_task_history(
+                node.task_history, node.task, safe_updates["task"], "manual"
+            )
+            if history is not None:
+                safe_updates["task_history"] = history
         if "exec_type" in safe_updates or "role" in safe_updates:
             self._validate_manual_role(
                 safe_updates.get("exec_type", node.exec_type),
                 safe_updates.get("role", node.role),
             )
+        # 结构不变量：有子节点的 manager 不得降级为 worker。否则子树悬空，
+        # _check_manager_children_completed 因 parent 非 manager 提前返回 → 评审卡死
+        # （与 submit_fix_plan 的 exec_type 不翻转规则同源，见其 docstring）。
+        new_exec_type = safe_updates.get("exec_type", node.exec_type)
+        if node.exec_type == "manager" and new_exec_type != "manager":
+            if self.graph.children(node_id):
+                raise RuntimeError(
+                    f"Node '{node_id}' is a manager with child nodes; "
+                    "cannot change its exec_type away from 'manager'"
+                )
         self.graph.validate_parent(node_id, node.parent_id)
         if safe_updates:
             self.graph.update_node(node_id, **safe_updates)

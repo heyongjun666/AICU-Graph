@@ -638,6 +638,15 @@ export const en: Dict = {
   'inspector.workerRevising': 'Worker revising',
   'inspector.noTaskDescription': 'No task description',
   'inspector.configuration': 'Configuration',
+  // Task history: `task` is "what to run now"; the ones it replaced live here.
+  // These 5 reasons must stay in sync with TASK_HISTORY_REASONS in runtime/models.py.
+  'inspector.taskOrigin': 'Original task',
+  'inspector.taskCurrent': 'Current',
+  'inspector.taskReason.revise': 'Revised',
+  'inspector.taskReason.retry': 'Auto-retry',
+  'inspector.taskReason.reuse': 'Reused incrementally',
+  'inspector.taskReason.repair': 'Review fix',
+  'inspector.taskReason.manual': 'Edited manually',
   'inspector.created': 'Created',
   'inspector.started': 'Started',
   'inspector.finished': 'Finished',

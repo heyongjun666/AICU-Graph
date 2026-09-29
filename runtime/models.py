@@ -79,8 +79,44 @@ _MIN_AUDIT_ROUNDS = 0
 _MAX_AUDIT_ROUNDS = 10
 # Node log 最大条目数
 _MAX_LOG_ENTRIES = 10000
+# Node task_history 最大条目数（超出的丢最旧，与 log 的 FIFO 口径一致）。
+# 节点可以被无限次重激活（实测见过 activation_count=7），不封顶的话链条只涨不落。
+_MAX_TASK_HISTORY = 20
 # 合法的日志级别集合（用于 LogEntry.__post_init__ 校验）
 _VALID_LOG_LEVELS = ("DEBUG", "INFO", "WARN", "ERROR")
+
+# task_history 条目的 reason 取值。界面按它选文案，所以是一份**契约**：
+# 加新值时后端与前端 i18n 要一起加（前端对未知 slug 有回退，不会显示裸 key）。
+TASK_HISTORY_REASONS = ("revise", "retry", "reuse", "repair", "manual")
+
+
+def superseded_task_history(
+    history: Optional[list],
+    outgoing_task: Optional[str],
+    new_task: Optional[str],
+    reason: str,
+) -> Optional[list]:
+    """``task`` 即将被改写时，把**当前**这条记进任务链；返回新的 ``task_history``。
+
+    **返回 ``None`` 表示「不要写这个 key」**，调用方必须整个跳过，而不是写个空列表 ——
+    写空列表会把已有历史清掉。
+
+    两处会传进来与当前完全相同的 task，都必须挡住，否则凭空多出一条重复条目：
+
+    1. 界面编辑框每次保存都无条件重发 ``task``（只改模型名也发）；
+    2. 修复计划常原样回显子节点的 task。
+
+    单条按 ``MAX_TASK_LENGTH`` 截断：``UpdateNodeRequest.task`` 放到 100000，
+    20 条不截断能顶到 2MB/节点，而 5000 已经是全系统对 task 的既有上限。
+    """
+    if (new_task or "") == (outgoing_task or ""):
+        return None
+    entry = {
+        "task": (outgoing_task or "")[:MAX_TASK_LENGTH],
+        "at": datetime.now().isoformat(timespec="seconds"),
+        "reason": reason,
+    }
+    return (list(history or []) + [entry])[-_MAX_TASK_HISTORY:]
 
 
 def non_whitelisted_config_keys(config: Optional[dict]) -> set:
@@ -527,6 +563,20 @@ class Node(_JsonSerializable):
     pending_revise: bool = False
     # === 闭环协作台账（A2：Manager 逐轮 review 累积，业务产出 closed_loop.json） ===
     collaboration_ledger: list[dict] = field(default_factory=list)
+    # === 任务链 ===
+    # 记的是**被顶替掉**的历史 task，`task` 恒为「现在该执行什么」。
+    #
+    # 存在的理由：Revise / 增量复用 / 评审修复 / 界面改任务 都会把 `task` 整个盖掉，
+    # 而盖掉之后原任务在整个系统里再无留痕（pending_context 开跑即清空、
+    # LogEntry.task 生产路径从不填、修复路径还会顺手 log=[]）。于是概览页上
+    # 一个被改过三次的节点，只能看到最后一次的增量任务，看不出它本来是干什么的。
+    #
+    # **创建时有意不播种。** 播种只能放进 __post_init__，而 from_json 同样走
+    # cls(**data)，__post_init__ 分不清「新建节点」与「恢复一个没有该字段的旧
+    # graph.json」—— 对旧节点播种会把一条**已经是增量任务的** task 谎称成原始任务。
+    # 不播种则语义天然正确：新节点的第一条历史就是它的原任务（第一次被覆盖时产生）；
+    # 旧节点历史为空，界面不显示历史区，下次覆盖起开始积累。
+    task_history: list[dict] = field(default_factory=list)
 
     def __setattr__(self, name, value):
         """拦截 status 赋值，校验状态转换基础规则。"""
@@ -565,6 +615,13 @@ class Node(_JsonSerializable):
         # FIFO 裁剪 log 至 _MAX_LOG_ENTRIES 条
         if len(self.log) > _MAX_LOG_ENTRIES:
             self.log = self.log[-_MAX_LOG_ENTRIES:]
+        # 同一口径裁任务链：写入点已经裁过，这里防的是手工改过的 graph.json
+        # 把超长链一直带着。（裁剪不是播种，与上面「创建时不写」不冲突。）
+        # 顺带把落盘成 null 的归一成 []，免得下游每处都要判空。
+        if self.task_history is None:
+            self.task_history = []
+        elif len(self.task_history) > _MAX_TASK_HISTORY:
+            self.task_history = self.task_history[-_MAX_TASK_HISTORY:]
 
     def set_status(self, new_status: NodeStatus) -> None:
         """显式状态变更方法（推荐使用，语义清晰）。

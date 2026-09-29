@@ -1341,6 +1341,20 @@ class TestUpdateNodeTask:
         runtime.update_node_task(node_id, "updated task")
         node = runtime.get_node(node_id)
         assert node.task == "updated task"
+        # 被顶掉的那条进任务链，否则概览页上「这个节点本来是干什么的」就没了
+        assert node.task_history == [
+            {"task": "original task", "at": node.task_history[0]["at"], "reason": "manual"}
+        ]
+
+    def test_update_task_to_same_value_records_nothing(self, runtime):
+        # 界面编辑框每次保存都把 task 一起重发（只改模型名也发）。没有这道闸门，
+        # 改一次配置就多一条与当前任务逐字相同的"历史"。
+        runtime.start()
+        node_id = runtime.submit_root_manager("original task")
+        runtime.update_node_task(node_id, "original task")
+        node = runtime.get_node(node_id)
+        assert node.task == "original task"
+        assert node.task_history == []
 
     def test_update_task_nonexistent_node(self, runtime):
         with pytest.raises(ValueError, match="not found"):

@@ -17,6 +17,7 @@ runtime/scheduler.py — Scheduler 单层图调度引擎
 import atexit
 import concurrent.futures
 import glob
+import inspect
 import json
 import logging
 import os
@@ -1379,7 +1380,14 @@ class Scheduler:
             )
             return False
 
-        revise_fn(failed_node.id, revise_task)
+        # 标记这次改写来自自动重试（而不是用户 Revise）—— 界面上「你上一轮执行失败了…」
+        # 这条任务必须说清是谁写进来的。但签名要探，不能硬传：上面那个 getattr 是
+        # 鸭子类型接缝，老网关/mock 没有 reason 参数，硬传会抛 TypeError，
+        # 把既定的回退路径变成异常。
+        if "reason" in inspect.signature(revise_fn).parameters:
+            revise_fn(failed_node.id, revise_task, reason="retry")
+        else:
+            revise_fn(failed_node.id, revise_task)
 
         # _reactivate_reused_worker 会把 iteration_count 重置为 0，这里回写为本次尝试数
         self.graph.update_node(failed_node.id, iteration_count=new_iteration)

@@ -888,15 +888,15 @@ class AICU:
                 # final_content 恒为空，plan_result 落盘为空文件，下游解析失败。
                 raw = self.ccs[cc_id].workspace / "cc_output.md"
                 if raw.exists():
-                    return raw.read_text(encoding="utf-8")
+                    return raw.read_text(encoding="utf-8", errors="replace")
                 return ""
-            return "\n".join(f.read_text(encoding='utf-8') for f in files if f.exists())
+            return "\n".join(f.read_text(encoding='utf-8', errors='replace') for f in files if f.exists())
         path = self._cc_deliverable_dir(cc_id) / target
         if not path.exists():
             return ""
         if path.is_dir():
             return self._read_output_directory(path)
-        return path.read_text(encoding='utf-8')
+        return path.read_text(encoding='utf-8', errors='replace')
 
     @staticmethod
     def _read_output_directory(dir_path: Path) -> str:
@@ -910,7 +910,7 @@ class AICU:
         index_path = dir_path / "_INDEX.md"
         if index_path.exists():
             # _INDEX.md 作为主入口，附加文件清单供下游按需读取
-            parts = [index_path.read_text(encoding='utf-8')]
+            parts = [index_path.read_text(encoding='utf-8', errors='replace')]
             parts.append("\n\n---\n## 产出目录文件清单\n")
             for f in sorted(dir_path.rglob("*")):
                 if not f.is_file():
@@ -931,7 +931,7 @@ class AICU:
         for f in md_files:
             rel = f.relative_to(dir_path)
             parts.append(f"\n\n==> {rel}\n")
-            parts.append(f.read_text(encoding='utf-8'))
+            parts.append(f.read_text(encoding='utf-8', errors='replace'))
         return "\n".join(parts)
 
     def _save_to_workspace(self, filename: str, content: str):
@@ -970,6 +970,7 @@ class AICU:
         '.dat', '.db', '.sqlite', '.pickle',
         '.lock', '.cache', '.tmp', '.swp', '.bak', '.orig',
         '.egg-info', '.whl',
+        '.log', '.out',  # 日志/命令输出（CC 测试产物），非源码
     }
     # 框架自身文件（AICU/CC 生成的管理文件，不是项目产出）
     NONCODE_FILENAMES = {

@@ -251,3 +251,41 @@ def test_finalize_result_default_still_copies_to_workspace(tmp_path):
     result = _finalize(aicu)
     # final_file="output"（code.yaml）→ 副本落到 ws/output
     assert (Path(ws) / "output").exists()
+
+
+# ============================================================================
+# 容错解码：分区里混入非 UTF-8 文件（GBK 日志/二进制）不应让 worker 崩溃
+# ============================================================================
+
+def test_read_cc_file_tolerates_non_utf8_file(tmp_path):
+    """分区里遗留含非法 UTF-8 字节的文件 → 读产出不抛异常。
+
+    回归：CC 在分区里跑测试会遗留 .log / .CORRUPT-* 等非源码文件，其中可能含
+    GBK 编码的中文字节（0xac 等）。_list_code_files 若漏判把它当代码，读取时
+    必须容错解码（errors='replace'），而不是 UnicodeDecodeError 让整个 worker
+    失败（生产事件：节点 5332f799 反复 FAILED，报 utf-8 0xac 解码错误）。
+    """
+    _, partition = _make_shared_layout(tmp_path)
+    aicu, _, _ = _make_aicu(tmp_path, shared_target=partition,
+                            modular=False, output_file="out.txt")
+    Path(partition, "app.py").write_text("def f(): return 1\n", encoding="utf-8")
+    # 模拟 CC 遗留的含 GBK 字节的损坏日志（0xac 是 GBK 中文字节的一部分，
+    # 后随「次」的 UTF-8 编码 e6 ac a1）
+    Path(partition, "notes.log.CORRUPT-20260923T002128Z").write_bytes(
+        b"start...\xac\xe6\xac\xa1...end"
+    )
+    content = aicu._read_cc_file(0, "any_name_ignored")
+    assert "def f(): return 1" in content  # 正常代码文件仍读出
+    assert "start" in content  # 坏文件被容错解码，不再抛 UnicodeDecodeError
+
+
+def test_is_code_file_excludes_log_and_out(tmp_path):
+    """日志/命令输出（.log / .out）不是源码，_is_code_file 判为非代码。"""
+    _, partition = _make_shared_layout(tmp_path)
+    aicu, _, _ = _make_aicu(tmp_path, shared_target=partition)
+    for name in ("app_run.log", "manifest.out", "app.py"):
+        Path(partition, name).write_text("x", encoding="utf-8")
+    assert not aicu._is_code_file(Path(partition, "app_run.log"))
+    assert not aicu._is_code_file(Path(partition, "manifest.out"))
+    # 对照组：普通 .py 仍算代码（上两条不能是靠「一切非 .md 都不算」蒙对的）
+    assert aicu._is_code_file(Path(partition, "app.py"))

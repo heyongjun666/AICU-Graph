@@ -418,6 +418,8 @@ class ClaudeCodeAgent:
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 cwd=self.workspace,
                 env=self._build_process_env(),
                 start_new_session=True,  # 子进程成为新会话/进程组的组长

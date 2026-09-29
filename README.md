@@ -105,7 +105,7 @@ Each AICU node can configure `num_ccs` to select an internal peer collaboration 
 
 | Mode | Configuration | Collaboration pattern | Typical use |
 | --- | ---: | --- | --- |
-| **Solo** | `1` | One agent generates, self-reviews, and revises when needed | Simple, low-risk, mechanical tasks |
+| **Solo** | `1` | One agent generates the result once; no self-review or revision loop | Simple, low-risk, mechanical tasks |
 | **Pair** | `2` | One agent produces, another reviews, and the producer revises | General development; default quality/cost balance |
 | **Triple** | `3` | Two agents produce independently; a third compares, selects, and merges | Requirements, architecture, important decisions |
 | **Full** | `4` | Two proposals, merge review, independent deep audit, and repair iterations | Core features, high-risk work, release audits |
@@ -164,8 +164,8 @@ There are three suites, and none of them subsumes another — a green `run_tests
 | Suite | Command | Cases |
 |---|---|---|
 | Core primitives (self-contained runner, stdlib only) | `python3 run_tests.py` | 144 |
-| Full pytest suite | `python3 -m pytest` | 1609 |
-| Frontend (vitest + Testing Library) | `cd frontend && npm test` | 297 |
+| Full pytest suite | `python3 -m pytest tests` | 2115 |
+| Frontend (vitest + Testing Library) | `cd frontend && npm test -- --run` | 408 |
 
 Install the test dependencies first:
 

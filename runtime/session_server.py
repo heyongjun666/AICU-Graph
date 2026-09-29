@@ -629,7 +629,9 @@ def create_session_app(
                 role=body.role,
                 config=body.config,
             )
-        except (ValueError, RuntimeError) as error:
+        except ValueError as error:
+            raise _http_error(400, error) from error
+        except RuntimeError as error:
             raise _http_error(409, error) from error
 
     @app.get("/v1/sessions/{session_id}")
@@ -647,13 +649,11 @@ def create_session_app(
 
     @app.get("/v1/sessions/{session_id}/settings")
     def get_session_settings(session_id: str):
-        handle = resolve(session_id)
-        config = dict(handle.metadata.config)
-        credential_env = config.get("api_key_env")
+        resolve(session_id)
+        settings = session_manager.get_settings(session_id)
+        credential_env = settings["config"].get("api_key_env")
         return {
-            "config": config,
-            "workspace_root": handle.metadata.workspace_root,
-            "shared_workspace": handle.metadata.shared_workspace,
+            **settings,
             "credential_configured": bool(
                 credential_env and os.environ.get(str(credential_env))
             ),
@@ -681,6 +681,8 @@ def create_session_app(
             )
         except (OSError, ValueError) as error:
             raise _http_error(400, error) from error
+        except RuntimeError as error:
+            raise _http_error(409, error) from error
 
     @app.delete("/v1/sessions/{session_id}", status_code=204)
     def delete_session(session_id: str):

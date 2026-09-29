@@ -154,6 +154,7 @@ export interface NodeConfig {
   [key: string]: unknown;
 }
 
+/** 会话级配置（不含系统级并发上限，那在 GlobalConfig 里）。 */
 export interface SessionSettings {
   config: NodeConfig;
   workspace_root: string;

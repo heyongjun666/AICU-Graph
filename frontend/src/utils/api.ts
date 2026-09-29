@@ -549,7 +549,7 @@ export function getSessionEventsUrl(sessionId: string, sequenceId?: string): str
 }
 
 export function getSessionSettings(sessionId: string): Promise<SessionSettings> {
-  return sessionRequest(`sessions/${sessionId}/settings`);
+  return sessionRequest<SessionSettings>(`sessions/${sessionId}/settings`);
 }
 
 export function updateSessionSettings(

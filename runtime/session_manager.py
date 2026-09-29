@@ -152,6 +152,7 @@ class SessionHandle:
     metadata: SessionMetadata
     runtime: Runtime
     sse_manager: SSEManager
+    settings_lock: threading.RLock = field(default_factory=threading.RLock, repr=False)
 
 
 class SessionManager:
@@ -197,6 +198,8 @@ class SessionManager:
     ) -> dict[str, Any]:
         session_id = str(uuid.uuid4())
         now = _now()
+        # Validate before creating any session-owned directories or runtime.
+        session_config = _safe_session_config(config)
         requested_workspace = (config or {}).get("workspace_root")
         requested_shared = (config or {}).get("shared_workspace")
         # 会话未显式指定的 CLI/model 等配置，继承全局默认值。
@@ -228,7 +231,7 @@ class SessionManager:
             ),
             created_at=now,
             updated_at=now,
-            config={**inherited, **_safe_session_config(config)},
+            config={**inherited, **session_config},
             workspace_root=effective_workspace,
             shared_workspace=(
                 validate_shared_workspace(
@@ -238,6 +241,11 @@ class SessionManager:
                 else None
             ),
         )
+        if metadata.shared_workspace:
+            # validate_shared_workspace 的约定：「目录不存在时由调用方负责创建」。
+            # 用户在建会话时就指定了外部项目目录，那就是明确在要这个目录。
+            # 派生路径不在这里管 —— _build_handle 负责，见那里的注释。
+            os.makedirs(metadata.shared_workspace, exist_ok=True)
         handle = self._build_handle(metadata)
         with self._lock:
             self._sessions[session_id] = handle
@@ -267,6 +275,15 @@ class SessionManager:
             self._save_index()
         return self._summary(handle)
 
+    def get_settings(self, session_id: str) -> dict[str, Any]:
+        handle = self.get_session(session_id)
+        with handle.settings_lock, self._lock:
+            return {
+                "config": dict(handle.metadata.config),
+                "workspace_root": handle.metadata.workspace_root,
+                "shared_workspace": handle.metadata.shared_workspace,
+            }
+
     def update_settings(
         self,
         session_id: str,
@@ -275,37 +292,65 @@ class SessionManager:
         shared_workspace: Any = _UNSET,
     ) -> dict[str, Any]:
         handle = self.get_session(session_id)
-        with self._lock:
-            handle.metadata.config.update(_safe_session_config(config))
-            # 候选角色池：用 metadata 反推而非只看本次入参，否则两次 PATCH 会互相清空。
-            handle.runtime.candidate_roles = _normalize_candidate_roles(
-                handle.metadata.config.get("candidate_roles")
-            )
+        # Serialize PATCH (and settings reads) per session, never across sessions.
+        # The Scheduler can call back into this manager while holding its state
+        # lock, so runtime setters and rollback MUST run outside self._lock.
+        with handle.settings_lock:
+            metadata, runtime = handle.metadata, handle.runtime
+            with self._lock:
+                old_config = dict(metadata.config)
+                old_workspace = metadata.workspace_root
+                old_shared = metadata.shared_workspace
+                merged = _safe_session_config({**old_config, **(config or {})})
+            new_workspace = old_workspace
+            new_shared = old_shared
             if workspace_root is not None:
                 value = workspace_root.strip()
                 if not value:
                     raise ValueError("workspace_root cannot be empty")
-                resolved = os.path.abspath(os.path.expanduser(value))
-                os.makedirs(resolved, exist_ok=True)
-                handle.metadata.workspace_root = resolved
-                handle.runtime.workspace_root = resolved
+                new_workspace = os.path.abspath(os.path.expanduser(value))
             if shared_workspace is not _UNSET:
-                if shared_workspace is None or not str(shared_workspace).strip():
-                    # 清除配置 → 恢复默认 {workspace_root}/shared
-                    handle.metadata.shared_workspace = None
-                    handle.runtime.shared_workspace = None
-                else:
-                    resolved = validate_shared_workspace(
-                        str(shared_workspace),
-                        handle.runtime.workspace_root,
-                        self.root_dir,
+                new_shared = (
+                    validate_shared_workspace(
+                        str(shared_workspace), new_workspace, self.root_dir
                     )
-                    os.makedirs(resolved, exist_ok=True)
-                    handle.metadata.shared_workspace = resolved
-                    handle.runtime.shared_workspace = resolved
-            handle.metadata.updated_at = _now()
-            self._save_index()
-        return self._summary(handle)
+                    if shared_workspace is not None and str(shared_workspace).strip()
+                    else None
+                )
+            # Validate the entire request before changing runtime/metadata or
+            # creating directories. Preserve eager creation of derived shared roots.
+            if workspace_root is not None:
+                os.makedirs(new_workspace, exist_ok=True)
+            if workspace_root is not None or shared_workspace is not _UNSET:
+                os.makedirs(
+                    new_shared or resolve_shared_workspace(new_workspace), exist_ok=True
+                )
+            old_runtime_settings = (
+                runtime.workspace_root, runtime.shared_workspace, runtime.candidate_roles
+            )
+            with self._lock:
+                old_updated_at = metadata.updated_at
+                try:
+                    metadata.config = merged
+                    metadata.workspace_root = runtime.workspace_root = new_workspace
+                    metadata.shared_workspace = runtime.shared_workspace = new_shared
+                    runtime.candidate_roles = _normalize_candidate_roles(
+                        merged.get("candidate_roles")
+                    )
+                    metadata.updated_at = _now()
+                    self._save_index()
+                except Exception:
+                    metadata.config = old_config
+                    metadata.workspace_root = old_workspace
+                    metadata.shared_workspace = old_shared
+                    metadata.updated_at = old_updated_at
+                    (
+                        runtime.workspace_root,
+                        runtime.shared_workspace,
+                        runtime.candidate_roles,
+                    ) = old_runtime_settings
+                    raise
+            return self._summary(handle)
 
     def touch(self, session_id: str) -> None:
         handle = self.get_session(session_id)

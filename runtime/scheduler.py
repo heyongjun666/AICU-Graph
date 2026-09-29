@@ -54,7 +54,14 @@ def _shutdown_all_schedulers() -> None:
 
 atexit.register(_shutdown_all_schedulers)
 from runtime.graph import Graph
-from runtime.models import MAX_TASK_LENGTH, ManagerPhase, Node, NodeStatus, RoutingDecision
+from runtime.models import (
+    MAX_TASK_LENGTH,
+    EventMessage,
+    ManagerPhase,
+    Node,
+    NodeStatus,
+    RoutingDecision,
+)
 from runtime.state_machine import StateMachine
 
 if TYPE_CHECKING:
@@ -97,6 +104,9 @@ class Scheduler:
         event_bus: Any = None,
         planner: Optional["Planner"] = None,
         retry_delay: float = 1.0,
+        plan_before_execute: bool = True,
+        event_batch_threshold: int = 3,
+        event_batch_max_age: float = 1800.0,
     ):
         self.graph = graph
         self.registry = registry
@@ -106,6 +116,12 @@ class Scheduler:
         self.event_bus = event_bus
         self.planner = planner
         self.retry_delay = retry_delay
+        # 默认保持计划先行：所有非终态 Manager 展开后再放行 Worker。
+        self.plan_before_execute = plan_before_execute
+        # 事件合并触发：满阈值或最早事件滞留超兜底时限才合并重激活一次。
+        # 默认阈值为 3，用于减少节点唤醒和模型调用次数。
+        self.event_batch_threshold = event_batch_threshold
+        self.event_batch_max_age = event_batch_max_age
 
         # 线程池
         pool_size = max_concurrency + 2
@@ -338,7 +354,15 @@ class Scheduler:
 
                 if (ready_count == 0 and running_count == 0
                         and waiting_count == 0 and not self._scheduled_retries
-                        and self.active_execution_count == 0):
+                        and self.active_execution_count == 0
+                        # Routed inbox work keeps a terminal-only graph alive,
+                        # including batches still waiting for their age threshold.
+                        # Paused sessions must not be revived by pending events.
+                        and (paused or not any(
+                            self._peek_inbox_events(node)
+                            for node in self.graph.all_nodes()
+                            if node.status in self._REACTIVATABLE_STATUSES
+                        ))):
                     with self._state_lock:
                         paused = self._paused
                     if paused:
@@ -457,11 +481,15 @@ class Scheduler:
                 or n.manager_phase == "expand"
             )
         ]
+        # 计划先行屏障：worker 在图未长全（仍有未展开 manager）时保持 WAITING。
+        planning_barrier = self.plan_before_execute and self._has_unexpanded_manager()
         for node in waiting_nodes:
             # 正在等待定时重试（_try_auto_retry 记录的 ready_time）的节点，
             # 必须由 _process_scheduled_retries 到期后转为 READY，这里不得提前提升，
             # 否则 retry_delay 对无依赖叶子节点被同一 tick 绕过。
             if node.id in self._scheduled_retries:
+                continue
+            if planning_barrier and node.exec_type == "worker":
                 continue
             deps = self.graph.dependencies(node.id)
             # 依赖门控：只有「依赖全部 COMPLETED」才放行下游转 READY。
@@ -469,6 +497,52 @@ class Scheduler:
             # 需用户手动 continue/revise 失败的上游（或下游）才能解锁。
             if all(dep.status == NodeStatus.COMPLETED for dep in deps):
                 self._transition_node(node.id, NodeStatus.READY)
+
+    def dependencies_unsatisfied(self, node_id: str) -> bool:
+        """节点是否仍存在未满足的 DEPENDENCY 依赖，因而不能进入 READY。
+
+        与 _process_waiting_nodes 的门控语义严格一致：Worker 始终受依赖门控；
+        Manager 仅在「未 expand / 待 expand」（manager_phase is None 或 "expand"）
+        时受依赖门控，而 "waiting"（等子节点）与 "review"（评审）阶段不依赖
+        DEPENDENCY 上游、由 on_children_completed 驱动，不在此检查。
+
+        供所有绕过 Waiting→Ready 门控、直接把节点置 READY 的重激活路径
+        （reactivate / 定时重试 / 事件重激活 / resume）复用，保证无论经由哪条
+        旁路，依赖未满足的节点都不会被提前放行。
+        """
+        node = self.graph.get_node(node_id)
+        if node is None:
+            return False
+        if node.exec_type == "manager" and node.manager_phase in (
+            ManagerPhase.WAITING.value,
+            ManagerPhase.REVIEW.value,
+        ):
+            return False
+        deps = self.graph.dependencies(node_id)
+        return any(dep.status != NodeStatus.COMPLETED for dep in deps)
+
+    def _has_unexpanded_manager(self) -> bool:
+        """是否存在尚未展开且非终态的 Manager，供全局计划先行屏障使用。"""
+        for n in self.graph.all_nodes():
+            if n.exec_type != "manager":
+                continue
+            if n.manager_phase not in (None, "expand"):
+                continue
+            if n.status in (NodeStatus.WAITING, NodeStatus.READY, NodeStatus.RUNNING):
+                return True
+        return False
+
+    def _is_descendant_of(self, node: Any, ancestor: Any) -> bool:
+        """``node`` 是否在 ``ancestor`` 子树内。"""
+        cur_id = node.parent_id
+        seen: set[str] = set()
+        while cur_id and cur_id not in seen:
+            if cur_id == ancestor.id:
+                return True
+            seen.add(cur_id)
+            parent = self.graph.get_node(cur_id)
+            cur_id = parent.parent_id if parent is not None else None
+        return False
 
     # ========================================================================
     # DFS Ready 节点选择与调度
@@ -488,6 +562,25 @@ class Scheduler:
         ]
         if not ready_nodes:
             return
+
+        # 最终依赖门控（兜底不变量）：任何旁路（revise / event / routing / retry /
+        # resume / continue / 定时重试）若把依赖未满足的节点置成了 READY，在此统一
+        # 降回 WAITING，交给 _process_waiting_nodes 在依赖全部 COMPLETED 后重新放行。
+        # 这是所有「唤醒路径」执行前唯一必经的收口点，保证「前置节点全部完成后才可
+        # 执行」对每一条重激活路径一视同仁，不再依赖各路径各自记得检查依赖。
+        satisfied: list[Node] = []
+        planning_barrier = self.plan_before_execute and self._has_unexpanded_manager()
+        for n in ready_nodes:
+            if self.dependencies_unsatisfied(n.id):
+                self._transition_node(n.id, NodeStatus.WAITING, emit_notification=False)
+            elif planning_barrier and n.exec_type == "worker":
+                # 计划先行屏障：图未长全时被旁路置 READY 的 worker 在此统一降回 WAITING。
+                self._transition_node(n.id, NodeStatus.WAITING, emit_notification=False)
+            else:
+                satisfied.append(n)
+        if not satisfied:
+            return
+        ready_nodes = satisfied
 
         # 检测哪些 Manager 处于 WAITING phase（等待子节点完成）
         waiting_managers = {
@@ -769,6 +862,12 @@ class Scheduler:
                 "started_at": None,
                 "finished_at": None,
             })
+
+        # 依赖守卫：把「依赖未满足却要直接进入 READY」的重激活降级为 WAITING，
+        # 让它回到 _process_waiting_nodes 的依赖门控，等待上游 COMPLETED 后再放行。
+        # Manager 的 review / waiting 阶段不受此约束（见 dependencies_unsatisfied）。
+        if target_status == NodeStatus.READY and self.dependencies_unsatisfied(node_id):
+            target_status = NodeStatus.WAITING
 
         # Keep the state transition and its optional notification in one place.
         transitioned = node.status != target_status
@@ -1083,40 +1182,67 @@ class Scheduler:
     def _process_reactivation_events(self) -> None:
         """消费各节点 inbox 中的事件并复用激活引擎重激活。
 
-        每节点每 tick 至多处理 1 条（防单次 budget 一次耗尽）；
-        转换后被拦截的事件文件也一并删除（delete-on-consume：事件事实仍在全局
-        events.json 留痕；被拦截的失败信号已由 _activate_target 记入升级台账，
-        不重复尝试）。
+        节点累计事件 ≥ ``event_batch_threshold``（默认 3）或最早事件滞留超过
+        ``event_batch_max_age``（默认 1800 秒）时，一次性 drain 全部事件、合并成一条
+        ``pending_context`` 重激活一次，减少节点唤醒及模型调用次数。
 
-        单次消费语义：inbox（``event_inbox/``）是唯一待消费队列；live 不参与扫描。
+        每条事件先过确定性 scope 预筛：current 只允许 producer 自身，subtree
+        只允许 producer 子树内的节点。越界事件消费但不重激活，也不计入 batch。
+
+        删除语义不变（delete-on-consume：事件事实仍在全局 events.json 留痕）。
         RUNNING 节点自行消费（CC 有界轮询），此处只扫非运行态（_REACTIVATABLE）。
         """
+        now = time.time()
         for node in list(self.graph.all_nodes()):
             if node.status not in self._REACTIVATABLE_STATUSES:
                 continue
-            path, event_data = self._peek_inbox_event(node)
-            if event_data is None:
+            events = self._peek_inbox_events(node)
+            if not events:
                 continue
+
+            # 确定性 scope 预筛：明确越界的事件直接消费但不重激活。
+            relevant: list[tuple[str, dict, float]] = []
+            for path, data, mtime in events:
+                if self._event_relevant_to_node(node, data):
+                    relevant.append((path, data, mtime))
+                else:
+                    self._decline_inbox_event(node, path, data)
+            if not relevant:
+                continue
+
+            # 合并触发：满阈值 或 最早事件滞留超兜底时限。
+            oldest_mtime = relevant[0][2]
+            trigger = (
+                len(relevant) >= self.event_batch_threshold
+                or (now - oldest_mtime) >= self.event_batch_max_age
+            )
+            if not trigger:
+                continue
+
+            # 全量 drain + 合并重激活一次。
+            paths = [p for p, _, _ in relevant]
+            datas = [d for _, d, _ in relevant]
             try:
-                self._consume_inbox_event(node, event_data)
+                self._consume_inbox_batch(node, datas)
             except Exception as exc:  # noqa: BLE001
-                logger.error("Failed to consume reactivation event for '%s': %s",
+                logger.error("Failed to consume reactivation event batch for '%s': %s",
                              node.id[:8], exc)
                 continue
-            if path is not None:
+            for path in paths:
                 try:
                     os.remove(path)
                 except OSError as exc:
                     logger.warning("Failed to remove consumed inbox event %s: %s",
                                    path, exc)
 
-    def _peek_inbox_event(self, node: Any):
-        """返回节点 inbox 中第一条事件 ``(path, data)``；无则 ``(None, None)``。
+    def _peek_inbox_events(self, node: Any):
+        """返回节点 inbox 中全部事件 ``[(path, data, mtime)]``，按 mtime 升序（最旧在前）。
 
-        任何投递进 inbox 的事件都处理（不判 target/type——投递即 Router 决策过）。
+        返回 inbox 中的原始事件；scope 相关性由调用方统一预筛。
         """
         inbox_dir = os.path.join(_node_workspace(node), "event_inbox")
         matches = sorted(glob.glob(os.path.join(inbox_dir, "*.json")))
+        out: list[tuple[str, dict, float]] = []
         for path in matches:
             try:
                 with open(path, "r", encoding="utf-8") as f:
@@ -1125,36 +1251,94 @@ class Scheduler:
                 logger.error("Failed to parse inbox event %s: %s", path, exc)
                 continue
             if isinstance(data, dict):
-                return path, data
-        return None, None
+                try:
+                    mtime = os.path.getmtime(path)
+                except OSError:
+                    mtime = 0.0
+                out.append((path, data, mtime))
+        out.sort(key=lambda item: item[2])
+        return out
 
-    def _consume_inbox_event(self, node: Any, event_data: dict) -> None:
-        """把一条 inbox 事件转换为路由决策并重激活目标节点。
+    def _event_relevant_to_node(self, node: Any, event_data: dict) -> bool:
+        """确定性 scope 预筛；无法确定相关性时放行，不误杀。"""
+        scope = (event_data.get("scope") or "").strip()
+        if scope not in (EventMessage.SCOPE_CURRENT, EventMessage.SCOPE_SUBTREE):
+            return True
+        producer = event_data.get("producer", "")
+        producer_node = self._resolve_node_for_event(producer)
+        if producer_node is None:
+            return True
+        if scope == EventMessage.SCOPE_CURRENT:
+            return node.id == producer_node.id
+        return self._is_descendant_of(node, producer_node)
+
+    def _decline_inbox_event(self, node: Any, path: str, data: dict) -> None:
+        """越界事件消费但不重激活，节点停在原状态。"""
+        try:
+            os.remove(path)
+        except OSError as exc:
+            logger.warning("Failed to remove declined inbox event %s: %s", path, exc)
+        logger.info(
+            "Event declined (out of scope) for '%s': scope=%s producer=%s event=%s",
+            node.id[:8], data.get("scope"), data.get("producer"), data.get("event_id"),
+        )
+
+    def _consume_inbox_batch(self, node: Any, events: list[dict]) -> None:
+        """把一批 inbox 事件合并为一条路由决策并重激活目标节点一次（改动 3）。
 
         方案三：只读 event_id / producer / objective（及 intent/scope/action/
         affected_roles 参考信号）；objective 是事件本身的描述，Scheduler 不解析
         其语义（无 target/type/collaboration_type）。
+        合并语义：pending_context 注入 ``event_batch`` 列表；event_content/event_producer
+        等单值字段取首条，兼容旧读取。
         """
-        event_id = event_data.get("event_id", "?")
-        producer = event_data.get("producer", "")
-        objective = event_data.get("objective") or event_data.get("content", "")
+        first = events[0] if events else {}
+        batch = []
+        for ev in events:
+            batch.append({
+                "event_id": ev.get("event_id", "?"),
+                "producer": ev.get("producer", ""),
+                "objective": ev.get("objective") or ev.get("content", ""),
+                "intent": ev.get("intent", ""),
+                "scope": ev.get("scope", ""),
+                "action": ev.get("action", ""),
+                "affected_roles": ev.get("affected_roles", []),
+            })
+
+        # 依赖门控可能让本次激活停留在 WAITING：此时 Worker/Manager 尚未
+        # 取得 pending_context，下一批事件不能覆盖前一批。只合并仍存在的
+        # canonical event_batch；已执行路径会在构造输入后清除 pending_context，
+        # 因而不会把已消费批次重新放大到后续激活。
+        existing_context = getattr(node, "pending_context", None) or {}
+        previous_batch = existing_context.get("event_batch")
+        if isinstance(previous_batch, list) and previous_batch:
+            batch = list(previous_batch) + batch
+
+        # 兼容 scalar 字段取合并批次第一条（最早尚未消费的事件）。
+        first_batch = batch[0] if batch else {}
+        producer = first_batch.get("producer", first.get("producer", ""))
+        objective = first_batch.get("objective", "")
 
         # 生产者解析（可能为 node_id 或 step_ref；解析失败以 node 兜底，仍重激活）
         producer_node = self._resolve_node_for_event(producer)
 
         # 事件 objective → 目标节点 pending_context（自由结构：producer 想让大家知道什么）
-        # event_content 保留旧 key（值 = objective），下游 Manager/Worker 仍按此读取
+        # event_content 保留旧 key（值 = 首条 objective），下游 Manager/Worker 仍按此读取
         ctx = {
+            "event_batch": batch,
             "event_content": objective,
             "event_producer": producer,
-            "event_intent": event_data.get("intent", ""),
-            "event_scope": event_data.get("scope", ""),
-            "event_action": event_data.get("action", ""),
-            "event_affected_roles": event_data.get("affected_roles", []),
+            "event_intent": first_batch.get("intent", ""),
+            "event_scope": first_batch.get("scope", ""),
+            "event_action": first_batch.get("action", ""),
+            "event_affected_roles": first_batch.get("affected_roles", []),
         }
 
         step_id = node.step_ref or node.id
-        reason = f"event {event_id} from {producer}"
+        if len(events) > 1:
+            reason = f"event batch ({len(events)}) from {producer}"
+        else:
+            reason = f"event {first.get('event_id', '?')} from {producer}"
         routing = RoutingDecision(
             activate=[node.id],
             contexts={step_id: ctx},
@@ -1177,14 +1361,22 @@ class Scheduler:
                     pending_revise=True,
                 )
 
-            # 事件是独立于依赖终态的可执行信号：目标 WAITING/COMPLETED
-            # 注入增量上下文后直接进入 READY，不再等
-            # _process_waiting_nodes() 的依赖门控。
-            self._transition_node(node.id, NodeStatus.READY)
-            logger.info(
-                "Event reactivation: '%s' %s -> READY",
-                node.id[:8], previous_status.value,
-            )
+            # 事件注入增量上下文后进入可执行态；但仍遵守依赖门控——
+            # 目标节点若依赖尚未 COMPLETED 的上游，保持 WAITING，
+            # 由 _process_waiting_nodes 在依赖满足后放行，避免「收到事件
+            # 却抢在依赖完成前执行」的提前执行。
+            if self.dependencies_unsatisfied(node.id):
+                # 保持 WAITING（_activate_target 已置为 WAITING），等依赖门控放行
+                logger.info(
+                    "Event reactivation: '%s' %s -> WAITING (deps unsatisfied)",
+                    node.id[:8], previous_status.value,
+                )
+            else:
+                self._transition_node(node.id, NodeStatus.READY)
+                logger.info(
+                    "Event reactivation: '%s' %s -> READY",
+                    node.id[:8], previous_status.value,
+                )
 
     def _resolve_node_for_event(self, node_id_or_stepref: str):
         """把事件 producer/target（node_id 或 step_ref）解析为图中节点。"""
@@ -1432,9 +1624,13 @@ class Scheduler:
         ]
         for nid in ready_retries:
             del self._scheduled_retries[nid]
-            # 原地重试后节点为 WAITING，到期转为 READY 进入正常调度
+            # 原地重试后节点为 WAITING，到期转为 READY 进入正常调度。
+            # 依赖守卫：到期时若依赖仍未满足，保持 WAITING，交由
+            # _process_waiting_nodes 在依赖 COMPLETED 后放行，不提前执行。
             node = self.graph.get_node(nid)
             if node is not None and node.status == NodeStatus.WAITING:
+                if self.dependencies_unsatisfied(nid):
+                    continue
                 self._transition_node(nid, NodeStatus.READY)
 
     # ========================================================================

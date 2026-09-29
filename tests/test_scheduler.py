@@ -295,16 +295,20 @@ class TestSchedulerExecution:
             "Scheduler should auto-stop when no Ready/Running nodes"
 
     # ----------------------------------------------------------
-    # Acceptance 5: DFS — deeper nodes prioritized
+    # Acceptance 5: Dependency gate — out-of-order READY is deferred
     # ----------------------------------------------------------
 
     def test_dfs_depth_first_selection(self):
-        """DFS 优先调度树深度更大的节点。"""
+        """A→B→C 链上三节点被强制置 READY 时，依赖门控只放行无依赖的 A。
+
+        原「DFS 深度优先」语义（最深节点 C 先跑）与依赖顺序矛盾：C 依赖 B、
+        B 依赖 A，后置节点必须先等前置节点 COMPLETED。执行前的兜底门控
+        （_schedule_ready_nodes）会把依赖未满足的 B、C 降回 WAITING，
+        只调度无依赖的 A。"""
         from runtime.scheduler import Scheduler
 
         # Chain A→B→C (C depends on B, B depends on A)
         # Depths: A=0, B=1, C=2
-        # All start READY; scheduler should schedule deepest first
         for nid in ["A", "B", "C"]:
             self.graph.add_node(_make_node(nid, status=NodeStatus.READY, config={}))
         _add_dep_edge(self.graph, "A", "B", "e_ab")
@@ -320,12 +324,12 @@ class TestSchedulerExecution:
         self.scheduler._process_waiting_nodes()
         self.scheduler._schedule_ready_nodes()
 
-        # With max_concurrency=1, only the deepest (C, depth 2) should be scheduled
-        assert "C" in self.scheduler._futures, "C (depth 2) should be scheduled first"
-        assert "B" not in self.scheduler._futures, \
-            "B (depth 1) should not be scheduled when C is deeper"
-        assert "A" not in self.scheduler._futures, \
-            "A (depth 0) should not be scheduled when C is deeper"
+        # 只有无依赖的 A（最浅）被调度；B、C 依赖未满足 → 降回 WAITING。
+        assert "A" in self.scheduler._futures, "A (no deps) should be scheduled first"
+        assert self.graph.get_node("B").status == NodeStatus.WAITING, \
+            "B should stay WAITING until A completes"
+        assert self.graph.get_node("C").status == NodeStatus.WAITING, \
+            "C should stay WAITING until B completes"
 
     # ----------------------------------------------------------
     # Acceptance 6: Thread pool size = concurrency + 2

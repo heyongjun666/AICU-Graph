@@ -1463,11 +1463,18 @@ class Runtime(RuntimeGateway, SchedulerDelegate):
                     f"Cannot resume node '{node_id}': "
                     f"current status is {node.status.value}, expected PAUSED"
                 )
-            self.graph.update_node(node_id, status=NodeStatus.READY)
+            # 依赖守卫：恢复暂停节点时，若依赖未满足则保持 WAITING，
+            # 由 _process_waiting_nodes 在依赖 COMPLETED 后放行，避免提前执行。
+            target = (
+                NodeStatus.WAITING
+                if self.scheduler.dependencies_unsatisfied(node_id)
+                else NodeStatus.READY
+            )
+            self.graph.update_node(node_id, status=target)
             self.scheduler.start()
-        # D6：节点状态实际变化（PAUSED→READY）时发布 node_status_changed(Ready)
-        self._publish_node_status_changed(node_id, NodeStatus.READY)
-        logger.info("Node resumed: %s", node_id)
+        # D6：节点状态实际变化（PAUSED→READY/WAITING）时发布 node_status_changed
+        self._publish_node_status_changed(node_id, target)
+        logger.info("Node resumed: %s -> %s", node_id, target.value)
 
     def continue_node(self, node_id: str) -> str:
         """继续执行 FAILED/STOPPED 节点，保留已有产出，不从头重跑。
@@ -1825,8 +1832,15 @@ class Runtime(RuntimeGateway, SchedulerDelegate):
             for node_id in interrupted_node_ids or []:
                 node = self.graph.get_node(node_id)
                 if node is not None and node.status == NodeStatus.PAUSED:
-                    self.graph.update_node(node_id, status=NodeStatus.READY)
-                    self._publish_node_status_changed(node_id, NodeStatus.READY)
+                    # 依赖守卫：恢复被图级暂停打断的节点时，依赖未满足则保持
+                    # WAITING，由 _process_waiting_nodes 放行，避免提前执行。
+                    target = (
+                        NodeStatus.WAITING
+                        if self.scheduler.dependencies_unsatisfied(node_id)
+                        else NodeStatus.READY
+                    )
+                    self.graph.update_node(node_id, status=target)
+                    self._publish_node_status_changed(node_id, target)
         with self._pause_lock:
             self._global_pause_mode = None
             self._global_interrupted_node_ids = []

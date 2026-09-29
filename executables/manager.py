@@ -1052,6 +1052,9 @@ class Manager(Executable):
             "重新生成当前版本的 ExecutionPlan；不要直接沿用历史计划。",
             f"当前增量请求:\n{incremental}",
         ]
+        event_block = self._build_event_context_block(ctx)
+        if event_block:
+            parts.append(event_block)
         candidates = self._build_revise_candidates_block(ctx)
         if candidates:
             parts.append(candidates)
@@ -1060,7 +1063,8 @@ class Manager(Executable):
     def _build_expand_prompt(self, ctx: ExecutableContext) -> str:
         """构造 Expand 阶段 prompt — 含执行上下文快照 + 原始task。
 
-        上下文块通过 _build_execution_context_snapshot() 生成, 失败时静默降级为只返回 task。
+        上下文块通过 _build_execution_context_snapshot() 生成；失败时仍保留事件、
+        repair 和任务上下文，避免协作信号因 snapshot 不可用而丢失。
         Manager 可自由创建子 Manager，组织树深度由 Phase D 反问门自然控制。
         """
         base_task = ctx.node.task or ""
@@ -1071,15 +1075,12 @@ class Manager(Executable):
                 "Failed building execution context for node '%s': %s",
                 getattr(getattr(ctx, 'node', None), 'id', '?'), exc,
             )
-            return base_task
-
-        if not ctx_block.strip():
-            return base_task
+            ctx_block = ""
 
         sep = "\n" + "-" * 60 + "\n"
         # 共享工作区 / 事件协作 / depends_on 正交等协议均由 roles/Manager/*.yaml 的
         # generate_instruction 注入（aicu 在每次 ask 时统一注入），此处不再重复维护。
-        # 代码图谱上下文：Resolver 动态块（AICU_CODEGRAPH=1 且 real 模式）；未启用时退回静态引导。
+        # 代码图谱上下文：Resolver 动态块（默认开，AICU_CODEGRAPH=0 显式关，且 real 模式）；未启用时退回静态引导。
         codegraph_block = build_codegraph_context(ctx.node, ctx) or build_codegraph_guidance()
         # B3：被路由重新激活且携带事件上下文时，注入事件上下文供决策。
         # 方案三：协作意图由 Event.objective 承载，Manager 收到事件后自行理解。
@@ -1232,37 +1233,37 @@ class Manager(Executable):
 
     @staticmethod
     def _collab_from_pending_context(ctx: ExecutableContext):
-        """从 pending_context 读取事件上下文（事件→重激活桥激活时写入）。
-
-        方案三：协作意图由 Event.objective 承载（兼容旧 event_content key），
-        intent/scope/action 为附加参考信号——这里透传全部。
-        """
+        """Return canonical event entries, with scalar pending_context compatibility."""
         pending = getattr(ctx.node, "pending_context", None) or {}
+        batch = pending.get("event_batch")
+        if isinstance(batch, list) and batch:
+            events = [event for event in batch if isinstance(event, dict)]
+            if events:
+                return events
+
         content = pending.get("event_content")
         if not content:
             return None
-        return {
-            "event_producer": pending.get("event_producer") or "",
-            "event_content": content,
-            "event_intent": pending.get("event_intent") or "",
-            "event_scope": pending.get("event_scope") or "",
-            "event_action": pending.get("event_action") or "",
-        }
+        return [{
+            "event_id": pending.get("event_id") or "",
+            "producer": pending.get("event_producer") or "",
+            "objective": content,
+            "intent": pending.get("event_intent") or "",
+            "scope": pending.get("event_scope") or "",
+            "action": pending.get("event_action") or "",
+            "affected_roles": pending.get("event_affected_roles") or [],
+        }]
 
     @staticmethod
     def _collab_from_event_inbox(ctx: ExecutableContext):
-        """fallback：从 event_inbox/ 读取待处理事件。
-
-        覆盖「目标先于事件 READY/RUNNING」竞态——事件→重激活桥跳过运行中节点
-        不重激活，由正在运行的 Manager CC 自行消费 inbox 事件，保证事件上下文
-        两条路径（被激活 / 运行中）都渲染。
-        """
+        """Read all renderable inbox events for the running Manager fallback."""
         try:
             ws = ctx.runtime.get_node_workspace(ctx.node.id)
             inbox = os.path.join(ws, "event_inbox")
             files = sorted(glob.glob(os.path.join(inbox, "*.json")))
         except Exception:  # noqa: BLE001
             return None
+        events = []
         for pf in files:
             try:
                 with open(pf, "r", encoding="utf-8") as f:
@@ -1274,55 +1275,56 @@ class Manager(Executable):
             content = ev.get("objective") or ev.get("content")
             if not content:
                 continue
-            return {
-                "event_producer": ev.get("producer") or "",
-                "event_content": content,
-                "event_intent": ev.get("intent") or "",
-                "event_scope": ev.get("scope") or "",
-                "event_action": ev.get("action") or "",
-            }
-        return None
+            events.append(ev)
+        return events or None
 
     @staticmethod
     def _build_event_context_block(ctx: ExecutableContext) -> str:
-        """方案三：当 Manager 被激活且有待处理事件时，把事件上下文注入 expand prompt。
-
-        数据来源（两条路径都渲染）：
-          1. pending_context（由事件→重激活桥在激活时写入）；
-          2. event_inbox/ 待处理事件（fallback：覆盖运行中竞态，见 _collab_from_event_inbox）。
-
-        协作意图由 Event.objective 承载，Manager 收到事件后自行理解——这里只展示
-        producer + objective（及 intent/scope/action），不做 request/respond 判定，也不指引发布响应事件。
-        """
-        event = Manager._collab_from_pending_context(ctx)
-        if event is None:
-            event = Manager._collab_from_event_inbox(ctx)
-        if event is None:
+        """Render canonical event_batch entries, falling back to scalar event fields."""
+        events = Manager._collab_from_pending_context(ctx)
+        if events is None:
+            events = Manager._collab_from_event_inbox(ctx)
+        if not events:
             return ""
-        producer = event.get("event_producer") or ""
-        content = event.get("event_content") or ""
-        intent = event.get("event_intent") or ""
-        scope = event.get("event_scope") or ""
-        action = event.get("event_action") or ""
-
         lines = [_L(ctx, "## 📥 待处理事件上下文 (Event)", "## 📥 Pending Event Context")]
         lines.append(
             _L(
                 ctx,
-                "> 你收到了事件，请结合自身任务与职责理解其含义，并纳入本次展开决策。",
-                "> You received an event. Interpret it in light of your own task and "
-                "responsibilities, and factor it into this expansion decision.",
+                "> 你收到了事件，请先判断每条是否落在你的职责范围内：无关的事件忽略"
+                "（不据此调整计划），相关的才结合自身任务与职责理解其含义并纳入本次展开决策。",
+                "> You received events. First judge whether each falls within your "
+                "responsibilities: ignore irrelevant ones (do not adjust your plan for "
+                "them); only interpret and factor in the relevant ones.",
             )
         )
-        if producer:
-            lines.append(f"- {_L(ctx, '事件来源 node', 'Event source node')}: `{producer}`")
-        if intent:
-            lines.append(f"- {_L(ctx, '事件性质', 'Event intent')}: {intent}")
-        if scope:
-            lines.append(f"- {_L(ctx, '影响范围', 'Event scope')}: {scope}")
-        lines.append(f"- {_L(ctx, '事件描述', 'Event objective')}: {content}")
-        if action:
-            lines.append(f"- {_L(ctx, '建议动作', 'Event action')}: {action}")
+        for index, event in enumerate(events, 1):
+            if len(events) > 1:
+                lines.append(f"### {_L(ctx, '事件', 'Event')} {index}")
+            event_id = event.get("event_id") or ""
+            producer = event.get("event_producer") or event.get("producer") or ""
+            content = (
+                event.get("event_content")
+                or event.get("objective")
+                or event.get("content")
+                or ""
+            )
+            intent = event.get("event_intent") or event.get("intent") or ""
+            scope = event.get("event_scope") or event.get("scope") or ""
+            action = event.get("event_action") or event.get("action") or ""
+            affected_roles = event.get("event_affected_roles") or event.get("affected_roles") or []
+            if event_id:
+                lines.append(f"- event_id: `{event_id}`")
+            if producer:
+                lines.append(f"- {_L(ctx, '事件来源 node', 'Event source node')}: `{producer}`")
+            if intent:
+                lines.append(f"- {_L(ctx, '事件性质', 'Event intent')}: {intent}")
+            if scope:
+                lines.append(f"- {_L(ctx, '影响范围', 'Event scope')}: {scope}")
+            lines.append(f"- {_L(ctx, '事件描述', 'Event objective')}: {content}")
+            if action:
+                lines.append(f"- {_L(ctx, '建议动作', 'Event action')}: {action}")
+            if affected_roles:
+                lines.append(f"- {_L(ctx, '受影响角色', 'Affected roles')}: {affected_roles}")
         lines.append("")
         return "\n".join(lines)
 

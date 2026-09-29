@@ -24,12 +24,15 @@
 
 import json
 import os
+import time
 
 import pytest
 
 from runtime.graph import Graph
 from runtime.models import Edge, EdgeType, Node, NodeStatus
 from runtime.scheduler import Scheduler
+from executables.base import Executable, ExecutableContext
+from executables.manager import Manager
 from executables.registry import ExecutableRegistry
 
 
@@ -147,6 +150,8 @@ class _BridgeHarness:
             delegate=self.delegate,
             runtime_gateway=MockGateway(),
             max_concurrency=4,
+            # 单事件即触发：桥逻辑测试不关心合并阈值（合并行为由 TestBridgeBatching 单独覆盖）。
+            event_batch_threshold=1,
         )
 
     def run_bridge(self) -> None:
@@ -169,6 +174,80 @@ def _feedback_event(producer: str, content: str = "") -> dict:
 # ============================================================================
 # Tests
 # ============================================================================
+
+def test_default_batch_waits_for_three_events(tmp_path):
+    """The default policy preserves cost-saving three-event aggregation."""
+    graph = Graph()
+    target = _make_node("W", str(tmp_path))
+    graph.add_node(target)
+    scheduler = Scheduler(graph, ExecutableRegistry(), MockDelegate(), MockGateway())
+    try:
+        for index in range(2):
+            _write_event(
+                str(tmp_path),
+                "W",
+                {**_feedback_event(f"P{index}"), "event_id": f"evt_{index}"},
+            )
+        scheduler._process_reactivation_events()
+        assert target.status == NodeStatus.COMPLETED
+        assert target.activation_count == 0
+        assert len(scheduler._peek_inbox_events(target)) == 2
+
+        _write_event(
+            str(tmp_path),
+            "W",
+            {**_feedback_event("P2"), "event_id": "evt_2"},
+        )
+        scheduler._process_reactivation_events()
+        assert target.status == NodeStatus.READY
+        assert target.activation_count == 1
+        assert not scheduler._peek_inbox_events(target)
+    finally:
+        scheduler.stop()
+
+
+def test_batch_age_backstop_flushes_before_threshold(tmp_path):
+    """A configured age backstop may flush a smaller batch than the threshold."""
+    graph = Graph()
+    target = _make_node("W", str(tmp_path))
+    graph.add_node(target)
+    scheduler = Scheduler(
+        graph,
+        ExecutableRegistry(),
+        MockDelegate(),
+        MockGateway(),
+        event_batch_threshold=5,
+        event_batch_max_age=0.01,
+    )
+    try:
+        path = _write_event(str(tmp_path), "W", _feedback_event("P", "age flush"))
+        old = time.time() - 1
+        os.utime(path, (old, old))
+        scheduler._process_reactivation_events()
+        assert target.status == NodeStatus.READY
+        assert target.activation_count == 1
+        assert not os.path.exists(path)
+    finally:
+        scheduler.stop()
+
+
+def test_paused_terminal_inbox_is_not_consumed(tmp_path):
+    graph = Graph()
+    node = _make_node("W", str(tmp_path))
+    graph.add_node(node)
+    path = _write_event(str(tmp_path), "W", _feedback_event("P"))
+    scheduler = Scheduler(graph, ExecutableRegistry(), MockDelegate(), MockGateway())
+    try:
+        scheduler.pause()
+        scheduler.start()
+        scheduler._tick_thread.join(timeout=2)
+        assert not scheduler.is_running
+        assert node.status == NodeStatus.COMPLETED
+        assert node.activation_count == 0
+        assert os.path.exists(path)
+    finally:
+        scheduler.stop()
+
 
 class TestBridgeReactivation:
     def test_terminal_node_target_event_reactivates(self, tmp_path):
@@ -226,7 +305,7 @@ class TestBridgeReactivation:
         assert len(b.routing_history) == 1
 
     def test_inbox_event_processed_regardless_of_content(self, tmp_path):
-        """方案三：inbox 有事件即处理，不解析 content 中的任何目标声明/指令。
+        """方案三：批次中的 inbox 事件不解析 content 中的目标声明/指令。
 
         桥只消费 inbox 文件存在性，content 只是事件本身的描述——不按 target 跳过，
         也不把 content 中的"目标节点名"当路由指令解析。
@@ -349,16 +428,16 @@ class TestBridgeCollaboration:
 
 
 class TestBridgeStateMachine:
-    """事件→状态机（新契约）：Event 是独立于依赖终态的可执行信号。
+    """事件→状态机（新契约）：Event 是可执行信号，但仍遵守依赖门控。
 
-    - WAITING + Event → READY（绕过依赖门控）
+    - WAITING + Event → 依赖未满足时保持 WAITING（等门控），满足时 READY
     - COMPLETED + Event → READY（进入 Revise，由 TestBridgeReactivation 覆盖）
     - RUNNING + Event → RUNNING（Scheduler 不重启、不消费 inbox）
     - FAILED + Event → FAILED（不自动复活、不消费 inbox）
     """
 
-    def test_waiting_event_bypasses_dependency_gating(self, tmp_path):
-        """WAITING 节点仍有 RUNNING 依赖时收到事件 → 直接 READY，不等依赖完成。"""
+    def test_waiting_event_respects_dependency_gating(self, tmp_path):
+        """WAITING 节点仍有 RUNNING 依赖时收到事件 → 保持 WAITING，不提前执行。"""
         h = _BridgeHarness(tmp_path, backend_status=NodeStatus.WAITING)
         # 给 B1 加一个仍在 RUNNING 的依赖 D1（B1 depends_on D1）
         dep = _make_node("D1", h.root, step_ref="dep", parent_id="M1",
@@ -377,8 +456,56 @@ class TestBridgeStateMachine:
         h.run_bridge()
 
         b = h.graph.get_node("B1")
-        assert b.status == NodeStatus.READY, "事件应绕过依赖门控直接转 READY"
-        assert b.activation_count == 1
+        assert b.status == NodeStatus.WAITING, "事件不得绕过依赖门控：依赖未满足时保持 WAITING"
+        assert b.activation_count == 1  # 仍被激活（注入增量上下文），但不提前转 READY
+
+    def test_waiting_dependency_batches_are_preserved_until_execution(self, tmp_path):
+        """依赖等待期间到达的多批事件合并后一次交给下游输入。"""
+        h = _BridgeHarness(tmp_path, backend_status=NodeStatus.WAITING)
+        dep = _make_node(
+            "D1", h.root, step_ref="dep", parent_id="M1", status=NodeStatus.RUNNING
+        )
+        h.graph.add_node(dep)
+        h.graph.add_edge(Edge(
+            id="dep-batch", type=EdgeType.DEPENDENCY,
+            from_node="D1", to_node="B1",
+        ))
+
+        _write_event(h.root, "B1", {
+            "event_id": "batch-a", "producer": "T1", "objective": "first batch",
+        })
+        h.run_bridge()
+        assert h.graph.get_node("B1").status == NodeStatus.WAITING
+
+        _write_event(h.root, "B1", {
+            "event_id": "batch-b", "producer": "T1", "objective": "second batch",
+        })
+        h.run_bridge()
+
+        b = h.graph.get_node("B1")
+        assert b.status == NodeStatus.WAITING
+        assert [event["event_id"] for event in b.pending_context["event_batch"]] == [
+            "batch-a", "batch-b",
+        ]
+        assert b.pending_context["event_content"] == "first batch"
+        # Manager 的真实事件上下文构造器应能看到合并后的完整输入。
+        ctx = ExecutableContext(node=b, runtime=MockGateway(), config={})
+        event_block = Manager._build_event_context_block(ctx)
+        assert "first batch" in event_block
+        assert "second batch" in event_block
+
+        # 模拟下游已构造并消费本轮输入；后续批次不得重放旧事件。
+        dep.status = NodeStatus.COMPLETED
+        h.scheduler._process_waiting_nodes()
+        b.pending_context = None
+        b.status = NodeStatus.COMPLETED
+        _write_event(h.root, "B1", {
+            "event_id": "batch-c", "producer": "T1", "objective": "third batch",
+        })
+        h.run_bridge()
+        assert [event["event_id"] for event in b.pending_context["event_batch"]] == [
+            "batch-c",
+        ]
 
     def test_failed_event_not_reactivated(self, tmp_path):
         """FAILED 节点收到事件 → 保持 FAILED，不自动复活，inbox 事件不消费。"""
@@ -401,6 +528,100 @@ class TestBridgeStateMachine:
         assert b.status == NodeStatus.RUNNING, "RUNNING 节点自行消费 inbox，Scheduler 不重启"
         assert b.activation_count == 0
         assert os.path.exists(path), "RUNNING 节点的事件由 Agent 轮询消费，Scheduler 不删除"
+
+
+@pytest.mark.parametrize("revise", [False, True])
+@pytest.mark.parametrize("language", ["zh", "en"])
+def test_manager_run_receives_all_five_routed_events(tmp_path, revise, language):
+    """Batch contents reach the AI on both initial Expand and incremental Revise."""
+    graph = Graph()
+    manager = _make_node("M", str(tmp_path), exec_type="manager")
+    graph.add_node(manager)
+    if revise:
+        child = _make_node("C", str(tmp_path), parent_id="M")
+        graph.add_node(child)
+        graph.add_edge(Edge(id="parent", type=EdgeType.PARENT,
+                            from_node="M", to_node="C"))
+
+    class Gateway(MockGateway):
+        def get_children(self, node_id):
+            return graph.children(node_id)
+
+        def get_node(self, node_id):
+            return graph.get_node(node_id)
+
+        def update_node_status(self, node_id, status, **updates):
+            graph.update_node(node_id, status=status, **updates)
+
+    class CapturingAI:
+        def __init__(self):
+            self.calls = []
+
+        def ask(self, prompt):
+            self.calls.append((False, prompt))
+            return {"steps": []}
+
+        def ask_incremental(self, prompt):
+            self.calls.append((True, prompt))
+            return {"steps": []}
+
+    events = [
+        {"event_id": f"batch-{i}", "producer": f"producer-{i}",
+         "objective": f"unique-objective-{i}", "intent": f"intent-{i}",
+         "scope": "current", "action": f"action-{i}",
+         "affected_roles": [{"role": f"role-{i}", "duty": f"duty-{i}"}]}
+        for i in range(5)
+    ]
+    paths = [_write_event(str(tmp_path), "M", event) for event in events]
+    gateway = Gateway()
+    scheduler = Scheduler(graph, ExecutableRegistry(), MockDelegate(), gateway)
+    try:
+        scheduler._process_reactivation_events()
+        assert manager.status == NodeStatus.READY
+        assert manager.activation_count == 1
+        assert manager.pending_revise == revise
+        assert all(not os.path.exists(path) for path in paths)
+        ai = CapturingAI()
+        ctx = ExecutableContext(node=manager, runtime=gateway,
+                                config={"language": language, "mode": "stub"})
+        assert Manager(aicu_instance=ai).run(ctx) == NodeStatus.WAITING
+        assert len(ai.calls) == 1
+        incremental, prompt = ai.calls[0]
+        assert incremental == revise
+        for event in events:
+            for key in ("event_id", "producer", "objective", "intent", "action"):
+                assert event[key] in prompt
+            assert prompt.count(event["objective"]) == 1
+            assert event["affected_roles"][0]["role"] in prompt
+            assert event["affected_roles"][0]["duty"] in prompt
+    finally:
+        scheduler.stop()
+
+
+@pytest.mark.parametrize("snapshot_failure", [False, True])
+def test_manager_expand_preserves_events_without_snapshot(tmp_path, monkeypatch, snapshot_failure):
+    node = _make_node("M", str(tmp_path), exec_type="manager")
+    node.pending_context = {"event_batch": [
+        {"event_id": "evt_fallback", "objective": "must reach the manager"},
+    ]}
+
+    def snapshot(self, ctx):
+        if snapshot_failure:
+            raise RuntimeError("snapshot unavailable")
+        return ""
+
+    monkeypatch.setattr(Manager, "_build_execution_context_snapshot", snapshot)
+    prompts = []
+
+    class CapturingAI:
+        def ask(self, prompt):
+            prompts.append(prompt)
+            return {"steps": []}
+
+    ctx = ExecutableContext(node=node, runtime=MockGateway(), config={})
+    assert Manager(aicu_instance=CapturingAI()).run(ctx) == NodeStatus.WAITING
+    assert "must reach the manager" in prompts[0]
+    assert node.task in prompts[0]
 
 
 class TestBridgeManagerRevise:
@@ -432,4 +653,191 @@ class TestBridgeManagerRevise:
         assert m.pending_revise is True, "Revise 增量续跑应置 pending_revise=True"
         assert "请审查需求清单" in m.pending_context["event_content"]
         assert m.pending_context["event_producer"] == "T1"
+
+
+class TestBridgeScopeFilter:
+    """Scheduler preserves the original deterministic current/subtree scope guard."""
+
+    def _evt(self, producer, scope, event_id="evt_s"):
+        return {
+            "event_id": event_id,
+            "producer": producer,
+            "content": "越界/相关事件内容",
+            "scope": scope,
+        }
+
+    @pytest.mark.parametrize("scope", ["current", "subtree"])
+    def test_cross_scope_router_target_is_declined(self, tmp_path, scope):
+        """A deterministic out-of-scope target is consumed without reactivation."""
+        from runtime.models import EventMessage
+        from runtime.router import AICURouter
+
+        class RouterAI:
+            def ask(self, prompt):
+                return {"targets": ["B1"], "reason": "Sibling must respond"}
+
+        h = _BridgeHarness(tmp_path)
+        router = AICURouter(aicu_instance=RouterAI(), workspace_root=h.root)
+        router.attach_graph(h.graph)
+        event = self._evt("T1", scope)
+        targets = router.route(EventMessage.from_dict(event))
+        assert targets == ["B1"]
+        paths = [_write_event(h.root, target, event) for target in targets]
+        h.run_bridge()
+
+        b = h.graph.get_node("B1")
+        assert b.status == NodeStatus.COMPLETED
+        assert b.activation_count == 0
+        assert all(not os.path.exists(path) for path in paths)
+
+    def test_current_scope_self_allowed(self, tmp_path):
+        """scope=current 且节点==producer → 放行重激活。"""
+        h = _BridgeHarness(tmp_path)
+        _write_event(h.root, "B1", self._evt("B1", "current"))
+        h.run_bridge()
+
+        b = h.graph.get_node("B1")
+        assert b.status == NodeStatus.READY
+        assert b.activation_count == 1
+
+    def test_subtree_scope_inside_allowed(self, tmp_path):
+        """scope=subtree 且节点在 producer（父 M1）子树内 → 放行重激活。"""
+        h = _BridgeHarness(tmp_path)
+        _write_event(h.root, "B1", self._evt("M1", "subtree"))
+        h.run_bridge()
+
+        b = h.graph.get_node("B1")
+        assert b.status == NodeStatus.READY, "B1 是 M1 子节点，应在子树内放行"
+        assert b.activation_count == 1
+
+    def test_related_scope_allowed(self, tmp_path):
+        h = _BridgeHarness(tmp_path)
+        _write_event(h.root, "B1", self._evt("T1", "related"))
+        h.run_bridge()
+
+        b = h.graph.get_node("B1")
+        assert b.status == NodeStatus.READY, "related 无法确定性判定，放行"
+        assert b.activation_count == 1
+
+    def test_global_scope_allowed(self, tmp_path):
+        h = _BridgeHarness(tmp_path)
+        _write_event(h.root, "B1", self._evt("T1", "global"))
+        h.run_bridge()
+
+        b = h.graph.get_node("B1")
+        assert b.status == NodeStatus.READY
+        assert b.activation_count == 1
+
+    def test_missing_scope_allowed(self, tmp_path):
+        """无 scope 字段 → 放行（默认不确定，交给节点 CC 理解）。"""
+        h = _BridgeHarness(tmp_path)
+        _write_event(h.root, "B1", {
+            "event_id": "evt_noscope",
+            "producer": "T1",
+            "content": "无 scope 字段的事件",
+        })
+        h.run_bridge()
+
+        b = h.graph.get_node("B1")
+        assert b.status == NodeStatus.READY
+
+
+class TestBridgeBatching:
+    """改动 3：event 合并触发（阈值 + 兜底 + 全量 drain）。"""
+
+    def test_manager_renders_every_event_in_canonical_batch(self, tmp_path):
+        node = _make_node("M", str(tmp_path), exec_type="manager")
+        node.pending_context = {
+            "event_batch": [
+                {"event_id": f"evt_{i}", "producer": "P",
+                 "objective": f"objective-{i}", "intent": "fix"}
+                for i in range(5)
+            ],
+            # Legacy scalar fields remain available to older consumers.
+            "event_content": "objective-0",
+            "event_producer": "P",
+        }
+        ctx = ExecutableContext(node=node, runtime=MockGateway(), config={})
+        block = Manager._build_event_context_block(ctx)
+        for i in range(5):
+            assert f"evt_{i}" in block
+            assert f"objective-{i}" in block
+
+
+    def _harness(self, tmp_path, threshold=3, max_age=1800.0):
+        h = _BridgeHarness(tmp_path)
+        h.scheduler.event_batch_threshold = threshold
+        h.scheduler.event_batch_max_age = max_age
+        return h
+
+    def _evt(self, i):
+        return {"event_id": f"evt_{i}", "producer": "T1", "content": f"msg{i}"}
+
+    def _inbox_dir(self, h, node_id="B1"):
+        return os.path.join(_node_ws(h.root, node_id), "event_inbox")
+
+    def test_below_threshold_not_triggered(self, tmp_path):
+        """< 阈值且未到兜底时限 → 不触发，事件留在 inbox、节点不重激活。"""
+        h = self._harness(tmp_path)
+        for i in range(2):
+            _write_event(h.root, "B1", self._evt(i))
+        h.run_bridge()
+
+        b = h.graph.get_node("B1")
+        assert b.status == NodeStatus.COMPLETED, "未达阈值不重激活"
+        assert b.activation_count == 0
+        inbox = self._inbox_dir(h)
+        assert len(os.listdir(inbox)) == 2, "事件未消费，留待下一 tick"
+
+    def test_threshold_triggers_full_drain(self, tmp_path):
+        """满 3 条 → 触发一次，全量 drain（不只是 3 条），合并为一次重激活。"""
+        h = self._harness(tmp_path)
+        for i in range(7):
+            _write_event(h.root, "B1", self._evt(i))
+        h.run_bridge()
+
+        b = h.graph.get_node("B1")
+        assert b.status == NodeStatus.READY
+        assert b.activation_count == 1, "N 条事件合并为一次重激活"
+        batch = b.pending_context["event_batch"]
+        assert len(batch) == 7, "全量 drain，不只阈值 3 条"
+        assert b.pending_context["event_content"] == "msg0", "单值字段取首条（最旧）"
+        assert b.pending_context["event_producer"] == "T1"
+        assert len(os.listdir(self._inbox_dir(h))) == 0, "inbox 清空"
+
+    def test_backstop_triggers_below_threshold(self, tmp_path):
+        """事件数 < 阈值但最早事件滞留超兜底时限 → 兜底触发。"""
+        h = self._harness(tmp_path)
+        path = _write_event(h.root, "B1", self._evt(0))
+        # 把 mtime 拨到 2 小时前，模拟长期滞留
+        old = time.time() - 7200
+        os.utime(path, (old, old))
+        h.run_bridge()
+
+        b = h.graph.get_node("B1")
+        assert b.status == NodeStatus.READY, "超时兜底应触发重激活"
+        assert b.activation_count == 1
+        assert len(os.listdir(self._inbox_dir(h))) == 0
+
+    def test_batch_preserves_event_batch_structure(self, tmp_path):
+        """合并后的 pending_context 含结构化 event_batch（objective/scope 等）。"""
+        h = self._harness(tmp_path, threshold=2)
+        _write_event(h.root, "B1", {
+            "event_id": "e1", "producer": "T1", "objective": "修接口",
+            "intent": "fix", "scope": "related", "action": "revise",
+            "affected_roles": ["backend"],
+        })
+        _write_event(h.root, "B1", {
+            "event_id": "e2", "producer": "T1", "objective": "补测试",
+        })
+        h.run_bridge()
+
+        b = h.graph.get_node("B1")
+        batch = b.pending_context["event_batch"]
+        assert len(batch) == 2
+        assert batch[0]["objective"] == "修接口"
+        assert batch[0]["scope"] == "related"
+        assert batch[0]["intent"] == "fix"
+        assert batch[0]["affected_roles"] == ["backend"]
+        assert batch[1]["objective"] == "补测试"
 

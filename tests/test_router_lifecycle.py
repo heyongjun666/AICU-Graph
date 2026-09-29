@@ -1,14 +1,12 @@
-"""tests/test_router_lifecycle.py — Router 生命周期：与组织结构版本绑定
+"""tests/test_router_lifecycle.py — Router 生命周期与 route 边界隔离
 
-方案三定稿：
-    「一个 Router AICU 服务一个 Organization Graph 版本。图不变则持续复用
-    （快照缓存 + 会话复用）；图发生结构变化则切换 Router 上下文（重置会话）。
-    运行状态变化（running/completed/failed）不切换。」
+Router 复用一个独立 AICU 实例和 workspace，但每次实际 route ask 前清空
+conversation。组织结构版本仍用于快照/trace 语义，不再额外触发第二次 reset。
 
 覆盖：
     - Graph.structure_version 只在结构变更时自增（状态变化不触发）
     - Router 快照缓存：图未变化时不重扫全量节点，状态变化时重建保持新鲜
-    - Router 会话重置：结构变化 → reset 一次；状态变化 → 不 reset
+    - Router 每次 route 都 reset，但 AICU 实例持续复用
 """
 
 from runtime.graph import Graph
@@ -209,10 +207,10 @@ def test_build_prompt_shows_task_summary_not_full_task():
 
 
 # ---------------------------------------------------------------------------
-# Router 会话重置：结构变化切换，状态变化不切换
+# Router 会话隔离：每次 route reset，结构变化不额外叠加
 # ---------------------------------------------------------------------------
 
-def test_conversation_reset_on_structural_change_not_status():
+def test_conversation_reset_before_every_route_without_rebuilding_aicu():
     g = Graph()
     g.add_node(_node("n1", step_ref="a"))
     g.add_node(_node("n2", step_ref="b"))
@@ -220,23 +218,28 @@ def test_conversation_reset_on_structural_change_not_status():
     router = _real_router(fake, g)
     cc = fake.ccs[0]
 
-    router.route(_event(producer="n1"))          # 首次：初始化 epoch，不重置
-    assert cc.reset_count == 0
+    router.route(_event(producer="n1"))          # 首次也在 ask 前 reset
+    assert cc.reset_count == 1
+    assert router._ai() is fake
 
-    router.route(_event(producer="n1"))          # 图未变 → 复用，不重置
-    assert cc.reset_count == 0
+    router.route(_event(producer="n1"))          # 图未变 → 复用实例、隔离会话
+    assert cc.reset_count == 2
+    assert router._ai() is fake
 
     g.update_node("n1", status=NodeStatus.COMPLETED)   # 状态变化
     router.route(_event(producer="n1"))
-    assert cc.reset_count == 0                  # 状态变化不切换
+    assert cc.reset_count == 3
+    assert router._ai() is fake
 
-    g.add_node(_node("n3", parent_id="n1"))     # 结构变化
+    g.add_node(_node("n3", parent_id="n1"))     # 结构变化也不叠加额外 reset
     router.route(_event(producer="n1"))
-    assert cc.reset_count == 1                  # 结构变化 → 重置一次
+    assert cc.reset_count == 4
+    assert router._ai() is fake
 
-    g.add_node(_node("n4", parent_id="n1"))     # 再次结构变化
+    g.add_node(_node("n4", parent_id="n1"))
     router.route(_event(producer="n1"))
-    assert cc.reset_count == 2
+    assert cc.reset_count == 5
+    assert router._ai() is fake
 
 
 # ---------------------------------------------------------------------------

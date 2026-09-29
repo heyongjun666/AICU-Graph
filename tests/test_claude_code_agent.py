@@ -371,6 +371,129 @@ class TestTransientMcpFilesPerAdapter(_TransientMcpAgentFixture):
 
 
 
+_REGISTERED_CLI_IDS = tuple(adapter.id for adapter in cli_adapters._ADAPTERS)
+_HISTORY_FLAGS = {"--resume", "--session", "--continue", "resume", "-r", "-c"}
+
+
+class _CommandRecordingProc:
+    """Fake Popen result supporting both communicate() and streaming chat()."""
+
+    def __init__(self, argv, **kwargs):
+        import io
+
+        self.argv = list(argv)
+        self.kwargs = kwargs
+        self.pid = 5252
+        self.returncode = 0
+        self.communicate_called = False
+        self.wait_called = False
+        self.stdin = io.StringIO()
+        self.stdout = io.StringIO('{"result":"ok","session_id":"new-session"}\n')
+        self.stderr = io.StringIO("")
+
+    def communicate(self, input=None, timeout=None):
+        self.communicate_called = True
+        self.input = input
+        return self.stdout.getvalue(), self.stderr.getvalue()
+
+    def wait(self, timeout=None):
+        self.wait_called = True
+        return self.returncode
+
+
+def _contains_subsequence(values, expected):
+    if not expected:
+        return True
+    return any(values[i:i + len(expected)] == expected for i in range(len(values)))
+
+
+class TestFreshCliInvocation:
+    """Reset must make the next real ``ClaudeCodeAgent.chat`` invocation fresh.
+
+    This deliberately drives the complete command assembly through ``chat()`` rather
+    than testing adapter flags in isolation.  The registered list includes hidden CLI
+    entries because hiding an adapter from the UI must not change its invocation
+    contract.  Provisioning and child-process execution are both isolated below.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _isolated_cli_runtime(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(cli_adapters.Path, "home", lambda: tmp_path / "home")
+        monkeypatch.setattr(cli_adapters.CliAdapter, "is_installed", lambda self: True)
+        monkeypatch.setattr(ClaudeCodeAgent, "_build_process_env", lambda self: {})
+
+    @pytest.mark.parametrize("cli_id", _REGISTERED_CLI_IDS)
+    @pytest.mark.parametrize("with_output_callback", [False, True])
+    def test_reset_removes_old_history_from_real_chat_command(
+        self, cli_id, with_output_callback, tmp_path, monkeypatch
+    ):
+        calls = []
+
+        def fake_popen(argv, **kwargs):
+            proc = _CommandRecordingProc(argv, **kwargs)
+            calls.append(proc)
+            return proc
+
+        monkeypatch.setattr("claude_code_agent.subprocess.Popen", fake_popen)
+        callback_events = []
+        callback = (lambda label, message: callback_events.append((label, message))) if with_output_callback else None
+        agent = ClaudeCodeAgent(
+            workspace_path=str(tmp_path / cli_id / "ws"),
+            cli_name=cli_id,
+            output_callback=callback,
+        )
+        agent.conversation_id = "old-session"
+        agent.reset_conversation()
+
+        agent.chat("fresh invocation")
+        assert len(calls) == 1
+        command = calls[0].argv
+        assert "old-session" not in command
+        assert not any(flag in _HISTORY_FLAGS for flag in command), (
+            f"{cli_id} fresh command implicitly restored history: {command!r}"
+        )
+        if with_output_callback:
+            assert calls[0].wait_called and not calls[0].communicate_called
+        else:
+            assert calls[0].communicate_called and not calls[0].wait_called
+
+    @pytest.mark.parametrize("cli_id", _REGISTERED_CLI_IDS)
+    @pytest.mark.parametrize("with_output_callback", [False, True])
+    def test_without_reset_real_chat_command_resumes_old_history(
+        self, cli_id, with_output_callback, tmp_path, monkeypatch
+    ):
+        calls = []
+
+        def fake_popen(argv, **kwargs):
+            proc = _CommandRecordingProc(argv, **kwargs)
+            calls.append(proc)
+            return proc
+
+        monkeypatch.setattr("claude_code_agent.subprocess.Popen", fake_popen)
+        callback = (lambda label, message: None) if with_output_callback else None
+        agent = ClaudeCodeAgent(
+            workspace_path=str(tmp_path / cli_id / "ws"),
+            cli_name=cli_id,
+            output_callback=callback,
+        )
+        agent.conversation_id = "old-session"
+        adapter = cli_adapters.get_adapter(cli_id)
+
+        agent.chat("resume invocation")
+        assert len(calls) == 1
+        command = calls[0].argv
+        expected_resume = adapter.resume_flag("old-session")
+        assert expected_resume, f"{cli_id} unexpectedly has no resume flag"
+        assert _contains_subsequence(command, expected_resume), (
+            f"{cli_id} did not use adapter.resume_flag(): {command!r}"
+        )
+        assert "old-session" in command
+        if with_output_callback:
+            assert calls[0].wait_called and not calls[0].communicate_called
+        else:
+            assert calls[0].communicate_called and not calls[0].wait_called
+
+
 class TestSpawnChildConfiguration:
     def test_inherits_agent_capabilities_and_allows_overrides(self, tmp_path, monkeypatch):
         captured = {}

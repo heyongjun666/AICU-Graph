@@ -22,11 +22,21 @@ Router 使用真实 AICU；测试可通过 ``aicu_instance`` 显式注入实现 
 import json
 import logging
 import os
+import threading
 from typing import Any, Optional
 
 from runtime.models import EventMessage, NodeStatus
 
 logger = logging.getLogger(__name__)
+
+
+class _RouteParseError(Exception):
+    """Router 输出无法解析为合法 ``{"targets": [...]}`` 结构。
+
+    与「解析出空 targets（合法 ignore）」严格区分：空 targets 是 LLM 正常判断无人需要
+    处理；本异常是根本没产出可解析结构（LLM 退化 / 非 JSON / 复述）。只有后者才应
+    重置会话重试，而不是静默空路由后一路退化。
+    """
 
 
 class AICURouter:
@@ -45,6 +55,9 @@ class AICURouter:
         self._aicu = aicu_instance
         self._workspace_root = os.path.abspath(workspace_root or os.getcwd())
         self._config = dict(config or {})
+        # A Router owns one single-CC AICU. Reset and ask must be atomic so
+        # concurrent callers cannot reset each other's fresh invocation.
+        self._route_lock = threading.RLock()
         self._graph: Any = None
         # 快照缓存：graph_version 未变化时复用（图没变不扫全量节点）。
         self._snapshot_version: Optional[int] = None
@@ -79,51 +92,75 @@ class AICURouter:
     def route(self, event: EventMessage) -> list[str]:
         """决定 Event 该交给哪些 Node，返回目标 node_id 列表（空 = 无人接收）。
 
-        流程：组织图快照 → 结构版本检查（变化则重置会话）→ build prompt → ask
-        真实 AICU → parse targets。不解析 Event.content 中的任何"目标声明"——
-        content 只作为事件本身的描述传给 LLM/桩。
+        每次真正调用 Router AICU 前都会清空 Router conversation；AICU 实例、workspace
+        和 CLI 配置仍由 Router 生命周期复用。解析失败时继续只重试一次。不解析
+        Event.content 中的任何“目标声明”——content 只作为事件本身的描述传给 LLM/桩。
         """
-        self._last_trace = {}
-        self._last_raw_output = None
-        self._last_parse_error = None
-        self._last_reason = None
-        if self._graph is None:
-            logger.warning("Router not attached to a graph; event '%s' not routed",
-                           event.event_id)
-            self._last_parse_error = "router_not_attached_to_graph"
-            return []
-        producer_id = self._resolve_producer_node(event.producer) or event.producer
-        self._maybe_reset_on_structure_change()
-        snapshot = self._graph_snapshot(producer_id)
-        producer_snapshot = next(
-            (dict(item) for item in snapshot if item.get("id") == producer_id),
-            None,
-        )
-        self._last_trace = {
-            "producer_id": producer_id,
-            "producer_snapshot": producer_snapshot,
-            "candidate_nodes": [dict(item) for item in snapshot],
-            "graph_version": getattr(self._graph, "graph_version", None),
-            "structure_epoch": self._structure_epoch,
-        }
-        prompt = self._build_prompt(event, producer_id, snapshot)
-        try:
-            result = self._ai().ask(prompt)
-        except Exception as exc:
-            self._last_parse_error = f"router_call_failed: {type(exc).__name__}: {exc}"
-            raise
-        self._last_raw_output = result
-        try:
-            targets = self._parse_targets(result)
-        except Exception as exc:
-            self._last_parse_error = f"router_parse_failed: {type(exc).__name__}: {exc}"
-            raise
-        self._last_trace["parsed_targets"] = list(targets)
-        if self._last_reason:
-            self._last_trace["decision_reason"] = self._last_reason
-        elif not targets:
-            self._last_trace["decision_reason"] = "ignore (empty targets)"
-        return targets
+        with self._route_lock:
+            self._last_trace = {}
+            self._last_raw_output = None
+            self._last_parse_error = None
+            self._last_reason = None
+            if self._graph is None:
+                logger.warning("Router not attached to a graph; event '%s' not routed",
+                               event.event_id)
+                self._last_parse_error = "router_not_attached_to_graph"
+                return []
+            producer_id = self._resolve_producer_node(event.producer) or event.producer
+            self._maybe_reset_on_structure_change()
+            snapshot = self._graph_snapshot(producer_id)
+            producer_snapshot = next(
+                (dict(item) for item in snapshot if item.get("id") == producer_id),
+                None,
+            )
+            self._last_trace = {
+                "producer_id": producer_id,
+                "producer_snapshot": producer_snapshot,
+                "candidate_nodes": [dict(item) for item in snapshot],
+                "graph_version": getattr(self._graph, "graph_version", None),
+                "structure_epoch": self._structure_epoch,
+            }
+            prompt = self._build_prompt(event, producer_id, snapshot)
+            # Route boundaries are isolated, but the AICU/workspace is reused.
+            ai = self._ai()
+            self._reset_conversation()
+            try:
+                result = ai.ask(prompt)
+            except Exception as exc:
+                self._last_parse_error = f"router_call_failed: {type(exc).__name__}: {exc}"
+                raise
+            self._last_raw_output = result
+            try:
+                targets = self._parse_targets(result)
+            except _RouteParseError:
+                # 解析失败（LLM 退化 / 非 JSON / 复述）→ 重置会话后重试一次，而非静默空路由。
+                # 空 targets（合法 ignore）不在此路径：_parse_targets 正常返回空列表。
+                self._last_parse_error = "parse_failed_retrying"
+                self._last_reason = None
+                self._reset_conversation()
+                try:
+                    result = ai.ask(prompt)
+                except Exception as exc:
+                    self._last_parse_error = (
+                        f"router_call_failed_after_retry: {type(exc).__name__}: {exc}"
+                    )
+                    raise
+                self._last_raw_output = result
+                try:
+                    targets = self._parse_targets(result)
+                except _RouteParseError as exc:
+                    # 重试仍失败 → fail-closed（空 targets），不再无限重试。
+                    self._last_parse_error = f"parse_failed_after_retry: {exc}"
+                    targets = []
+            except Exception as exc:
+                self._last_parse_error = f"router_parse_failed: {type(exc).__name__}: {exc}"
+                raise
+            self._last_trace["parsed_targets"] = list(targets)
+            if self._last_reason:
+                self._last_trace["decision_reason"] = self._last_reason
+            elif not targets:
+                self._last_trace["decision_reason"] = "ignore (empty targets)"
+            return targets
 
     def decision_trace(self) -> dict[str, Any]:
         """Return a bounded, JSON-safe snapshot of the latest route decision."""
@@ -145,26 +182,18 @@ class AICURouter:
         return trace
 
     # ------------------------------------------------------------------
-    # 生命周期：Router 与「组织结构版本」绑定
+    # 生命周期：Router 持有一个实例，route 边界隔离 conversation
     # ------------------------------------------------------------------
 
     def _maybe_reset_on_structure_change(self) -> None:
-        """组织结构变化 → 切换 Router 上下文（重置会话）。
+        """记录最新组织结构版本；conversation 由每次 route 边界统一重置。
 
-        只响应结构变更（新增/删除节点或边、换 parent、改 exec_type/role/
-        step_ref）；运行状态变化（running/completed/failed）不切换——否则一个
-        Node 状态变一次就重建一次 Router，失去意义。AICU 尚未创建时 no-op。
+        结构版本仍用于 trace 和缓存语义，但不再单独触发 reset，避免一次 route
+        因为“结构变化 + route 边界”重复清理会话。运行状态变化也不影响该记录。
         """
         if self._graph is None:
             return
-        struct_v = getattr(self._graph, "structure_version", 0)
-        if self._structure_epoch is None:
-            self._structure_epoch = struct_v
-            return
-        if struct_v == self._structure_epoch:
-            return
-        self._reset_conversation()
-        self._structure_epoch = struct_v
+        self._structure_epoch = getattr(self._graph, "structure_version", 0)
 
     def _reset_conversation(self) -> None:
         """重置 AICU 会话（只清 conversation_id，不起新进程/不重建实例）。
@@ -425,7 +454,8 @@ class AICURouter:
     def _parse_targets(self, result: Any) -> list[str]:
         """解析 AI 输出 ``{"targets": [...]}`` → 图中 node_id 列表（step_ref 解析为 id）。
 
-        容忍 AI 返回 dict / JSON 字符串 / 含围栏的文本；解析失败返回空列表。
+        容忍 AI 返回 dict / JSON 字符串 / 含围栏的文本；解析失败抛 ``_RouteParseError``
+        （与「解析出空 targets」严格区分，后者正常返回空列表）。
 
         real 模式下 ``AICU.ask()`` 返回**元数据 dict**（``content`` / ``content_parsed`` /
         ``final_output_path``，与 manager._extract_review_content 同源问题），顶层没有
@@ -436,7 +466,7 @@ class AICURouter:
         if isinstance(result, dict) and "targets" not in result:
             extracted = self._extract_targets_payload(result)
             if extracted is None:
-                return []
+                raise _RouteParseError("real AICU 元数据 dict 无可提取的决策载荷")
             result = extracted
         raw = result
         if isinstance(raw, str):
@@ -456,21 +486,21 @@ class AICURouter:
                     try:
                         parsed = json.loads(text[start : end + 1])
                     except json.JSONDecodeError:
-                        return []
+                        raise _RouteParseError("JSON 字符串解码失败")
                 else:
-                    return []
+                    raise _RouteParseError("输出不含 JSON 对象")
         elif isinstance(raw, dict):
             parsed = raw
         else:
-            return []
+            raise _RouteParseError(f"输出类型非 str/dict: {type(raw).__name__}")
         if not isinstance(parsed, dict):
-            return []
+            raise _RouteParseError(f"解析结果非 dict: {type(parsed).__name__}")
         reason = parsed.get("reason")
         if isinstance(reason, str) and reason.strip():
             self._last_reason = reason.strip()
         targets = parsed.get("targets")
         if not isinstance(targets, list):
-            return []
+            raise _RouteParseError("targets 字段缺失或非 list")
         resolved: list[str] = []
         for ref in targets:
             if not isinstance(ref, str):

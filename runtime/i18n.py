@@ -68,6 +68,20 @@ _ZH_PATTERNS: list[tuple[str, str]] = [
     (r"^Role config must be a YAML mapping$", "Role 配置必须是 YAML 映射"),
     (r"^Store API keys in an environment variable and set api_key_env$",
      "请将 API Key 存入环境变量并设置 api_key_env"),
+    # ---- 可浏览根：复制路径 / 拖入 / 拖出 ----
+    (r"^Node has no artifact$", "该节点尚未声明产出目录，没有可落盘的位置"),
+    (r"^Node result is a file, not a directory$",
+     "该节点的产出是单个文件，不能往里放文件"),
+    (r"^Refusing to write into framework-managed directory: (.+)$",
+     "「{0}」由框架管理，放进去的文件会被自动重建覆盖"),
+    (r"^Reveal in Finder is only available on macOS$", "「在访达中显示」仅在 macOS 上可用"),
+    (r"^Cannot download a directory$", "不能下载目录"),
+    (r"^Not a directory: (.*)$", "「{0}」不是目录"),
+    (r"^File exceeds the (.+) byte upload limit$", "文件超出 {0} 字节的上传上限"),
+    (r"^File name must not contain a path separator: (.+)$", "文件名不能包含路径分隔符: {0}"),
+    (r"^File name must not contain control characters: (.+)$", "文件名不能包含控制字符: {0}"),
+    (r"^File name is longer than (.+) bytes: (.+)$", "文件名超出 {0} 字节: {1}"),
+    (r"^Invalid file name: (.*)$", "非法的文件名: {0}"),
 ]
 
 

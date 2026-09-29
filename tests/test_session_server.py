@@ -2,6 +2,8 @@
 
 import contextlib
 import json
+import shutil
+import sys
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -741,6 +743,455 @@ def test_nested_workspace_browsing_and_path_isolation(
         f"/v1/sessions/{session_id}/nodes/{child.id}/workspace/file",
         params={"path": "outside-link"},
     ).status_code == 400
+
+
+# ---- 可浏览根：复制路径 / 拖入 / 拖出（V3-2.3） ----
+#
+# 八条路由共用一套落盘机制，所以每个边界只测一次、用 shared 那组做代表，
+# 只在「根不同」这件事上（无产出目录 / 产出是文件 / 跨上下文隔离）才把两边都跑。
+
+
+def _shared_root(session_manager, session_id) -> Path:
+    return Path(session_manager.get_session(session_id).runtime.get_shared_workspace())
+
+
+def _completed_node_with_artifact(runtime, root_id, tmp_path, artifact: str):
+    """造一个已经跑完、并且声明了产出路径的节点。"""
+    child = runtime.create_manual_node(task="Produce", parent_id=root_id)
+    workspace = Path(runtime.get_node_workspace(child.id))
+    target = workspace / artifact
+    if artifact.endswith("/"):
+        target.mkdir(parents=True, exist_ok=True)
+    else:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("done", encoding="utf-8")
+    runtime.update_node_status(
+        child.id, NodeStatus.COMPLETED, artifact_path=artifact.rstrip("/")
+    )
+    return child
+
+
+def test_upload_to_shared_writes_exact_bytes(session_client, session_manager):
+    session_id = _create_session(session_client)["id"]
+    response = session_client.post(
+        f"/v1/sessions/{session_id}/shared/upload",
+        params={"path": "", "name": "notes.txt"},
+        content=b"hello \xe4\xb8\xad\xe6\x96\x87",
+    )
+    assert response.status_code == 201, response.text
+    assert response.json() == {
+        "name": "notes.txt", "path": "notes.txt", "size": 12, "renamed": False,
+    }
+    assert (_shared_root(session_manager, session_id) / "notes.txt").read_bytes() == (
+        b"hello \xe4\xb8\xad\xe6\x96\x87"
+    )
+    # 列表里看得见，且是刚写进去的那份
+    listing = session_client.get(f"/v1/sessions/{session_id}/shared").json()
+    assert [entry["name"] for entry in listing["entries"]] == ["notes.txt"]
+
+
+def test_upload_creates_nested_directories(session_client, session_manager):
+    session_id = _create_session(session_client)["id"]
+    response = session_client.post(
+        f"/v1/sessions/{session_id}/shared/upload",
+        params={"path": "refs/2026/papers", "name": "a.pdf"},
+        content=b"pdf",
+    )
+    assert response.status_code == 201, response.text
+    assert response.json()["path"] == "refs/2026/papers/a.pdf"
+    assert (_shared_root(session_manager, session_id) / "refs/2026/papers/a.pdf").read_bytes() == b"pdf"
+
+
+def test_upload_same_name_renames_and_never_overwrites(session_client, session_manager):
+    """覆盖是这里唯一不可接受的失败：用户拖进来的可能是他手上唯一的那份。"""
+    session_id = _create_session(session_client)["id"]
+    url = f"/v1/sessions/{session_id}/shared/upload"
+    first = session_client.post(url, params={"name": "a.txt"}, content=b"first")
+    second = session_client.post(url, params={"name": "a.txt"}, content=b"second")
+    assert first.json()["name"] == "a.txt" and first.json()["renamed"] is False
+    assert second.json()["name"] == "a-1.txt" and second.json()["renamed"] is True
+    root = _shared_root(session_manager, session_id)
+    assert (root / "a.txt").read_bytes() == b"first"
+    assert (root / "a-1.txt").read_bytes() == b"second"
+
+
+def test_upload_empty_file_is_not_an_error(session_client, session_manager):
+    session_id = _create_session(session_client)["id"]
+    response = session_client.post(
+        f"/v1/sessions/{session_id}/shared/upload",
+        params={"name": "empty.bin"}, content=b"",
+    )
+    assert response.status_code == 201
+    assert response.json()["size"] == 0
+
+
+@pytest.mark.parametrize("path, name", [
+    ("../escape", "a.txt"),      # 越界
+    ("/etc", "a.txt"),           # 绝对路径
+    ("", "a/b.txt"),             # 文件名里带分隔符
+    ("", "..\\b.txt"),           # 反斜杠分隔符
+    ("sub/../../out", "a.txt"),  # 中间层越界
+])
+def test_upload_rejects_traversal(session_client, session_manager, path, name):
+    session_id = _create_session(session_client)["id"]
+    response = session_client.post(
+        f"/v1/sessions/{session_id}/shared/upload",
+        params={"path": path, "name": name}, content=b"x",
+    )
+    assert response.status_code == 400, response.text
+    # 拒绝就是拒绝：根目录下不能因为这个请求多出任何东西
+    root = _shared_root(session_manager, session_id)
+    assert not root.exists() or list(root.rglob("*")) == []
+
+
+def test_upload_into_framework_directory_is_refused(session_client, session_manager):
+    """cc_0 / .claude 这类目录会被框架 rmtree 重建 —— 放进去等于静默丢失。"""
+    session_id = _create_session(session_client)["id"]
+    for path in ["cc_0", "deliverables", "refs/.git", "a/cc_1/b"]:
+        response = session_client.post(
+            f"/v1/sessions/{session_id}/shared/upload",
+            params={"path": path, "name": "a.txt"}, content=b"x",
+        )
+        assert response.status_code == 400, f"{path} 应当被拒绝: {response.text}"
+
+
+def test_upload_size_limit_returns_413_without_leaving_debris(
+    session_client, session_manager, monkeypatch
+):
+    from runtime import file_transfer
+
+    monkeypatch.setattr(file_transfer, "MAX_UPLOAD_BYTES", 16)
+    session_id = _create_session(session_client)["id"]
+    response = session_client.post(
+        f"/v1/sessions/{session_id}/shared/upload",
+        params={"name": "big.bin"}, content=b"x" * 64,
+    )
+    assert response.status_code == 413, response.text
+    root = _shared_root(session_manager, session_id)
+    assert list(root.iterdir()) == []  # 连 .part 都不留
+
+
+def test_download_round_trips_and_encodes_non_ascii_filename(
+    session_client, session_manager
+):
+    session_id = _create_session(session_client)["id"]
+    payload = b"\x00\x01binary\xff"
+    session_client.post(
+        f"/v1/sessions/{session_id}/shared/upload",
+        params={"name": "报告.pdf"}, content=payload,
+    )
+    response = session_client.get(
+        f"/v1/sessions/{session_id}/shared/download", params={"path": "报告.pdf"},
+    )
+    assert response.status_code == 200
+    assert response.content == payload
+    disposition = response.headers["content-disposition"]
+    # attachment 是拖出成立的前提；中文名必须走 RFC 5987 那一支
+    assert disposition.startswith("attachment")
+    assert "filename*=utf-8''" in disposition
+
+
+def test_download_directory_is_rejected(session_client, session_manager):
+    session_id = _create_session(session_client)["id"]
+    session_client.post(
+        f"/v1/sessions/{session_id}/shared/upload",
+        params={"path": "refs", "name": "a.txt"}, content=b"x",
+    )
+    response = session_client.get(
+        f"/v1/sessions/{session_id}/shared/download", params={"path": "refs"},
+    )
+    assert response.status_code == 400, response.text
+
+
+def test_resolve_path_returns_a_real_absolute_path(session_client, session_manager):
+    """「复制路径」要的就是这个 —— 且这是唯一交出真实根的地方。"""
+    session_id = _create_session(session_client)["id"]
+    session_client.post(
+        f"/v1/sessions/{session_id}/shared/upload",
+        params={"path": "refs", "name": "a.txt"}, content=b"x",
+    )
+    root = _shared_root(session_manager, session_id)
+
+    # path="" 合法 —— 「复制当前目录路径」是这里最常用的一条
+    assert session_client.get(
+        f"/v1/sessions/{session_id}/shared/path"
+    ).json()["abs_path"] == str(root)
+    info = session_client.get(
+        f"/v1/sessions/{session_id}/shared/path", params={"path": "refs/a.txt"},
+    ).json()
+    assert info == {
+        "path": "refs/a.txt",
+        "abs_path": str(root / "refs/a.txt"),
+        "name": "a.txt",
+        "type": "file",
+    }
+    assert session_client.get(
+        f"/v1/sessions/{session_id}/shared/path", params={"path": "../x"},
+    ).status_code == 400
+
+
+# ---------------------------------------------------------------------------
+# 共享根「还不存在」这一状态：两个读端点口径必须一致
+#
+# 起因：新建会话后点共享区面包屑上的「复制路径」→ 后端回 404，而同一时刻列目录
+# 明明显示着一个空目录。根因是共享根原先只在「节点开跑」（runtime._prepare_node_config）
+# 和「连终端」（PTY 端点）时被懒创建，而**列目录**与**解析路径**对「根还没建」
+# 给出了相反的答案：前者按注释里点名的「空白图会话从未创建节点」返回空树，后者 404。
+#
+# 现在由 _build_handle 保证会话一建立共享根就在，下面这两条读路径只做兜底。
+# ---------------------------------------------------------------------------
+
+
+def test_a_new_session_already_has_its_shared_root(session_client, session_manager):
+    """会话一建立，派生的共享根就在 —— 不必等第一个节点开跑。"""
+    session_id = _create_session(session_client)["id"]
+
+    assert _shared_root(session_manager, session_id).is_dir()
+
+
+def test_resolve_path_still_answers_when_the_shared_root_is_gone(
+    session_client, session_manager
+):
+    """根不在时（老会话、或外部项目目录被删）复制路径仍要给出路径，而不是 404 ——
+    与 list_session_shared 对同一状态返回空树保持同一个口径。"""
+    session_id = _create_session(session_client)["id"]
+    root = _shared_root(session_manager, session_id)
+    # ignore_errors：这一步只是把场景布置成「根不在」，不该成为断言失败的原因。
+    shutil.rmtree(root, ignore_errors=True)
+
+    response = session_client.get(f"/v1/sessions/{session_id}/shared/path")
+
+    assert response.status_code == 200, response.text
+    assert response.json() == {
+        "path": ".",
+        "abs_path": str(root),
+        "name": root.name,
+        "type": "directory",
+    }
+    # 解析不该顺手把目录造出来：这是读端点，建目录的职责在会话建立/保存设置那两处。
+    assert not root.exists()
+
+
+def test_resolve_path_still_404s_for_a_missing_subpath(session_client):
+    """只有**根本身**享受这个待遇：子路径不存在就是真的找不到。"""
+    session_id = _create_session(session_client)["id"]
+
+    response = session_client.get(
+        f"/v1/sessions/{session_id}/shared/path", params={"path": "nope.txt"},
+    )
+
+    assert response.status_code == 404
+
+
+def test_clearing_the_project_dir_creates_the_fallback_shared_root(
+    session_client, session_manager, tmp_path
+):
+    """清除外部项目目录 → 落回派生路径 {workspace_root}/shared，那个目录也得在。
+
+    这条分支原先没人建目录：显式那一支有 makedirs，回到默认这一支没有。
+    """
+    session_id = _create_session(session_client)["id"]
+    derived = _shared_root(session_manager, session_id)
+    external = tmp_path / "external-project"
+
+    session_client.patch(
+        f"/v1/sessions/{session_id}/settings",
+        json={"config": {}, "shared_workspace": str(external)},
+    )
+    assert external.is_dir()
+    shutil.rmtree(derived, ignore_errors=True)  # 派生路径这期间被删了（或从未建过）
+
+    response = session_client.patch(
+        f"/v1/sessions/{session_id}/settings",
+        json={"config": {}, "shared_workspace": None},
+    )
+
+    assert response.status_code == 200, response.text
+    assert derived.is_dir()
+
+
+def test_changing_workspace_root_creates_the_shared_root_under_the_new_one(
+    session_client, tmp_path
+):
+    """改工作区根会让派生共享根整个挪地方 —— 新落点同样得建。"""
+    session_id = _create_session(session_client)["id"]
+    moved = tmp_path / "moved"
+
+    response = session_client.patch(
+        f"/v1/sessions/{session_id}/settings",
+        json={"config": {}, "workspace_root": str(moved)},
+    )
+
+    assert response.status_code == 200, response.text
+    assert (moved / "shared").is_dir()
+
+
+def test_explicit_project_dir_is_created_on_creation(session_client, tmp_path):
+    """建会话时显式指定的项目目录，按 validate_shared_workspace 的约定由调用方创建。"""
+    external = tmp_path / "external-project"
+
+    session_client.post("/v1/sessions", json={
+        "task": "t", "config": {"shared_workspace": str(external)},
+    })
+
+    assert external.is_dir()
+
+
+def test_restore_does_not_resurrect_an_explicit_project_dir(runtime, tmp_path):
+    """_build_handle 只在**派生**路径上建目录；显式配置的外部项目目录不碰。
+
+    它是每个历史会话在服务启动时都会跑一遍的路径：外部目录若只是暂时不可达
+    （网络盘没挂上），在它的位置造一个空目录会把真正的挂载点盖住，还会把
+    「路径配错了」伪装成「建好了」。
+    """
+    root_dir = tmp_path / "sessions"
+    external = tmp_path / "external-project"
+    manager = SessionManager(
+        registry=runtime.registry, root_dir=str(root_dir),
+        workspace_root=str(tmp_path), restore=False,
+    )
+    try:
+        session_id = manager.create_session(
+            "t", config={"shared_workspace": str(external)}
+        )["id"]
+        assert external.is_dir()
+        shutil.rmtree(external)
+    finally:
+        manager.shutdown()
+
+    restored = SessionManager(
+        registry=runtime.registry, root_dir=str(root_dir),
+        workspace_root=str(tmp_path), restore=True,
+    )
+    try:
+        assert restored.get_session(
+            session_id
+        ).runtime.get_shared_workspace() == str(external)
+        assert not external.exists()
+    finally:
+        restored.shutdown()
+
+
+def test_reveal_is_refused_off_macos_without_shelling_out(
+    session_client, session_manager, monkeypatch
+):
+    calls = []
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setattr("runtime.runtime.subprocess.run", lambda *a, **k: calls.append(a))
+    session_id = _create_session(session_client)["id"]
+    response = session_client.post(f"/v1/sessions/{session_id}/shared/reveal")
+    assert response.status_code == 501, response.text
+    assert calls == []  # 不支持的平台上一次子进程都不该起
+
+
+def test_reveal_on_macos_calls_open_with_an_argv_list(
+    session_client, session_manager, monkeypatch
+):
+    calls = []
+    monkeypatch.setattr(sys, "platform", "darwin")
+    monkeypatch.setattr(
+        "runtime.runtime.subprocess.run",
+        lambda argv, **kwargs: calls.append((argv, kwargs)),
+    )
+    session_id = _create_session(session_client)["id"]
+    session_client.post(
+        f"/v1/sessions/{session_id}/shared/upload",
+        params={"name": "a.txt"}, content=b"x",
+    )
+    response = session_client.post(
+        f"/v1/sessions/{session_id}/shared/reveal", params={"path": "a.txt"},
+    )
+    assert response.status_code == 200, response.text
+    root = _shared_root(session_manager, session_id)
+    argv, kwargs = calls[0]
+    assert argv == ["open", "-R", str(root / "a.txt")]
+    assert "shell" not in kwargs  # list 形式，不经 shell，没有注入面
+
+
+def test_node_results_upload_lands_in_the_declared_output_dir(
+    session_client, session_manager
+):
+    session_id = _create_session(session_client)["id"]
+    runtime = session_manager.get_session(session_id).runtime
+    root = runtime.create_manual_node(task="Root", exec_type="manager")
+    child = _completed_node_with_artifact(runtime, root.id, None, "out/")
+    response = session_client.post(
+        f"/v1/sessions/{session_id}/nodes/{child.id}/results/upload",
+        params={"name": "extra.txt"}, content=b"reference",
+    )
+    assert response.status_code == 201, response.text
+    assert response.json()["path"] == "extra.txt"
+    workspace = Path(runtime.get_node_workspace(child.id))
+    assert (workspace / "out" / "extra.txt").read_bytes() == b"reference"
+
+
+def test_node_results_upload_refuses_when_there_is_nowhere_to_land(
+    session_client, session_manager
+):
+    """没产出目录 / 产出是个文件 —— 两条都**不**退回到别处去落。"""
+    session_id = _create_session(session_client)["id"]
+    runtime = session_manager.get_session(session_id).runtime
+    root = runtime.create_manual_node(task="Root", exec_type="manager")
+
+    never_ran = runtime.create_manual_node(task="Pending", parent_id=root.id)
+    response = session_client.post(
+        f"/v1/sessions/{session_id}/nodes/{never_ran.id}/results/upload",
+        params={"name": "a.txt"}, content=b"x",
+    )
+    assert response.status_code == 404, response.text
+
+    single_file = _completed_node_with_artifact(runtime, root.id, None, "report.md")
+    response = session_client.post(
+        f"/v1/sessions/{session_id}/nodes/{single_file.id}/results/upload",
+        params={"name": "a.txt"}, content=b"x",
+    )
+    assert response.status_code == 400, response.text
+    # 那个文件本身一个字节都没被碰
+    workspace = Path(runtime.get_node_workspace(single_file.id))
+    assert (workspace / "report.md").read_text(encoding="utf-8") == "done"
+
+
+def test_shared_and_node_results_roots_do_not_leak_into_each_other(
+    session_client, session_manager
+):
+    """两条入口各写各的根 —— 写串了就是「东西放到了你没想到的地方」。"""
+    session_id = _create_session(session_client)["id"]
+    runtime = session_manager.get_session(session_id).runtime
+    root = runtime.create_manual_node(task="Root", exec_type="manager")
+    child = _completed_node_with_artifact(runtime, root.id, None, "out/")
+    workspace = Path(runtime.get_node_workspace(child.id))
+
+    session_client.post(
+        f"/v1/sessions/{session_id}/shared/upload",
+        params={"name": "shared-only.txt"}, content=b"x",
+    )
+    session_client.post(
+        f"/v1/sessions/{session_id}/nodes/{child.id}/results/upload",
+        params={"name": "node-only.txt"}, content=b"x",
+    )
+
+    assert not (_shared_root(session_manager, session_id) / "node-only.txt").exists()
+    assert not (workspace / "node-only.txt").exists()
+    assert not (workspace / "out" / "shared-only.txt").exists()
+    assert (workspace / "out" / "node-only.txt").exists()
+
+
+def test_upload_to_another_sessions_node_is_rejected(session_client, session_manager):
+    """别把「这个节点不在这条会话里」当成 404 —— 它和同族的
+    ``read_node_result_file`` / ``list_node_results`` 一样走 ``_require_node`` 的
+    ValueError → 400。同一个「节点找不到」在读写两条路上必须报同一件事。"""
+    first = _create_session(session_client)["id"]
+    second = _create_session(session_client)["id"]
+    runtime = session_manager.get_session(first).runtime
+    root = runtime.create_manual_node(task="Root", exec_type="manager")
+    child = _completed_node_with_artifact(runtime, root.id, None, "out/")
+    response = session_client.post(
+        f"/v1/sessions/{second}/nodes/{child.id}/results/upload",
+        params={"name": "a.txt"}, content=b"x",
+    )
+    assert response.status_code == 400
+    # 而且什么都没写进去
+    assert list((Path(runtime.get_node_workspace(child.id)) / "out").iterdir()) == []
 
 
 def test_dependency_candidates_and_cycle_rejection(session_client):

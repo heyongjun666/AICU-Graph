@@ -324,6 +324,9 @@ const NODE_FIELD_MAP: ReadonlyMap<string, keyof GraphNode> = new Map([
   ['label', 'label'],
   ['role', 'role'],
   ['task', 'task'],
+  // 不在这个白名单里的 key 会被 applyNodeUpdated 静默丢掉：一次实时 Revise
+  // 会一直等到下次全量快照或重新选中节点，面板上的任务链才更新。
+  ['task_history', 'task_history'],
   ['parent_id', 'parent_id'],
   ['manager_phase', 'manager_phase'],
   ['created_at', 'created_at'],

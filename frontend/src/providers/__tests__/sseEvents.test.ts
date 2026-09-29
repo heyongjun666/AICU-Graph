@@ -96,6 +96,29 @@ describe('applySSEFrame — node_status_changed / node_updated / node_removed', 
     applySSEFrame({ event: 'node_updated', data: JSON.stringify({ node_id: 'ghost', status: 'Running' }) });
     expect(useGraphStore.getState().nodes.size).toBe(0);
   });
+
+  // `applyNodeUpdated` 只搬运 NODE_FIELD_MAP 白名单里的 key，漏一个就是「实时 Revise
+  // 之后面板要等下次全量快照才更新」——界面看着像没反应。
+  it('carries task_history through node_updated (not dropped by the field whitelist)', () => {
+    useGraphStore.getState().addNode({
+      id: 'n-1', label: 'n-1', status: NodeStatus.Waiting, exec_type: 'W', task: 'old task',
+    });
+
+    applySSEFrame({
+      event: 'node_updated',
+      data: JSON.stringify({
+        node_id: 'n-1',
+        task: 'incremental task',
+        task_history: [{ task: 'old task', at: '2026-09-01T10:00:00', reason: 'revise' }],
+      }),
+    });
+
+    const node = useGraphStore.getState().nodes.get('n-1');
+    expect(node?.task).toBe('incremental task');
+    expect(node?.task_history).toEqual([
+      { task: 'old task', at: '2026-09-01T10:00:00', reason: 'revise' },
+    ]);
+  });
 });
 
 describe('applySSEFrame — edge_added / edge_removed', () => {

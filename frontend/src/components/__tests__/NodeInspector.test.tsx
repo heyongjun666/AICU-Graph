@@ -19,7 +19,7 @@ import { useGraphStore } from '../../stores/GraphStore';
 import { useSessionStore } from '../../stores/SessionStore';
 import { useUIStateStore } from '../../stores/UIStateStore';
 import { useEventStore } from '../../stores/EventStore';
-import { GraphNode, NodeStatus } from '../../types';
+import { GraphNode, NodeStatus, TaskHistoryEntry } from '../../types';
 import * as api from '../../utils/api';
 
 vi.mock('../../utils/api', () => ({
@@ -40,7 +40,12 @@ vi.mock('../../utils/api', () => ({
   getRole: vi.fn(),
 }));
 
-function makeNode(id: string, parentId: string | null, execType: 'M' | 'W'): GraphNode {
+function makeNode(
+  id: string,
+  parentId: string | null,
+  execType: 'M' | 'W',
+  taskHistory?: TaskHistoryEntry[],
+): GraphNode {
   return {
     id,
     label: `${execType} ${id}`,
@@ -49,6 +54,7 @@ function makeNode(id: string, parentId: string | null, execType: 'M' | 'W'): Gra
     parent_id: parentId,
     role: 'default',
     task: `task of ${id}`,
+    ...(taskHistory ? { task_history: taskHistory } : {}),
   };
 }
 
@@ -463,3 +469,98 @@ describe('NodeInspector 产出页的文件拖入 / 拖出（V3-2.3）', () => {
   });
 });
 
+// ============================================================================
+// 任务链：`node.task` 是「现在该执行什么」，会被 Revise / 增量复用 / 评审修复 /
+// 界面改任务整条盖掉。被盖掉的那条只剩 task_history 一处留痕 —— 概览页必须能查到，
+// 否则一个被改过三次的节点看上去就是凭空冒出来的一条增量任务。
+// ============================================================================
+describe('NodeInspector 任务链', () => {
+  const HISTORY: TaskHistoryEntry[] = [
+    { task: '最初的任务', at: '2026-09-01T10:00:00', reason: 'revise' },
+    { task: '第一次增量', at: '2026-09-02T11:00:00', reason: 'repair' },
+  ];
+
+  /** 渲染选中 node-1 的 Inspector（概览页是默认 tab）；history 为 undefined 表示字段缺失。 */
+  function renderInspectorWithHistory(history?: TaskHistoryEntry[]) {
+    vi.mocked(api.getSessionNode).mockResolvedValue({
+      ...makeNode('node-1', null, 'M'),
+      task: 'current task',
+      ...(history ? { task_history: history } : {}),
+    });
+    useGraphStore.setState({ nodes: new Map([['node-1', makeNode('node-1', null, 'M')]]) });
+    useGraphStore.getState().selectNode('node-1');
+    render(
+      <I18nProvider>
+        <NodeInspector />
+      </I18nProvider>,
+    );
+  }
+
+  function chainItems(): HTMLElement[] {
+    return Array.from(document.querySelectorAll('.task-chain > li')) as HTMLElement[];
+  }
+
+  it('按时间正序整条展开：原始任务在最上面，后续补充在后面，当前任务收尾', async () => {
+    renderInspectorWithHistory(HISTORY);
+    await screen.findByText('current task');
+
+    const items = chainItems();
+    expect(items).toHaveLength(3);
+    expect(items[0].textContent).toContain('最初的任务');
+    expect(items[1].textContent).toContain('第一次增量');
+    expect(items[2].textContent).toContain('current task');
+    // 原始任务打头 —— 不能靠展开按钮才看得见
+    expect(items[0].textContent).toContain('Original task');
+  });
+
+  it('链上没有任何折叠开关：整条一开始就是展开的', async () => {
+    renderInspectorWithHistory(HISTORY);
+    await screen.findByText('current task');
+
+    expect(screen.queryByRole('button', { name: /superseded tasks/i })).toBeNull();
+    // 三条一次到位，不需要任何交互就能读全
+    expect(chainItems()).toHaveLength(3);
+  });
+
+  it('reason 标在「被换来的那条」上，不是被换掉的那条', async () => {
+    renderInspectorWithHistory(HISTORY);
+    await screen.findByText('current task');
+
+    const items = chainItems();
+    // HISTORY[0].reason = revise → 它是「最初的任务」被换掉的原因，
+    // 所以 Revised 属于换来的「第一次增量」，不属于被换掉的「最初的任务」。
+    expect(items[1].textContent).toContain('Revised');
+    expect(items[0].textContent).not.toContain('Revised');
+    // 最后一条的 reason 取 HISTORY[1].reason = repair
+    expect(items[2].textContent).toContain('Review fix');
+    expect(items[2].textContent).toContain('Current');
+  });
+
+  it('历史为空或字段缺失时退回单条任务（旧会话与从未改过任务的节点与今天一致）', async () => {
+    renderInspectorWithHistory();
+    await screen.findByText('current task');
+
+    expect(document.querySelector('.task-chain')).toBeNull();
+    expect(chainItems()).toHaveLength(0);
+  });
+
+  it('空数组同样退回单条任务', async () => {
+    renderInspectorWithHistory([]);
+    await screen.findByText('current task');
+
+    expect(document.querySelector('.task-chain')).toBeNull();
+  });
+
+  it('认不出的 reason 回退显示 slug 原文，不显示 inspector.taskReason.xxx 这种裸 key', async () => {
+    renderInspectorWithHistory([
+      { task: '老任务', at: '2026-09-01T10:00:00', reason: 'resequenced' },
+    ]);
+    await screen.findByText('current task');
+
+    const items = chainItems();
+    expect(items).toHaveLength(2);
+    expect(items[0].textContent).toContain('Original task');
+    expect(items[1].textContent).toContain('resequenced');
+    expect(document.body.textContent).not.toContain('inspector.taskReason');
+  });
+});

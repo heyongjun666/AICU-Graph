@@ -11,6 +11,7 @@ runtime_sessions/
 /event_inbox/
 *.log
 router_traces.jsonl
+/codegraph_metrics.jsonl
 review_v*.md
 test_report.md
 

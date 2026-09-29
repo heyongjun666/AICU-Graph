@@ -2,8 +2,8 @@
 tests/test_codegraph_context.py — CodeGraph Context Provider 测试
 
 覆盖：
-  1. 守卫 no-op：AICU_CODEGRAPH 关 / stub|mock 模式 → build_codegraph_context /
-     build_review_context 返回 ""（承重契约：默认关字节级不变，Resolver 在 stub 下 no-op）
+  1. 守卫 no-op：AICU_CODEGRAPH=0 显式关 / stub|mock 模式 → build_codegraph_context /
+     build_review_context 返回 ""（承重契约：默认开，显式 AICU_CODEGRAPH=0 才关，Resolver 在 stub 下 no-op）
   2. Resolver 确定性提取：只命中 file/symbol 引用，不做自然语言语义判断
   3. 预算裁剪：≤4KB 注入预算，超出从尾部截断保留头部
   4. GroupGraphState 状态机：NOT_EXIST→READY（init+index）、READY→STALE→READY（sync）、
@@ -87,7 +87,7 @@ def _reset_graph_state():
 
 
 def test_flag_off_noop(monkeypatch):
-    monkeypatch.delenv("AICU_CODEGRAPH", raising=False)
+    monkeypatch.setenv("AICU_CODEGRAPH", "0")
     node = _node(task="fix create_article in src/app.py")
     assert build_codegraph_context(node, _ctx(node)) == ""
 
@@ -179,7 +179,7 @@ def test_skip_project_roles(monkeypatch, tmp_path):
 
 
 def test_review_context_noop_when_off(monkeypatch, tmp_path):
-    monkeypatch.delenv("AICU_CODEGRAPH", raising=False)
+    monkeypatch.setenv("AICU_CODEGRAPH", "0")
     node = _node(role="dev_lead", workspace_root=str(tmp_path))
     children = [{"shared_workspace": str(tmp_path / "shared" / "g")}]
     assert build_review_context(_ctx(node), children) == ""
@@ -245,8 +245,16 @@ def test_state_machine_building_returns_false(tmp_path):
 # ---------------------------------------------------------------------------
 
 
-def test_notify_artifact_updated_flag_off_noop(monkeypatch, tmp_path):
+def test_notify_artifact_updated_default_on_marks_stale(monkeypatch, tmp_path):
+    """默认（不设 AICU_CODEGRAPH）→ 开：mark_stale（新契约：默认开）。"""
     monkeypatch.delenv("AICU_CODEGRAPH", raising=False)
+    shared = str(tmp_path / "shared" / "g")
+    notify_artifact_updated(shared)
+    assert GroupGraphState.get(shared) == GraphState.STALE
+
+
+def test_notify_artifact_updated_flag_off_noop(monkeypatch, tmp_path):
+    monkeypatch.setenv("AICU_CODEGRAPH", "0")
     shared = str(tmp_path / "shared" / "g")
     notify_artifact_updated(shared)
     assert GroupGraphState.get(shared) == GraphState.NOT_EXIST

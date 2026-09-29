@@ -993,7 +993,7 @@ class Worker(Executable):
         if getattr(ctx.node, 'pending_context', None):
             ctx.runtime.update_node_status(ctx.node.id, NodeStatus.RUNNING, pending_context=None)
 
-        # 代码图谱上下文（CodeGraph；AICU_CODEGRAPH=1 且 real 模式才注入，禁用/失败返回 ""）
+        # 代码图谱上下文（CodeGraph；默认开，AICU_CODEGRAPH=0 显式关，且 real 模式才注入，禁用/失败返回 ""）
         codegraph_block = build_codegraph_context(ctx.node, ctx)
 
         # Execute AICU.ask() in thread pool to avoid blocking scheduler

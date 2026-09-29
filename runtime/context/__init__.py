@@ -4,7 +4,7 @@
 - CodeGraph 只通过本模块进 Runtime；Manager/Worker 不直接依赖 codegraph。
 - 确定性、无 LLM；不做语义判断，不做"第二个 Planner"。
 - 全程 fail-silent：任何异常返回 ""，不阻塞执行。
-- 整个增强层由 ``AICU_CODEGRAPH=1`` 门控，默认关字节级不变。
+- 整个增强层由 ``AICU_CODEGRAPH`` 门控：默认开，显式 ``AICU_CODEGRAPH=0`` 才关（关闭即字节级不变）。
 - Provider 返回 Raw（可能 >4KB），Resolver 做预算裁剪（≤4KB 注入预算）。
 """
 
@@ -42,7 +42,7 @@ _SKIP_PROJECT_ROLES = {"requirements", "document", "default"}
 
 
 def _enabled() -> bool:
-    return os.environ.get("AICU_CODEGRAPH") == "1"
+    return os.environ.get("AICU_CODEGRAPH", "1") != "0"
 
 
 def notify_artifact_updated(shared_workspace: str) -> None:
@@ -67,7 +67,7 @@ def build_codegraph_guidance() -> str:
     在 Worker/Manager 里都是 ``动态 or 静态`` 的取值关系。放在本模块，是因为
     「CodeGraph 只通过本模块进 Runtime」——引导文案也是 CodeGraph 的一部分，
     散在 Executable 里会让改文案漏掉一处，出现两个节点类型说法不一致。
-    flag 关时返回 ""（默认关字节级不变）。
+    显式 ``AICU_CODEGRAPH=0`` 时返回 ""。
     """
     if not _enabled():
         return ""

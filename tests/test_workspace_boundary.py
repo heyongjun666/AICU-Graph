@@ -334,9 +334,19 @@ class TestManagerRoleBoundaryWording:
         for name, desc in cfg["review_checklist"]:
             assert isinstance(desc, str), f"{role_id}/{name} 描述是 {type(desc)}"
 
-    def test_adversarial_role_mentions_boundary(self):
+    def test_review_config_surfaces_boundary(self):
+        """审查 CC 看到的内容(adversarial_role + review_checklist)必须覆盖路径边界。
+
+        改动 5 把路径边界收敛到 review_checklist 一处权威, adversarial_role 不再重复
+        (审查 CC 同时看到两者, 重复只会稀释注意力、让规则形同虚设)。本测试断言的是
+        "审查视角下边界规则仍被覆盖"(无论落在哪一处), 而非强制在 adversarial_role 里重复。
+        """
         for role_id in ("default", "engineering_coord", "release_planner"):
-            path = os.path.join(REPO_ROOT, "roles", "Manager", f"{role_id}.yaml")
-            with open(path, encoding="utf-8") as fh:
-                data = yaml.safe_load(fh)
-            assert "路径边界" in data["adversarial_role"], f"{role_id} 审查位缺路径边界"
+            rm = RolesManager(os.path.join(REPO_ROOT, "roles"))
+            cfg = rm._effective_role_config(role_id, "manager")
+            adv = cfg.get("adversarial_role") or ""
+            checklist_text = "\n".join(
+                str(desc) for _, desc in cfg["review_checklist"]
+            )
+            combined = adv + "\n" + checklist_text
+            assert "路径边界" in combined, f"{role_id} 审查配置未覆盖路径边界"

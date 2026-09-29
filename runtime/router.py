@@ -189,9 +189,9 @@ class AICURouter:
     def _create_real_aicu(self) -> Any:
         """real 模式：solo AICU（num_ccs=1），工作区 ``{workspace_root}/router_cc/``。
 
-        路由角色收敛到 roles/system_role/router.yaml（独立于 Manager/Worker），
-        自带「路由专用审查清单」（目标覆盖完整性 / 精确性 / 节点真实性 / 契约对齐），
-        使 solo 自审能发现「漏实现节点 / 只路由到协调节点」这类路由缺陷。
+        路由角色收敛到 roles/system_role/router.yaml（独立于 Manager/Worker）。
+        num_ccs=1 已硬删自审：路由决策由单次生成直接返回，不再进入自审轮；
+        角色配置里的「路由专用审查清单/审查位/审计位」因此不会在 solo 下渲染。
         """
         from aicu import AICU
 

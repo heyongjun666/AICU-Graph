@@ -63,8 +63,8 @@ H. 输出纯 JSON ExecutionPlan.
 # 注入层级（按调用链分层，避免重复/错位）：
 #   - 生产侧原则（①+②）→ worker.py `_build_worker_context` / `_build_resume_task_body`
 #     （worker 专属，Manager 走自己的 expand/review prompt，不受此原则影响）
-#   - 评审侧原则（②+③）→ 本文件 `_solo_review` / `_pair_review` /
-#     `_triple_review_only` / `_full_audit`（worker CC 的评审/审计位）
+#   - 评审侧原则（②+③）→ 本文件 `_pair_review` / `_triple_review_only` /
+#     `_full_audit`（worker CC 的评审/审计位；solo 已硬删自审，无评审位）
 #   - Manager 评审 → executables/manager.py `_build_review_prompt`（双语独立运行验收）
 _ACCEPTANCE_PRINCIPLES_REVIEWER = (
     "## 评审原则（评审必读）\n"
@@ -158,7 +158,7 @@ class AICU:
     AI Computing Unit — 多 Agent 并行生成 + 交叉评审 + 对抗审查 + 深度审计
 
     工作模式 (peer): N 个 CC 平级协作，做同一任务，互相评审。按 num_ccs 自动选择策略:
-      - CC=1 (solo):   单 CC 生成 + 自审
+      - CC=1 (solo):   单 CC 生成
       - CC=2 (pair):   CC-0 生产 + CC-1 审查
       - CC=3 (triple): CC-0/1 并行产出 + CC-2 比较融合
       - CC≥4 (full):   CC-0/1 产出 + CC-2 评审融合 + CC-3 审计（多轮闭环）
@@ -1229,14 +1229,14 @@ class AICU:
             return self._ask_peer_full(question, max_rounds, incremental)
 
     def _peer_strategy_name(self) -> str:
-        names = {1: "solo (1CC: 生成+自审)", 2: "pair (2CC: 生产+审查)",
+        names = {1: "solo (1CC: 生成)", 2: "pair (2CC: 生产+审查)",
                  3: "triple (3CC: 双生产+评审融合)", 4: "full (4CC+: 双生产+评审+审计)"}
         return names.get(self.num_ccs, f"full ({self.num_ccs}CC: 双生产+评审+审计)")
 
     # ==================== CC=1: solo 模式 ====================
     # 单 CC 独立完成任务。速度最快、成本最低。
     # 适合：简单代码修改、小功能开发、快速验证想法。
-    # 流程：生成 → 自审 → 修订 → 复审 → 交付
+    # 流程：生成 → 交付（已硬删自审：num_ccs=1 不再有独立自审/修订轮，生成即交付）
 
     def _ask_peer_solo(
         self, question: str, max_rounds: int = 3, incremental: bool = False
@@ -1257,77 +1257,15 @@ class AICU:
         else:
             print(f"  产出: {len(self._read_cc_file(0))} 字符")
 
-        # ---- 自审+修订循环 ----
-        consensus_reached = False
-        round_num = 0
-        all_defects = []
-
-        for round_num in range(1, max_rounds + 1):
-            print(f"\n[AICU-solo] 阶段2: 自审 (第 {round_num} 轮)")
-            defects = self._solo_review(question, cc)
-            if defects is None:
-                print("  [warn] 自审响应无法解析为 JSON —— 视为未通过（不静默放行）")
-                consensus_reached = False
-                break
-            if not defects:
-                consensus_reached = True
-                print(f"  自审通过")
-                break
-            print(f"  发现 {len(defects)} 个缺陷")
-            for d in defects:
-                print(f"    [{d.get('severity')}] {d.get('description', '')[:80]}")
-            all_defects = defects
-
-            print(f"  → 修订...")
-            self._revise_with_defect_list(question, cc, defects)
-
-        if not consensus_reached:
-            print(f"\n[AICU-solo] 自审未通过 (已 {max_rounds} 轮修订)")
-
         # ---- 汇总结果 ----
+        # solo 已硬删自审：生成即交付，无独立自审/修订轮，num_ccs=1 语义从「生成+自审」改为「仅生成」。
         return self._finalize_result(
             question=question,
             scores={0: {0: 8.0}},  # solo 无对比，给默认分
             best_id=0,
-            consensus_reached=consensus_reached,
-            vote_rounds=round_num,
+            consensus_reached=True,
+            vote_rounds=0,
         )
-
-    def _solo_review(self, question: str, cc: ClaudeCodeAgent) -> Optional[List[dict]]:
-        """单 CC 自审：读取自己的产出，找出 high/medium 缺陷。
-
-        返回 None = 响应无法解析（调用方须判未通过）；[] = 解析成功且无缺陷。
-        """
-        read_instruction = self._build_read_instruction_text(0)
-
-        checklist_text = self._build_review_checklist_text()
-
-        prompt = (
-            f"你是一个{self.adversarial_role or '严格的审查专家'}。请审查你刚刚编写的方案。\n\n"
-            f"原始问题: {question}\n\n"
-            f"{read_instruction}\n\n"
-            f"{_ACCEPTANCE_PRINCIPLES_REVIEWER}\n\n"
-            f"按以下检查清单逐项审查:\n"
-            f"{checklist_text}\n\n"
-            f"严格按以下 JSON 格式返回，不要加任何其他文字:\n"
-            f'{{"approved": true/false, "defects": ['
-            f'{{"check": "检查项", "description": "缺陷描述", "severity": "high/medium/low"}}], '
-            f'"summary": "总体评价"}}\n\n'
-            f"{_CHECKLIST_APPLICABILITY_NOTE}\n"
-            f"只报告 high/medium 缺陷，忽略 low 级别问题。"
-        )
-        prompt = self._inject_roles_context(prompt)
-        resp = self._cc_chat_with_retry(cc, prompt, timeout=7200)
-        parsed = self._parse_adversarial_vote(resp)
-
-        # 保存结果
-        review_data = {"round": 1, "raw_response": resp, "result": parsed}
-        review_path = cc.workspace / "review.json"
-        review_path.write_text(json.dumps(review_data, ensure_ascii=False, indent=2), encoding='utf-8')
-
-        if parsed is None:
-            return None
-        return self._high_medium_defects(parsed)
 
     # ==================== CC=2: pair 模式 ====================
     # CC-0 负责完成任务，CC-1 负责 Review 并给出修改建议，CC-0 修正后输出。

@@ -531,13 +531,6 @@ class TestReviewApplicabilityNote:
         assert "approved=true" in _CHECKLIST_APPLICABILITY_NOTE
         assert "N/A 不得用于规避真实缺陷" in _CHECKLIST_APPLICABILITY_NOTE
 
-    def test_solo_review_prompt_has_note(self, tmp_path, monkeypatch):
-        aicu = _make_aicu(tmp_path, num_ccs=1)
-        captured = _capture_prompts(monkeypatch, aicu)
-        aicu._solo_review("问题", aicu.ccs[0])
-        assert captured and _CHECKLIST_APPLICABILITY_NOTE in captured[0]
-        assert "只有所有检查项都通过" not in captured[0]
-
     def test_pair_review_prompt_has_note(self, tmp_path, monkeypatch):
         aicu = _make_aicu(tmp_path, num_ccs=2)
         captured = _capture_prompts(monkeypatch, aicu)
@@ -563,7 +556,7 @@ class TestReviewApplicabilityNote:
     def test_source_no_longer_has_old_rule(self):
         src = (ROOT / "aicu.py").read_text(encoding="utf-8")
         assert "只有所有检查项都通过" not in src
-        assert src.count("_CHECKLIST_APPLICABILITY_NOTE") >= 6  # 1 定义 + 5 渲染点
+        assert src.count("_CHECKLIST_APPLICABILITY_NOTE") >= 5  # 1 定义 + 4 渲染点(solo 已硬删自审)
 
     def test_runtime_protocol_unchanged(self, tmp_path, monkeypatch):
         """N/A 理由落在既有 summary 自由文本中：不新增 JSON 字段。"""
@@ -692,11 +685,6 @@ class TestHolisticRenderedInAllModes:
         # 审计位编号在清单之后顺延，整体项仍属清单段
         assert "按以下角度深入审查:" in p
         assert '"defects_found"' in p and '"overall_assessment"' in p
-
-    def test_solo_mode(self, tmp_path, monkeypatch):
-        p = self._prompt_for(monkeypatch, tmp_path, "code",
-                             lambda a: a._solo_review("做一个鹈鹕骑车的 SVG 动画", a.ccs[0]))
-        assert "**holistic_runnable**" in p
 
     def test_holistic_label_matches_role_not_shared(self, tmp_path, monkeypatch):
         """不同角色渲染出的整体项不同——证明它是角色化清单而非统一话术。"""

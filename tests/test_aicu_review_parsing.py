@@ -8,7 +8,7 @@
 本文件钉住三件事：
 1. `_extract_json` 取的是结论而不是散文里的示例；
 2. 「无法解析」是一等信号（None），与「解析成功且无缺陷」（[]）严格区分；
-3. 该信号一路传到策略出口 —— solo/pair/triple 的 consensus_reached、
+3. 该信号一路传到策略出口 —— pair/triple 的 consensus_reached、
    full 的 audit_passed，以及 `_finalize_result` 不再为无审计阶段写伪造结论。
 """
 
@@ -153,16 +153,14 @@ class TestParsersDistinguishFailureFromCleanPass:
 # 3. 端到端：解析失败不得被记为通过
 # ============================================================================
 
-class TestSoloAndPairFailClosed:
-    @pytest.mark.parametrize("num_ccs", [1, 2])
-    def test_review_parse_failure_blocks_consensus(self, tmp_path, monkeypatch, num_ccs):
-        a = _make_aicu(tmp_path, num_ccs=num_ccs)
+class TestPairFailClosed:
+    def test_review_parse_failure_blocks_consensus(self, tmp_path, monkeypatch):
+        a = _make_aicu(tmp_path, num_ccs=2)
         _stub_reply(a, "好的，我已审查完毕，没有问题。")
         monkeypatch.setattr(a, "_list_code_files", lambda i: [])
         monkeypatch.setattr(a, "_read_cc_file", lambda i: "")
 
-        run = a._ask_peer_solo if num_ccs == 1 else a._ask_peer_pair
-        result = run("原始问题")
+        result = a._ask_peer_pair("原始问题")
 
         assert result["consensus_reached"] is False, "解析失败必须判未通过"
         assert result["vote_rounds"] == 1, "无缺陷清单，不应进入修订循环"
@@ -185,14 +183,24 @@ class TestSoloAndPairFailClosed:
         assert seen and seen[0][0]["check"] == "鉴权"
         assert result["consensus_reached"] is False
 
-    def test_clean_review_still_passes(self, tmp_path, monkeypatch):
-        """对照组：真正解析出「无缺陷」时照常通过，修复不得把正常路径也判死。"""
+
+class TestSoloNoSelfReview:
+    def test_solo_skips_self_review(self, tmp_path, monkeypatch):
+        """硬删 solo 自审：num_ccs=1 只生成一次即交付，不再有自审/修订轮。"""
         a = _make_aicu(tmp_path, num_ccs=1)
-        _stub_reply(a, '{"approved": true, "defects": [], "summary": "无问题"}')
         monkeypatch.setattr(a, "_list_code_files", lambda i: [])
         monkeypatch.setattr(a, "_read_cc_file", lambda i: "")
 
-        assert a._ask_peer_solo("原始问题")["consensus_reached"] is True
+        calls = []
+        a._cc_chat_with_retry = (
+            lambda cc, prompt, timeout=7200, **kw: calls.append(prompt) or "产出"
+        )
+
+        result = a._ask_peer_solo("原始问题")
+
+        assert len(calls) == 1, "solo 应只调用一次 CC（仅生成），不得再自审"
+        assert result["consensus_reached"] is True
+        assert result["vote_rounds"] == 0
 
 
 class TestFullAuditFailsClosed:

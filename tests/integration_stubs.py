@@ -162,7 +162,7 @@ class FailureStub(StubProtocol):
             "vote_rounds": 1,
             "audit_defects": [],
             "audit_passed": True,
-            "strategy": "solo (1CC: 生成+自审)",
+            "strategy": "solo (1CC: 生成)",
             "role_config": {},
         }
 
@@ -235,7 +235,7 @@ class TimeoutStub(StubProtocol):
             "vote_rounds": 1,
             "audit_defects": [],
             "audit_passed": True,
-            "strategy": "solo (1CC: 生成+自审)",
+            "strategy": "solo (1CC: 生成)",
             "role_config": {},
         }
 
@@ -357,7 +357,7 @@ Error: ENOENT: no such file or directory, open '/path/to/nonexistent/file'
                 "vote_rounds": 1,
                 "audit_defects": [],
                 "audit_passed": True,
-                "strategy": "solo (1CC: 生成+自审)",
+                "strategy": "solo (1CC: 生成)",
                 "role_config": {},
             }
 

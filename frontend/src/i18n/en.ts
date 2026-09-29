@@ -152,6 +152,7 @@ export const en: Dict = {
   'settings.connectionFailed': 'Connection failed',
   'settings.workspaceRoot': 'Workspace root',
   'settings.workspaceRootPlaceholder': 'Runtime-managed workspace (default)',
+  'settings.workspaceEffective': 'Currently used by this session: {path}',
   'settings.saveWorkspace': 'Save workspace',
   'settings.workspaceSaved': 'Workspace saved',
   'settings.executionTitle': 'Execution',

@@ -154,6 +154,7 @@ export const zh: Dict = {
   'settings.connectionFailed': '连接失败',
   'settings.workspaceRoot': '工作区根目录',
   'settings.workspaceRootPlaceholder': '运行时管理工作区（默认）',
+  'settings.workspaceEffective': '当前会话实际使用：{path}',
   'settings.saveWorkspace': '保存工作区',
   'settings.workspaceSaved': '工作区已保存',
   'settings.executionTitle': '执行',

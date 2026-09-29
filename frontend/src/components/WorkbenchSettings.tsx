@@ -3,6 +3,7 @@ import { ChevronDown, Boxes, FolderTree, HelpCircle, Languages, Pencil, Plug, Pl
 import { CliInfo, EffectiveBaseUrlResponse, GlobalConfig, McpRoleRef, McpServerInfo, McpServerInput, ProviderPreset, RoleField, RoleInfo, RolePool, RoleSchema, SkillInfo } from '../types';
 import { useI18n } from '../i18n';
 import { useUIStateStore } from '../stores/UIStateStore';
+import { useSessionStore } from '../stores/SessionStore';
 import SearchCheckboxPicker from './SearchCheckboxPicker';
 import { CliOptions } from './CliOptions';
 import {
@@ -421,6 +422,12 @@ const WorkbenchSettings: React.FC<WorkbenchSettingsProps> = ({ open, onClose, on
   const addToast = useUIStateStore((state) => state.addToast);
   const [tab, setTab] = useState<SettingsTab>('connection');
   const [config, setConfig] = useState<GlobalConfig>(emptyConfig);
+
+  // 「当前生效」的那一行。取选中会话的实际工作区根 —— 它可能与全局默认不同：
+  // 全局根改过之后，老会话仍用创建时定下的那个目录。
+  const activeSession = useSessionStore((state) =>
+    state.sessions.find((item) => item.id === state.activeSessionId));
+  const effectiveWorkspace = activeSession?.workspace_root || config.workspace_root || '';
   const [clis, setClis] = useState<CliInfo[]>([]);
   const [providerPresets, setProviderPresets] = useState<ProviderPreset[]>([]);
   // 加载完成前先当作「手动配置」：此时什么都没读到，摆一个预置出来是无中生有，
@@ -708,11 +715,11 @@ const WorkbenchSettings: React.FC<WorkbenchSettingsProps> = ({ open, onClose, on
   // 看到的和他实际保存的不是一回事，他动一下别的字段再保存，这个值就被悄悄换掉了。
   // 不自动清空它：清掉用户已存的值比留着更烦人。
   const modelIsForeign = Boolean(config.model) && !allModelOptions.includes(config.model as string);
-  const refreshAfterSave = async () => {
+  const refreshAfterSave = async (isCurrent = () => true) => {
     try {
       await onSaved();
     } catch {
-      addToast({ type: 'warning', message: t('settings.sessionRefreshFailed') });
+      if (isCurrent()) addToast({ type: 'warning', message: t('settings.sessionRefreshFailed') });
     }
   };
   const saveConnection = async () => {
@@ -1329,7 +1336,41 @@ const WorkbenchSettings: React.FC<WorkbenchSettingsProps> = ({ open, onClose, on
             {notice && <div className="settings-message is-success">{notice}</div>}
             {tab === 'mcp' && mcpError && <div className="settings-message is-error">{mcpError}</div>}
             {tab === 'connection' && <div className="settings-section"><div className="section-heading"><div><h3>{t('settings.connectionTitle')}</h3><p>{t('settings.connectionDesc')}</p></div></div><div className="form-grid"><label>{t('settings.provider')}<select id="provider-select" value={selectedProviderId} onChange={(event) => chooseProvider(event.target.value)}><option value={MANUAL_PROVIDER}>{t('settings.providerManual')}</option>{providerPresets.filter((preset) => preset.available !== false).map((preset) => <option key={preset.id} value={preset.id}>{preset.display_name}</option>)}</select><small>{manualMode ? t('settings.providerManualHint') : t('settings.providerHint')}</small></label><label>{t('settings.cli')}<select id="cli-select" value={config.cli_name || ''} onChange={(event) => setGlobal('cli_name', event.target.value || null)}><CliOptions clis={clis} defaultCli={defaultCli} /></select></label><label>{t('settings.model')}{modelIsFreeText ? <><input list="model-options" value={config.model || ''} onChange={(event) => setGlobal('model', event.target.value || null)} placeholder={t('settings.selectOrTypeModel')} /><datalist id="model-options">{allModelOptions.map((model) => <option key={model} value={model} />)}</datalist></> : <select id="model-select" value={config.model || ''} onChange={(event) => setGlobal('model', event.target.value || null)}>{modelIsForeign && <option value={config.model as string}>{t('settings.modelNotInList', { model: config.model as string })}</option>}{allModelOptions.map((model) => <option key={model} value={model}>{model}</option>)}</select>}</label><label>{t('settings.apiBaseUrl')}<input id="api-base-url" value={displayedBaseUrl} disabled={addressLocked} onChange={(event) => setGlobal('api_base_url', event.target.value || null)} placeholder={t('common.optional')} /><small>{baseUrlHint}</small></label>{(config.cli_name || defaultCli) === 'internal' ? <label>{t('settings.accountName')}<input value={internalUsername} onChange={(event) => setInternalUsername(event.target.value)} placeholder={t('settings.accountNamePlaceholder')} /><small>{t('settings.accountNameNote')}</small></label> : <label>{t('settings.apiKey')}<input type="password" value={apiKey} onChange={(event) => setApiKey(event.target.value)} placeholder={t('settings.apiKeyPlaceholder')} /><small>{apiKeyVendor ? t('settings.vendor', { vendor: apiKeyVendor }) : ''}{t('settings.localPlaintextNote')}</small></label>}</div><div className="settings-actions"><button className="secondary-button" disabled={testing || busy} onClick={runConnectionTest}>{testing ? t('settings.testing') : t('settings.testConnection')}</button><button className="primary-button" disabled={busy} onClick={saveConnection}><Save size={15} /> {t('settings.saveConnection')}</button></div></div>}
-            {tab === 'workspace' && <div className="settings-section"><div className="section-heading"><div><h3>{t('settings.workspaceTitle')}</h3><p>{t('settings.workspaceDesc')}</p></div></div><label>{t('settings.workspaceRoot')}<input value={config.workspace_root || ''} onChange={(event) => setGlobal('workspace_root', event.target.value || null)} placeholder={t('settings.workspaceRootPlaceholder')} /></label><div className="settings-actions"><button className="primary-button" disabled={busy} onClick={saveWorkspace}><Save size={15} /> {t('settings.saveWorkspace')}</button></div></div>}
+            {tab === 'workspace' && (
+              <div className="settings-section">
+                <div className="section-heading">
+                  <div>
+                    <h3>{t('settings.workspaceTitle')}</h3>
+                    <p>{t('settings.workspaceDesc')}</p>
+                  </div>
+                </div>
+                <label>
+                  {t('settings.workspaceRoot')}
+                  <input
+                    value={config.workspace_root || ''}
+                    onChange={(event) => setGlobal('workspace_root', event.target.value || null)}
+                    placeholder={t('settings.workspaceRootPlaceholder')}
+                  />
+                </label>
+                {/*
+                  生效值只**只读展示**，绝不填进上面那个输入框。
+                  输入框是「新建会话的全局根」，留空 = 不覆盖。把当前会话的路径填进去，
+                  用户顺手一保存就把它变成了全局根，此后所有新会话共用一个目录（共享区
+                  互相覆盖）—— 一次「查看」悄悄变成了破坏性配置。
+                  何况未设置时每个会话各用各的 {root_dir}/<会话id>/workspace，
+                  根本不存在「一个」当前目录可以填。
+                  与此处同构的先例见 SessionWorkspaceDialog 的「当前：{path}」。
+                */}
+                {effectiveWorkspace && (
+                  <small>{t('settings.workspaceEffective', { path: effectiveWorkspace })}</small>
+                )}
+                <div className="settings-actions">
+                  <button className="primary-button" disabled={busy} onClick={saveWorkspace}>
+                    <Save size={15} /> {t('settings.saveWorkspace')}
+                  </button>
+                </div>
+              </div>
+            )}
             {tab === 'workspace' && <div className="settings-section">
               <div className="section-heading"><div><h3>{t('settings.executionTitle')}</h3><p>{t('settings.executionDesc')}</p></div></div>
               <label className="settings-toggle"><input type="checkbox" checked={config.dynamic_num_ccs !== false} onChange={(event) => setGlobal('dynamic_num_ccs', event.target.checked)} /><span>{t('settings.dynamicNumCcs')}</span><HelpTip text={t('settings.dynamicNumCcsHelp')} title={t('settings.dynamicNumCcs')} /></label>

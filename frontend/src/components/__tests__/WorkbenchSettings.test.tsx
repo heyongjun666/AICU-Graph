@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import WorkbenchSettings from '../WorkbenchSettings';
 import * as api from '../../utils/api';
+import { useSessionStore } from '../../stores/SessionStore';
 import { CliInfo, GlobalConfig, McpServerInfo, ProviderPreset, RoleField, RoleInfo } from '../../types';
 import { zh } from '../../i18n/zh';
 import { en } from '../../i18n/en';
@@ -58,6 +59,7 @@ const fields: RoleField[] = fieldNames.map((name) => ({
 }));
 
 beforeEach(() => {
+  useSessionStore.setState({ sessions: [], activeSessionId: null });
   vi.mocked(api.getGlobalConfig).mockResolvedValue({
     config: { workspace_root: null, cli_name: null, model: null, api_base_url: null, api_key_env: null },
     clis: [],
@@ -1447,5 +1449,107 @@ describe('WorkbenchSettings 角色侧的 MCP 选择器', () => {
     fireEvent.click(document.querySelector('.skill-select-trigger') as HTMLButtonElement);
 
     expect(screen.getByText('无匹配 MCP server')).toBeDefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 设置 → 工作区：把「当前实际用的目录」显出来（只读），但绝不填进输入框
+//
+// 背景：输入框绑的是 `config.workspace_root`，即「新建会话的全局根」，留空 = 不覆盖。
+// 用户希望在设置里看到当前目录，但把当前会话的路径**填进那个框**是危险的：
+// 顺手一保存，null 就变成 runtime_sessions/<某个会话id>/workspace，此后所有新会话
+// 共用一个目录（共享区互相覆盖）。而且未设置时每个会话各用各的，也没有「一个」
+// 当前目录可填。所以做成只读的一行。
+// ---------------------------------------------------------------------------
+describe('WorkbenchSettings 工作区：当前生效目录', () => {
+  const renderSettings = () =>
+    render(<WorkbenchSettings open onClose={() => {}} onSaved={() => {}} />);
+
+  const openWorkspaceTab = async () => {
+    fireEvent.click(screen.getByText('工作区与执行'));
+    await waitFor(() => expect(screen.getByText('单节点 agent 数量动态配置')).toBeDefined());
+  };
+
+  const effectiveHint = () =>
+    Array.from(document.querySelectorAll('.settings-section small'))
+      .map((el) => el.textContent || '')
+      .find((text) => text.includes('当前会话实际使用')) || null;
+
+  /** 工作区根输入框。按 placeholder 找 —— 它没写 type 属性，`input[type=text]` 匹配不到。 */
+  const workspaceInput = () =>
+    document.querySelector(
+      '.settings-section input[placeholder="运行时管理工作区（默认）"]',
+    ) as HTMLInputElement;
+
+  function setActiveSession(workspaceRoot: string | undefined) {
+    useSessionStore.setState({
+      sessions: workspaceRoot
+        ? ([{ id: 's1', title: '会话一', workspace_root: workspaceRoot }] as never)
+        : ([] as never),
+      activeSessionId: workspaceRoot ? 's1' : null,
+    });
+  }
+
+  afterEach(() => {
+    useSessionStore.setState({ sessions: [], activeSessionId: null });
+  });
+
+  it('未设置全局根时，显示当前会话实际使用的目录', async () => {
+    setActiveSession('/repo/runtime_sessions/s1/workspace');
+    renderSettings();
+    await openWorkspaceTab();
+
+    expect(effectiveHint()).toContain('/repo/runtime_sessions/s1/workspace');
+    // 输入框仍然留空（留空 = 不覆盖），两者是分开的两件事
+    expect(workspaceInput().value).toBe('');
+  });
+
+  it('有选中会话时，输入框仍是空的 —— 生效值只读展示，不冒充配置值', async () => {
+    setActiveSession('/repo/runtime_sessions/s1/workspace');
+    renderSettings();
+    await openWorkspaceTab();
+
+    expect(workspaceInput().value).toBe('');
+    expect(workspaceInput().placeholder).toBe('运行时管理工作区（默认）');
+  });
+
+  it('保存时不会把只读的生效路径写成全局根', async () => {
+    // 这条是整件事的关键：看一眼当前目录，不能顺手改掉全局配置。
+    vi.mocked(api.updateGlobalConfig).mockResolvedValue({ config: {} as never });
+    setActiveSession('/repo/runtime_sessions/s1/workspace');
+    renderSettings();
+    await openWorkspaceTab();
+
+    fireEvent.click(screen.getByText('保存工作区'));
+
+    await waitFor(() => expect(api.updateGlobalConfig).toHaveBeenCalled());
+    expect(vi.mocked(api.updateGlobalConfig).mock.calls[0][0]).toMatchObject({
+      workspace_root: null,
+    });
+  });
+
+  it('会话实际目录与全局根不同（全局根改过之后的老会话）时，显示的是会话那个', async () => {
+    vi.mocked(api.getGlobalConfig).mockResolvedValue({
+      config: {
+        workspace_root: '/new/global/root',
+        cli_name: null, model: null, api_base_url: null, api_key_env: null,
+      },
+      clis: [],
+      default_cli: 'claude',
+    });
+    setActiveSession('/old/session/workspace');
+    renderSettings();
+    await openWorkspaceTab();
+
+    expect(workspaceInput().value).toBe('/new/global/root');
+    expect(effectiveHint()).toContain('/old/session/workspace');
+  });
+
+  it('没有选中会话时不显示这一行', async () => {
+    setActiveSession(undefined);
+    renderSettings();
+    await openWorkspaceTab();
+
+    expect(effectiveHint()).toBeNull();
   });
 });

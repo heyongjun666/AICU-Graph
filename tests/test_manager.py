@@ -962,12 +962,16 @@ class TestManagerReviewDegradation:
                         "audit_passed": True,
                         "audit_defects": [],
                     }
-                # 修复重试：输出合法契约
+                # 修复重试：通过 content 输出合法契约，验证报告与判定同源。
                 return {
                     "final_output_path": os.path.join(self._tmp, "plan_result"),
-                    "assessments": [
-                        {"step_ref": "c1", "passed": True, "reason": "ok after repair"},
-                    ],
+                    "content": json.dumps({
+                        "overall_passed": True,
+                        "summary": "repaired review summary",
+                        "assessments": [
+                            {"step_ref": "c1", "passed": True, "reason": "ok after repair"},
+                        ],
+                    }),
                 }
 
         ctx = ExecutableContext(
@@ -982,6 +986,9 @@ class TestManagerReviewDegradation:
 
         assert result == NodeStatus.COMPLETED
         assert stub.calls == 2
+        assert node.artifact_path is not None
+        report = open(node.artifact_path, encoding="utf-8").read()
+        assert "repaired review summary" in report
 
 
 class TestManagerEdgeCases:

@@ -164,7 +164,7 @@ There are three suites, and none of them subsumes another — a green `run_tests
 | Suite | Command | Cases |
 |---|---|---|
 | Core primitives (self-contained runner, stdlib only) | `python3 run_tests.py` | 144 |
-| Full pytest suite | `python3 -m pytest tests` | 2115 |
+| Full pytest suite | `python3 -m pytest tests` | 2164 |
 | Frontend (vitest + Testing Library) | `cd frontend && npm test -- --run` | 408 |
 
 Install the test dependencies first:

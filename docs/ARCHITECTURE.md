@@ -521,7 +521,7 @@ MCP 联调 lab 角色使用 `roles/**/_mcp_lab_*.yaml` 命名，仅供仓库内�
 
 | 体系 | 位置 | 怎么跑 | 规模 | 依赖 |
 |---|---|---|---|---|
-| **pytest 套件** | `tests/` + `runtime/test_sse_push.py` | `python3 -m pytest tests` | 2115 | `requirements-dev.txt` |
+| **pytest 套件** | `tests/` + `runtime/test_sse_push.py` | `python3 -m pytest tests` | 2164 | `requirements-dev.txt` |
 | **自带测试套件** | `run_tests.py`（单文件） | `python3 run_tests.py` | 144 | `requirements.txt`（不需要 pytest） |
 | **前端测试** | `frontend/src/**/*.test.tsx` | `cd frontend && npm test -- --run` | 408 | `npm ci` |
 
@@ -554,7 +554,7 @@ cd frontend && npx vitest run src/components/__tests__/NodeInspector.test.tsx
 
 提交前把这三条各跑一遍，就等于预跑了一遍 CI。
 
-> CI runner 上 `tests/test_codegraph_context.py` 可能会有 1 个用例 skip（需要 `codegraph` 二进制，runner 没装）；本机工具装齐时，当前项目测试基线为 `2115 passed`。如果 CI 仍显示 skip，差值来自该可选外部工具，不是测试被漏收。
+> CI runner 上 `tests/test_codegraph_context.py` 可能会有 1 个用例 skip（需要 `codegraph` 二进制，runner 没装）；本机工具装齐时，当前项目测试基线为 `2164 passed`。如果 CI 仍显示 skip，差值来自该可选外部工具，不是测试被漏收。
 
 **测试不依赖跑测试的机器上装了什么 CLI。** `ClaudeCodeAgent` 在构造期会探测本机 CLI，`tests/conftest.py` 有一条 autouse fixture 把这一步钉死——否则「本地绿」与「CI 绿」会变成两个不同的集合（开发机通常装齐了 CLI，runner 一个都没有）。要验证这一点，把 PATH 里的 AI CLI 摘掉跑一遍即可：`env PATH="/usr/bin:/bin" python3 -m pytest -q`。
 

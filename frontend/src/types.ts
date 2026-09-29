@@ -211,6 +211,8 @@ export interface GlobalConfig {
   dynamic_num_ccs?: boolean;
   /** dynamic_num_ccs=false 时所有节点统一的 agent 数量，取值 1–4。 */
   default_num_ccs?: number;
+  /** 系统级最大同时运行节点数，取值 1–16，跨会话生效。 */
+  max_concurrency?: number;
 }
 
 /** 后端 /v1/config 响应。 */

@@ -30,6 +30,7 @@ from typing import Any, Optional, TYPE_CHECKING
 from executables.base import ExecutableContext, SchedulerDelegate
 from executables.registry import ExecutableRegistry
 from runtime.agent_events import _node_workspace
+from runtime.concurrency import DEFAULT_MAX_CONCURRENCY, validate_max_concurrency
 
 # 所有未停止的 Scheduler 实例；进程退出时兜底 stop()。
 #
@@ -92,7 +93,7 @@ class Scheduler:
         registry: ExecutableRegistry,
         delegate: SchedulerDelegate,
         runtime_gateway: Any,
-        max_concurrency: int = 4,
+        max_concurrency: int = DEFAULT_MAX_CONCURRENCY,
         event_bus: Any = None,
         planner: Optional["Planner"] = None,
         retry_delay: float = 1.0,
@@ -101,7 +102,7 @@ class Scheduler:
         self.registry = registry
         self.delegate = delegate
         self.runtime_gateway = runtime_gateway
-        self.max_concurrency = max_concurrency
+        self.max_concurrency = validate_max_concurrency(max_concurrency)
         self.event_bus = event_bus
         self.planner = planner
         self.retry_delay = retry_delay
@@ -109,6 +110,7 @@ class Scheduler:
         # 线程池
         pool_size = max_concurrency + 2
         self._thread_pool = ThreadPoolExecutor(max_workers=pool_size)
+        self._pool_capacity = pool_size
         self._pool_shutdown = False
 
         # 正在执行的任务 {node_id: Future}
@@ -157,6 +159,21 @@ class Scheduler:
         with self._escalations_lock:
             return list(self._escalations)
 
+    def set_max_concurrency(self, value: int) -> None:
+        """Apply a session limit without interrupting in-flight executions."""
+        value = validate_max_concurrency(value)
+        with self._state_lock:
+            if value == self.max_concurrency:
+                return
+            target_capacity = value + 2
+            if not self._pool_shutdown and target_capacity > self._pool_capacity:
+                old_pool = self._thread_pool
+                self._thread_pool = ThreadPoolExecutor(max_workers=target_capacity)
+                self._pool_capacity = target_capacity
+                # Existing futures remain tracked and continue on the old pool.
+                old_pool.shutdown(wait=False, cancel_futures=False)
+            self.max_concurrency = value
+
     @property
     def is_running(self) -> bool:
         """Return whether the scheduler tick loop is currently active."""
@@ -177,6 +194,7 @@ class Scheduler:
             if self._pool_shutdown:
                 pool_size = self.max_concurrency + 2
                 self._thread_pool = ThreadPoolExecutor(max_workers=pool_size)
+                self._pool_capacity = pool_size
                 self._pool_shutdown = False
             self._running = True
             self._stop_event.clear()
@@ -190,17 +208,16 @@ class Scheduler:
         with self._state_lock:
             self._running = False
             self._stop_event.set()
-
-        # 取消所有进行中的 Future
-        with self._futures_lock:
-            for node_id, future in self._futures.items():
-                future.cancel()
-            self._futures.clear()
-
-        self._pool_shutdown = True
-        self._thread_pool.shutdown(wait=False)
-        if self._tick_thread and self._tick_thread.is_alive():
-            self._tick_thread.join(timeout=2)
+            # Keep pool shutdown and dispatch under the same state boundary.
+            with self._futures_lock:
+                for future in self._futures.values():
+                    future.cancel()
+                self._futures.clear()
+            self._pool_shutdown = True
+            self._thread_pool.shutdown(wait=False)
+            tick_thread = self._tick_thread
+        if tick_thread and tick_thread.is_alive() and tick_thread is not threading.current_thread():
+            tick_thread.join(timeout=2)
         _active_schedulers.discard(self)
         logger.info("Scheduler stopped")
 
@@ -355,6 +372,8 @@ class Scheduler:
                 if running_count > 0:
                     self._scan_agent_events()
                 with self._state_lock:
+                    if self._stop_event.is_set():
+                        break
                     paused = self._paused
                     if not paused:
                         # 1.8 事件→重激活桥：把投递给非运行态节点的带 target 事件解释为
@@ -1463,9 +1482,10 @@ class Scheduler:
         self._last_watchdog_time = now
         logger.info("Watchdog: restarting tick loop (retry %d/%d)", self._watchdog_retries, self._max_watchdog_retries)
 
-        # 重启：tick 循环会在下一次迭代自动恢复
-        # 如果线程池已关闭，重新创建
-        if self._pool_shutdown:
-            pool_size = self.max_concurrency + 2
-            self._thread_pool = ThreadPoolExecutor(max_workers=pool_size)
-            self._pool_shutdown = False
+        # 重启：tick 循环会在下一次迭代自动恢复；显式 stop 后不能重新开池。
+        with self._state_lock:
+            if self._pool_shutdown and not self._stop_event.is_set():
+                pool_size = self.max_concurrency + 2
+                self._thread_pool = ThreadPoolExecutor(max_workers=pool_size)
+                self._pool_capacity = pool_size
+                self._pool_shutdown = False

@@ -70,6 +70,8 @@ const emptyConfig: GlobalConfig = {
 /** 单节点 agent 数量在关闭动态配置时的合法区间（与后端 plan_validator 对齐）。 */
 const NUM_CCS_MIN = 1;
 const NUM_CCS_MAX = 4;
+const MAX_CONCURRENCY_MIN = 1;
+const MAX_CONCURRENCY_MAX = 16;
 
 /** Provider 下拉里「手动配置」那一项的取值。预置 id 全是厂商名（openai / deepseek…），
  *  用双下划线包起来不会撞上。取值只有两种：某个预置 id，或它 —— 没有「不指定」那一项，
@@ -80,6 +82,12 @@ const clampNumCcs = (value: unknown): number => {
   const parsed = Number.parseInt(String(value ?? ''), 10);
   if (Number.isNaN(parsed)) return NUM_CCS_MIN;
   return Math.min(NUM_CCS_MAX, Math.max(NUM_CCS_MIN, parsed));
+};
+
+const clampConcurrency = (value: unknown): number => {
+  const parsed = Number.parseInt(String(value ?? ''), 10);
+  if (Number.isNaN(parsed)) return MAX_CONCURRENCY_MIN;
+  return Math.min(MAX_CONCURRENCY_MAX, Math.max(MAX_CONCURRENCY_MIN, parsed));
 };
 
 const ROLE_FIELD_SECTIONS: Record<string, string> = {
@@ -773,6 +781,7 @@ const WorkbenchSettings: React.FC<WorkbenchSettingsProps> = ({ open, onClose, on
       await updateGlobalConfig({
         dynamic_num_ccs: config.dynamic_num_ccs !== false,
         default_num_ccs: clampNumCcs(config.default_num_ccs),
+        max_concurrency: clampConcurrency(config.max_concurrency),
       });
       const message = t('settings.executionSaved');
       setNotice(message); addToast({ type: 'success', message });
@@ -1321,7 +1330,24 @@ const WorkbenchSettings: React.FC<WorkbenchSettingsProps> = ({ open, onClose, on
             {tab === 'mcp' && mcpError && <div className="settings-message is-error">{mcpError}</div>}
             {tab === 'connection' && <div className="settings-section"><div className="section-heading"><div><h3>{t('settings.connectionTitle')}</h3><p>{t('settings.connectionDesc')}</p></div></div><div className="form-grid"><label>{t('settings.provider')}<select id="provider-select" value={selectedProviderId} onChange={(event) => chooseProvider(event.target.value)}><option value={MANUAL_PROVIDER}>{t('settings.providerManual')}</option>{providerPresets.filter((preset) => preset.available !== false).map((preset) => <option key={preset.id} value={preset.id}>{preset.display_name}</option>)}</select><small>{manualMode ? t('settings.providerManualHint') : t('settings.providerHint')}</small></label><label>{t('settings.cli')}<select id="cli-select" value={config.cli_name || ''} onChange={(event) => setGlobal('cli_name', event.target.value || null)}><CliOptions clis={clis} defaultCli={defaultCli} /></select></label><label>{t('settings.model')}{modelIsFreeText ? <><input list="model-options" value={config.model || ''} onChange={(event) => setGlobal('model', event.target.value || null)} placeholder={t('settings.selectOrTypeModel')} /><datalist id="model-options">{allModelOptions.map((model) => <option key={model} value={model} />)}</datalist></> : <select id="model-select" value={config.model || ''} onChange={(event) => setGlobal('model', event.target.value || null)}>{modelIsForeign && <option value={config.model as string}>{t('settings.modelNotInList', { model: config.model as string })}</option>}{allModelOptions.map((model) => <option key={model} value={model}>{model}</option>)}</select>}</label><label>{t('settings.apiBaseUrl')}<input id="api-base-url" value={displayedBaseUrl} disabled={addressLocked} onChange={(event) => setGlobal('api_base_url', event.target.value || null)} placeholder={t('common.optional')} /><small>{baseUrlHint}</small></label>{(config.cli_name || defaultCli) === 'internal' ? <label>{t('settings.accountName')}<input value={internalUsername} onChange={(event) => setInternalUsername(event.target.value)} placeholder={t('settings.accountNamePlaceholder')} /><small>{t('settings.accountNameNote')}</small></label> : <label>{t('settings.apiKey')}<input type="password" value={apiKey} onChange={(event) => setApiKey(event.target.value)} placeholder={t('settings.apiKeyPlaceholder')} /><small>{apiKeyVendor ? t('settings.vendor', { vendor: apiKeyVendor }) : ''}{t('settings.localPlaintextNote')}</small></label>}</div><div className="settings-actions"><button className="secondary-button" disabled={testing || busy} onClick={runConnectionTest}>{testing ? t('settings.testing') : t('settings.testConnection')}</button><button className="primary-button" disabled={busy} onClick={saveConnection}><Save size={15} /> {t('settings.saveConnection')}</button></div></div>}
             {tab === 'workspace' && <div className="settings-section"><div className="section-heading"><div><h3>{t('settings.workspaceTitle')}</h3><p>{t('settings.workspaceDesc')}</p></div></div><label>{t('settings.workspaceRoot')}<input value={config.workspace_root || ''} onChange={(event) => setGlobal('workspace_root', event.target.value || null)} placeholder={t('settings.workspaceRootPlaceholder')} /></label><div className="settings-actions"><button className="primary-button" disabled={busy} onClick={saveWorkspace}><Save size={15} /> {t('settings.saveWorkspace')}</button></div></div>}
-            {tab === 'workspace' && <div className="settings-section"><div className="section-heading"><div><h3>{t('settings.executionTitle')}</h3><p>{t('settings.executionDesc')}</p></div></div><label className="settings-toggle"><input type="checkbox" checked={config.dynamic_num_ccs !== false} onChange={(event) => setGlobal('dynamic_num_ccs', event.target.checked)} /><span>{t('settings.dynamicNumCcs')}</span><HelpTip text={t('settings.dynamicNumCcsHelp')} title={t('settings.dynamicNumCcs')} /></label>{config.dynamic_num_ccs === false && <label>{t('settings.defaultNumCcs')}<input type="number" min={NUM_CCS_MIN} max={NUM_CCS_MAX} step={1} value={config.default_num_ccs ?? NUM_CCS_MIN} disabled={busy} onChange={(event) => setGlobal('default_num_ccs', clampNumCcs(event.target.value))} /><small>{t('settings.defaultNumCcsHelp', { min: NUM_CCS_MIN, max: NUM_CCS_MAX })}</small></label>}<div className="settings-actions"><button className="primary-button" disabled={busy} onClick={saveExecution}><Save size={15} /> {t('settings.saveExecution')}</button></div></div>}
+            {tab === 'workspace' && <div className="settings-section">
+              <div className="section-heading"><div><h3>{t('settings.executionTitle')}</h3><p>{t('settings.executionDesc')}</p></div></div>
+              <label className="settings-toggle"><input type="checkbox" checked={config.dynamic_num_ccs !== false} onChange={(event) => setGlobal('dynamic_num_ccs', event.target.checked)} /><span>{t('settings.dynamicNumCcs')}</span><HelpTip text={t('settings.dynamicNumCcsHelp')} title={t('settings.dynamicNumCcs')} /></label>
+              {config.dynamic_num_ccs === false && <label>{t('settings.defaultNumCcs')}<input aria-label={t('settings.defaultNumCcs')} type="number" min={NUM_CCS_MIN} max={NUM_CCS_MAX} step={1} value={config.default_num_ccs ?? NUM_CCS_MIN} disabled={busy} onChange={(event) => setGlobal('default_num_ccs', clampNumCcs(event.target.value))} /><small>{t('settings.defaultNumCcsHelp', { min: NUM_CCS_MIN, max: NUM_CCS_MAX })}</small></label>}
+              <label>
+                {t('settings.maxConcurrency')}
+                <input
+                  aria-label={t('settings.maxConcurrency')}
+                  aria-describedby="max-concurrency-help"
+                  type="number" min={MAX_CONCURRENCY_MIN} max={MAX_CONCURRENCY_MAX} step={1}
+                  value={config.max_concurrency ?? MAX_CONCURRENCY_MIN}
+                  disabled={busy}
+                  onChange={(event) => setGlobal('max_concurrency', clampConcurrency(event.target.value))}
+                />
+                <small id="max-concurrency-help">{t('settings.maxConcurrencyHelp')}</small>
+              </label>
+              <div className="settings-actions"><button className="primary-button" disabled={busy} onClick={saveExecution}><Save size={15} /> {t('settings.saveExecution')}</button></div>
+            </div>}
             {tab === 'roles' && <div className="settings-section roles-editor"><div className="section-heading"><div><h3>{t('settings.rolesTitle')}</h3><p>{t('settings.rolesDesc', { count: roleFields.length })}</p></div><div className="section-heading-actions">{!editingRole && <button className="secondary-button" disabled={!selectedRole || busy} onClick={() => setEditingRole(true)}><Pencil size={15} /> {t('common.edit')}</button>}<button className="secondary-button" onClick={startCreateRole}><Plus size={15} /> {t('settings.newRole')}</button></div></div><div className="role-editor-layout"><aside className="resource-list"><ul className="resource-list-items">{roles.map((item) => { const value = `${item.type}:${item.id}`; return <li key={value}><button type="button" className={selectedRole === value ? 'is-active' : ''} disabled={busy} onClick={() => requestSelectRole(value)}><span className="resource-list-type">{roleTypeLabel(item.type)}</span><span className="resource-list-name">{item.display_name}</span></button></li>; })}</ul><div className="resource-list-note">{t('settings.customRoles', { count: roles.length })}</div></aside><div className="role-form">
               {roleMode === 'idle' ? <p className="detail-empty">{t('settings.selectOrCreateRole')}</p> : <>
                 <div className="form-grid"><label>{t('settings.roleId')}<input value={roleId} onChange={(event) => setRoleId(event.target.value)} placeholder="lowercase_role_id" disabled={Boolean(selectedRole)} title={selectedRole ? t('settings.identityLocked') : undefined} /></label><label>{t('settings.roleType')}<select value={roleType} onChange={(event) => void chooseRoleType(event.target.value as RoleType)} disabled={Boolean(selectedRole)} title={selectedRole ? t('settings.identityLocked') : undefined}><option value="manager">{t('dialog.manager')}</option><option value="worker">{t('dialog.worker')}</option></select></label></div>

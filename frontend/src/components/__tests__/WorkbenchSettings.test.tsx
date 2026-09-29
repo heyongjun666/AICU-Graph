@@ -5,6 +5,8 @@ import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-li
 import WorkbenchSettings from '../WorkbenchSettings';
 import * as api from '../../utils/api';
 import { CliInfo, GlobalConfig, McpServerInfo, ProviderPreset, RoleField, RoleInfo } from '../../types';
+import { zh } from '../../i18n/zh';
+import { en } from '../../i18n/en';
 
 vi.mock('../../utils/api', () => ({
   createMcpServer: vi.fn(),
@@ -171,8 +173,8 @@ describe('WorkbenchSettings execution section', () => {
   const toggleOf = (container: HTMLElement) =>
     container.querySelector('.settings-toggle input[type="checkbox"]') as HTMLInputElement;
 
-  const numInput = (container: HTMLElement) =>
-    container.querySelector('.settings-section input[type="number"]') as HTMLInputElement | null;
+  const numInput = () =>
+    screen.queryByLabelText('默认单节点 agent 数量') as HTMLInputElement | null;
 
   it('defaults to dynamic with no number input', async () => {
     // getGlobalConfig mock（beforeEach）未提供新字段，模拟旧后端 / 老 config.json
@@ -180,7 +182,7 @@ describe('WorkbenchSettings execution section', () => {
     await openWorkspaceTab(container);
 
     expect(toggleOf(container).checked).toBe(true);
-    expect(numInput(container)).toBeNull();
+    expect(numInput()).toBeNull();
   });
 
   it('defaults to dynamic when the backend returns the fields explicitly', async () => {
@@ -197,7 +199,7 @@ describe('WorkbenchSettings execution section', () => {
     await openWorkspaceTab(container);
 
     expect(toggleOf(container).checked).toBe(true);
-    expect(numInput(container)).toBeNull();
+    expect(numInput()).toBeNull();
   });
 
   it('reveals a 1-4 number input when the toggle is turned off', async () => {
@@ -207,7 +209,7 @@ describe('WorkbenchSettings execution section', () => {
     fireEvent.click(toggleOf(container));
 
     const input = await waitFor(() => {
-      const el = numInput(container);
+      const el = numInput();
       expect(el).not.toBeNull();
       return el as HTMLInputElement;
     });
@@ -230,7 +232,7 @@ describe('WorkbenchSettings execution section', () => {
     await openWorkspaceTab(container);
 
     expect(toggleOf(container).checked).toBe(false);
-    expect((numInput(container) as HTMLInputElement).value).toBe('3');
+    expect((numInput() as HTMLInputElement).value).toBe('3');
   });
 
   it('saves the toggle state and default count', async () => {
@@ -239,7 +241,7 @@ describe('WorkbenchSettings execution section', () => {
     await openWorkspaceTab(container);
 
     fireEvent.click(toggleOf(container));
-    fireEvent.change(numInput(container) as HTMLInputElement, { target: { value: '3' } });
+    fireEvent.change(numInput() as HTMLInputElement, { target: { value: '3' } });
     fireEvent.click(screen.getByText('保存执行配置'));
 
     await waitFor(() => expect(api.updateGlobalConfig).toHaveBeenCalled());
@@ -255,7 +257,7 @@ describe('WorkbenchSettings execution section', () => {
     await openWorkspaceTab(container);
 
     fireEvent.click(toggleOf(container));
-    fireEvent.change(numInput(container) as HTMLInputElement, { target: { value: '9' } });
+    fireEvent.change(numInput() as HTMLInputElement, { target: { value: '9' } });
     fireEvent.click(screen.getByText('保存执行配置'));
 
     await waitFor(() => expect(api.updateGlobalConfig).toHaveBeenCalled());
@@ -275,6 +277,81 @@ describe('WorkbenchSettings execution section', () => {
     const payload = vi.mocked(api.updateGlobalConfig).mock.calls[0][0];
     expect(payload).not.toHaveProperty('dynamic_num_ccs');
     expect(payload).not.toHaveProperty('default_num_ccs');
+  });
+});
+
+describe('WorkbenchSettings 全局最大并发', () => {
+  const renderSettings = () =>
+    render(<WorkbenchSettings open onClose={() => {}} onSaved={() => {}} />);
+
+  const openWorkspaceTab = async () => {
+    fireEvent.click(screen.getByText('工作区与执行'));
+    await waitFor(() => expect(screen.getByText('单节点 agent 数量动态配置')).toBeDefined());
+  };
+
+  const concurrencyInput = () =>
+    screen.getByLabelText('最大同时运行节点数') as HTMLInputElement;
+
+  it('renders a global 1–16 input defaulting to 1 when the backend omits the field', async () => {
+    renderSettings();
+    await openWorkspaceTab();
+
+    const input = concurrencyInput();
+    expect(input.min).toBe('1');
+    expect(input.max).toBe('16');
+    expect(input.value).toBe('1');
+  });
+
+  it('displays the persisted global value', async () => {
+    vi.mocked(api.getGlobalConfig).mockResolvedValue({
+      config: {
+        workspace_root: null, cli_name: null, model: null,
+        api_base_url: null, api_key_env: null, max_concurrency: 8,
+      },
+      clis: [],
+      default_cli: 'claude',
+    });
+    renderSettings();
+    await openWorkspaceTab();
+
+    expect(concurrencyInput().value).toBe('8');
+  });
+
+  it('saves max_concurrency together with the execution settings', async () => {
+    vi.mocked(api.updateGlobalConfig).mockResolvedValue({ config: {} as never });
+    renderSettings();
+    await openWorkspaceTab();
+
+    fireEvent.change(concurrencyInput(), { target: { value: '6' } });
+    fireEvent.click(screen.getByText('保存执行配置'));
+
+    await waitFor(() => expect(api.updateGlobalConfig).toHaveBeenCalled());
+    expect(vi.mocked(api.updateGlobalConfig).mock.calls[0][0]).toMatchObject({
+      dynamic_num_ccs: true,
+      default_num_ccs: 1,
+      max_concurrency: 6,
+    });
+  });
+
+  it('clamps out-of-range max_concurrency before saving', async () => {
+    vi.mocked(api.updateGlobalConfig).mockResolvedValue({ config: {} as never });
+    renderSettings();
+    await openWorkspaceTab();
+
+    fireEvent.change(concurrencyInput(), { target: { value: '99' } });
+    fireEvent.click(screen.getByText('保存执行配置'));
+
+    await waitFor(() => expect(api.updateGlobalConfig).toHaveBeenCalled());
+    expect(vi.mocked(api.updateGlobalConfig).mock.calls[0][0]).toMatchObject({
+      max_concurrency: 16,
+    });
+  });
+
+  it('has matching zh/en dictionary keys and concurrency placeholders', () => {
+    expect(Object.keys(zh).sort()).toEqual(Object.keys(en).sort());
+    for (const key of Object.keys(zh).filter((key) => /Concurrency/.test(key))) {
+      expect(zh[key].match(/\{\w+\}/g) || []).toEqual(en[key].match(/\{\w+\}/g) || []);
+    }
   });
 });
 

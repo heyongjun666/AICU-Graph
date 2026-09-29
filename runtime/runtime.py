@@ -45,6 +45,7 @@ from runtime.persistence import Persistence
 from runtime.planner import PlanValidationError, Planner
 from runtime.scheduler import Scheduler
 from runtime.workspace_resolver import partition_of, resolve_shared_workspace
+from runtime.concurrency import DEFAULT_MAX_CONCURRENCY, validate_max_concurrency
 
 from runtime.shared_io import FRAMEWORK_DIR_NAMES, mime_type_for, previewable_path
 
@@ -109,7 +110,7 @@ class Runtime(RuntimeGateway, SchedulerDelegate):
         scheduler: Optional[Scheduler] = None,
         registry: Optional[ExecutableRegistry] = None,
         event_bus: Optional[EventBus] = None,
-        max_concurrency: int = 4,
+        max_concurrency: int = DEFAULT_MAX_CONCURRENCY,
         workspace_root: Optional[str] = None,
         shared_workspace: Optional[str] = None,
         roles_dir: Optional[str] = None,
@@ -119,7 +120,7 @@ class Runtime(RuntimeGateway, SchedulerDelegate):
         dynamic_num_ccs: Optional[bool] = None,
         default_num_ccs: Optional[int] = None,
     ):
-        self.max_concurrency = max_concurrency
+        self.max_concurrency = validate_max_concurrency(max_concurrency)
         self.workspace_root = workspace_root or os.getcwd()
         # 会话「项目目录」：None → 默认派生 {workspace_root}/shared；
         # 显式配置时指向外部项目目录（Agent 直接读写该目录）。
@@ -199,6 +200,7 @@ class Runtime(RuntimeGateway, SchedulerDelegate):
         self._external_input_waits: dict[str, dict] = {}
         self._shutdown = False
         self._lock = threading.Lock()
+        self._concurrency_lock = threading.Lock()
         self._global_pause_mode: Optional[str] = None
         self._pause_completion_callback: Optional[Callable[[list[str]], None]] = None
         self._node_status_callback: Optional[Callable[[str, NodeStatus], None]] = None
@@ -209,6 +211,13 @@ class Runtime(RuntimeGateway, SchedulerDelegate):
     # ========================================================================
     # Lifecycle
     # ========================================================================
+
+    def set_max_concurrency(self, value: int) -> None:
+        """Update scheduling without taking the graph lock or resuming a session."""
+        value = validate_max_concurrency(value)
+        with self._concurrency_lock:
+            self.scheduler.set_max_concurrency(value)
+            self.max_concurrency = value
 
     def _ensure_scheduler_running(self) -> None:
         """Restart the idle scheduler after a legal graph mutation."""

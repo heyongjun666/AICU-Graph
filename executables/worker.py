@@ -268,7 +268,9 @@ def _create_real_aicu(ctx: ExecutableContext) -> Any:
     def append_output(stream: str, message: str) -> None:
         _handle_cc_stream_output(node.id, node.task, ctx.runtime, stream, message)
 
-    selected_skills = node.config.get("skills")
+    # skills 空列表视为「未配置」，回退角色 yaml 的 skills —— 否则前端未选
+    # skill 时传入的空数组会覆盖角色默认（config.skills=[] 会顶掉 role yaml）。
+    selected_skills = node.config.get("skills") or None
     # skills_dir 未显式配置时保持 None，交由 AICU 回退到角色 yaml 的
     # skills_dir 默认（~/.claude/skills）。此前这里兜底到仓库根 skills/
     # 目录，与角色配置不一致且该目录往往不存在，导致带 skill 的节点失败。

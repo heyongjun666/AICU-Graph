@@ -6,6 +6,7 @@ import {
   deleteRolePool,
   getGraphSnapshot,
   getRolePools,
+  importSkill,
   listSessions,
   listSessionShared,
   readSessionSharedFile,
@@ -114,6 +115,22 @@ describe('session-scoped API', () => {
     expect(fetchMock).toHaveBeenCalledWith('/v1/sessions/s1/shared/file?path=backend%2Fapi.py', expect.anything());
     expect(file.previewable).toBe(true);
     expect(file.content).toBe('def main(): pass\n');
+  });
+
+  it('imports skills through the raw byte request with its content type', async () => {
+    const fetchMock = vi.fn(() => response({ skill_id: 'demo', content: 'body' }));
+    vi.stubGlobal('fetch', fetchMock);
+    const zipFile = new Blob(['zip'], { type: 'application/zip' }) as File;
+
+    await importSkill('demo', zipFile);
+
+    expect(fetchMock).toHaveBeenCalledWith('/v1/skills/import?skill_id=demo', expect.objectContaining({
+      method: 'POST',
+      body: zipFile,
+      headers: expect.objectContaining({
+        'Content-Type': 'application/octet-stream',
+      }),
+    }));
   });
 });
 

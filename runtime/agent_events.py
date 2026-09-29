@@ -105,11 +105,12 @@ def _normalize_objective(text: str) -> str:
 def _objectives_similar(a: str, b: str) -> bool:
     """两条**已规范化** objective 是否近似重复（确定性、保守）。
 
-    完全相等 → True；``difflib.SequenceMatcher`` ratio ≥0.9 → True（内容几乎相同，
-    容忍小段改写/插入）。
-    刻意**不含**"单向包含"规则：合法的递进更新（后一条包含前一条全文并追加
-    新内容）不应被误判为重复（ratio 会因新内容占比显著下降）；事件风暴由独立
-    限流（_MAX_EVENTS_PER_PRODUCER_WINDOW）兜底。
+    完全相等 → True；``difflib.SequenceMatcher`` ratio ≥0.8 → True（同 producer
+    「换个说法重发」：语义相同、措辞略变）。阈值从 0.9 降到 0.8 以拦截跨轮次
+    重发（实测逃过的重发 ratio 多落在 0.81~0.84），同时保留明显余量——合法的
+    递进更新因新内容占比显著下降而落在阈值之下。刻意**不含**"单向包含"规则：
+    后一条包含前一条全文并追加新内容不应被误判为重复；事件风暴由独立限流
+    （_MAX_EVENTS_PER_PRODUCER_WINDOW）兜底。
     """
     if not a or not b:
         return False
@@ -117,7 +118,7 @@ def _objectives_similar(a: str, b: str) -> bool:
         return True
     from difflib import SequenceMatcher
 
-    return SequenceMatcher(None, a, b, autojunk=False).ratio() >= 0.9
+    return SequenceMatcher(None, a, b, autojunk=False).ratio() >= 0.8
 
 
 def _iso_now() -> str:
@@ -771,7 +772,7 @@ class AgentEventManager:
     def _find_duplicate_locked(self, msg: EventMessage) -> str | None:
         """与已产出的**同 producer** 历史事件比对，返回重复对象的 event_id。
 
-        确定性判定：规范化 objective 指纹 + ``_objectives_similar``（≥0.9），与
+        确定性判定：规范化 objective 指纹 + ``_objectives_similar``（≥0.8），与
         摄取端同阈值，零 LLM 成本。只比对同 producer：不同节点的相似目标属于
         各自独立的协作请求，不应压制（避免误杀跨节点真实协作）。历史以
         ``self._events`` 为准（含 load() 从 events.json 恢复的全量历史事件）。

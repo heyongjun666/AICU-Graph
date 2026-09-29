@@ -1065,7 +1065,7 @@ class TestNoiseFiltering:
         assert mgr.event_count() == 1
 
     def test_near_duplicate_dropped(self, tmp_path):
-        """近似重复（小段改写）→ 吞掉（SequenceMatcher ratio ≥0.9）。"""
+        """近似重复（小段改写）→ 吞掉（SequenceMatcher ratio ≥0.8）。"""
         mgr = AgentEventManager(workspace_root=str(tmp_path))
         mgr.publish_events("p", [{"objective": "本环节分析已完成，需要后续环节进行复核确认"}])
         second = mgr.publish_events("p", [{"objective": "本环节分析已完成，需要后续环节进行复核"}])
@@ -1224,7 +1224,7 @@ class TestRouteHistoryDedup:
         assert spy.calls == [first]
 
     def test_near_duplicate_suppressed(self, tmp_path):
-        """跨窗口近似重复（≥0.9）→ 同样被路由端历史比对拦截。"""
+        """跨窗口近似重复（≥0.8）→ 同样被路由端历史比对拦截。"""
         mgr, spy = _mgr_with_route(tmp_path)
         first = mgr.publish_events("p", [{"objective": "本环节分析已完成，需要后续环节进行复核确认"}])[0]
         self._push_past_window(mgr, "p")
@@ -1250,7 +1250,7 @@ class TestRouteHistoryDedup:
         assert mgr._route_deduped_count == 0
 
     def test_progressive_update_not_suppressed(self, tmp_path):
-        """递进更新（ratio<0.9）→ 照常路由（不误判真实推进为重复）。"""
+        """递进更新（ratio<0.8）→ 照常路由（不误判真实推进为重复）。"""
         mgr, spy = _mgr_with_route(tmp_path)
         a = mgr.publish_events("p", [{"objective": "本环节已处理完成，需要你确认"}])[0]
         self._push_past_window(mgr, "p")

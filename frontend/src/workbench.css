@@ -332,6 +332,35 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .workspace-preview-header small { margin-left: auto; white-space: nowrap; }
 .workspace-preview pre { max-height: 55vh; margin: 6px 0 0; overflow: auto; padding: 12px; border: 1px solid #e6e8eb; border-radius: 6px; background: #f7f8f9; color: #353a40; font: 11px/1.6 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap; word-break: break-word; }
 
+/* ---- 复制路径 / 拖入 / 拖出（V3-2.3） ---- */
+
+/* 面包屑尾部那个「复制当前目录路径」。不参与收缩，否则路径一长就被 overflow 裁掉。 */
+.workspace-breadcrumbs .workspace-breadcrumb-action { flex: none; margin-left: auto; padding: 3px; }
+.workspace-breadcrumbs .workspace-breadcrumb-action:hover { color: #176b55; text-decoration: none; }
+
+.workspace-entry-meta { display: inline-flex; align-items: center; gap: 2px; }
+/* 行内的两个动作按钮平时不占视觉重量，hover / 键盘聚焦时才出现 ——
+   否则一列文件看起来像一列按钮。focus-within 是给 Tab 过去的用户留的路。 */
+.workspace-entry-meta .icon-button { opacity: 0; transition: opacity 0.12s ease; }
+.workspace-entry:hover .workspace-entry-meta .icon-button,
+.workspace-entry:focus-within .workspace-entry-meta .icon-button { opacity: 1; }
+.workspace-entry[draggable='true'] { cursor: grab; }
+/* 外层是 div[role=button]，浏览器不给默认焦点环，得自己画。 */
+.workspace-entry:focus-visible { outline: 2px solid #176b55; outline-offset: -2px; }
+
+/* 落点高亮：整块列表（=当前目录）与单行目录（=子目录）用同一个视觉语言。 */
+.workspace-list.is-drop-target { border-radius: 6px; background: #f0f7f4; box-shadow: inset 0 0 0 1px #9fc9bb; }
+.workspace-entry.is-drop-target { border-radius: 4px; background: #e8f4ef; box-shadow: inset 0 0 0 1px #9fc9bb; }
+
+.workspace-drop-status, .workspace-drop-failures {
+  margin-top: 6px; padding: 5px 8px; border-radius: 4px; font-size: 11px; line-height: 1.5;
+}
+.workspace-drop-status { background: #eef4f2; color: #52645f; }
+/* 空目录时提示「可以拖进来」—— 这是这个功能唯一一处会被用户看见的说明。 */
+.workspace-drop-hint { margin-top: 4px; color: #7d9a90; font-size: 10px; }
+/* 失败清单留在面板里而不只是弹个 toast：toast 会消失，而用户需要照着名字重试。 */
+.workspace-drop-failures { background: #fdf1f1; color: #a4392f; word-break: break-all; }
+
 /* ---- SessionOutputsDialog（V3-2.2 会话级「查看产出」） ---- */
 .outputs-dialog { width: min(720px, 100%); }
 .outputs-dialog .dialog-header { align-items: center; }

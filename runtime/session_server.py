@@ -6,6 +6,7 @@ import asyncio
 import fcntl
 import json
 import os
+import posixpath
 import pty
 import signal
 import struct
@@ -16,10 +17,17 @@ from pathlib import Path
 from typing import Any, Literal, Optional
 
 from fastapi import FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
+from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from runtime.credentials import vendor_of_model
+from runtime.file_transfer import (
+    RevealUnsupported,
+    UploadTooLarge,
+    receive_upload,
+    validate_upload_name,
+)
 from runtime.i18n import LanguageMiddleware, localized_detail, t
 from runtime.mcp_client import DEFAULT_PROBE_TIMEOUT, McpProbeError, probe_server
 from runtime.mcp_manager import (
@@ -36,6 +44,7 @@ from runtime.repo_paths import REPO_ROOT
 from runtime.roles_manager import RolesManager
 from runtime.role_pools_manager import RolePoolsManager
 from runtime.server import _sse_stream
+from runtime.shared_io import mime_type_for
 from runtime.session_manager import SessionHandle, SessionManager
 from runtime.skills_manager import SkillsManager
 from cli_adapters import (
@@ -945,6 +954,143 @@ def create_session_app(
             raise _http_error(404, error) from error
         except ValueError as error:
             raise _http_error(400, error) from error
+
+    # ---- 可浏览根：复制路径 / 拖入 / 拖出（V3-2.3） ----
+    #
+    # 四个动作 × 两个根 = 八条路由。没有收敛成 `/files/*?scope=` 那样一条：既有的八条
+    # 只读端点（/shared、/shared/file、/nodes/{nid}/results…）已经是「每上下文一套」的
+    # 形状，再加一个通用入口就是同一个概念两种写法。真逻辑全在 Runtime 与 file_transfer
+    # 里，这里重复的只有下面四行异常翻译。
+
+    def _browse_info(runtime, scope: str, node_id: Optional[str], path: str) -> dict:
+        """resolve / download 共用：路径越界与缺失的翻译只有一份。"""
+        try:
+            return runtime.resolve_browse_path(scope, path, node_id)
+        except FileNotFoundError as error:
+            raise _http_error(404, error) from error
+        except ValueError as error:
+            raise _http_error(400, error) from error
+
+    async def _browse_upload(
+        request: Request, runtime, scope: str, node_id: Optional[str],
+        path: str, name: str,
+    ) -> dict:
+        # 先校验落点再收 body：越界、没有产出目录这类失败不该等收完 100MB 才回。
+        try:
+            target_dir, rel_dir = runtime.prepare_upload_dir(scope, path, node_id)
+            validate_upload_name(name)
+        except FileNotFoundError as error:
+            raise _http_error(404, error) from error
+        except ValueError as error:
+            raise _http_error(400, error) from error
+        try:
+            result = await receive_upload(target_dir, name, request.stream())
+        except UploadTooLarge as error:  # 必须是 ValueError 之前 —— 它是 ValueError 子类
+            raise _http_error(413, error) from error
+        except ValueError as error:
+            raise _http_error(400, error) from error
+        result["path"] = posixpath.join(rel_dir, result["name"]).lstrip("./")
+        return result
+
+    def _browse_download(runtime, scope: str, node_id: Optional[str], path: str):
+        info = _browse_info(runtime, scope, node_id, path)
+        if info["type"] != "file":
+            raise _http_error(400, ValueError("Cannot download a directory"))
+        # content_disposition 默认 attachment —— 这是拖出成立的前提：Chromium 的
+        # DownloadURL 对 inline 的可渲染类型（text/plain 等）可能只落一个链接。
+        # 中文名的 RFC 5987 编码由 FileResponse 自己处理（starlette 1.x 会发
+        # `filename*=utf-8''…`），不用手工拼头。
+        return FileResponse(
+            info["abs_path"],
+            media_type=mime_type_for(info["name"]) or "application/octet-stream",
+            filename=info["name"],
+        )
+
+    def _browse_reveal(runtime, scope: str, node_id: Optional[str], path: str) -> dict:
+        try:
+            return runtime.reveal_browse_path(scope, path, node_id)
+        except RevealUnsupported as error:
+            raise _http_error(501, error) from error
+        except FileNotFoundError as error:
+            raise _http_error(404, error) from error
+        except ValueError as error:
+            raise _http_error(400, error) from error
+
+    @app.get("/v1/sessions/{session_id}/shared/path")
+    def resolve_session_shared_path(
+        session_id: str, path: str = Query(default="", max_length=4096)
+    ):
+        """把共享根下的相对路径解析成绝对路径（供「复制路径」）。
+
+        ``path=""`` 合法，返回共享根本身。这是唯一一处把真实根路径交出去的端点 ——
+        列表响应里刻意不带（见 ``list_session_shared``），因为那是每次刷新都会下发的
+        payload，而「我正看的这个东西在哪」是用户显式索要的一次性解析。
+        """
+        return _browse_info(resolve(session_id).runtime, "shared", None, path)
+
+    @app.post("/v1/sessions/{session_id}/shared/upload", status_code=201)
+    async def upload_session_shared_file(
+        session_id: str,
+        request: Request,
+        path: str = Query(default="", max_length=4096),
+        name: str = Query(min_length=1, max_length=255),
+    ):
+        """把请求体当作一个文件写进共享根下的 ``path`` 目录，文件名 ``name``。
+
+        裸 body、一次一个文件，与 ``POST /v1/skills/import`` 同一个范式。同名自动改名为
+        ``a-1.txt``，**绝不覆盖**。
+        """
+        return await _browse_upload(request, resolve(session_id).runtime, "shared", None, path, name)
+
+    @app.get("/v1/sessions/{session_id}/shared/download")
+    def download_session_shared_file(
+        session_id: str, path: str = Query(min_length=1, max_length=4096)
+    ):
+        return _browse_download(resolve(session_id).runtime, "shared", None, path)
+
+    @app.post("/v1/sessions/{session_id}/shared/reveal")
+    def reveal_session_shared_file(
+        session_id: str, path: str = Query(default="", max_length=4096)
+    ):
+        """在访达中选中该路径。
+
+        必须是 POST：这是有副作用的端点，而服务默认监听 ``0.0.0.0``（``main.py``），
+        GET 会被 ``<img src>`` 或链接预取之类的东西触发。前端要的是「用户点了才弹」。
+        """
+        return _browse_reveal(resolve(session_id).runtime, "shared", None, path)
+
+    @app.get("/v1/sessions/{session_id}/nodes/{node_id}/results/path")
+    def resolve_node_result_path(
+        session_id: str, node_id: str, path: str = Query(default="", max_length=4096)
+    ):
+        return _browse_info(resolve(session_id).runtime, "results", node_id, path)
+
+    @app.post("/v1/sessions/{session_id}/nodes/{node_id}/results/upload", status_code=201)
+    async def upload_node_result_file(
+        session_id: str,
+        node_id: str,
+        request: Request,
+        path: str = Query(default="", max_length=4096),
+        name: str = Query(min_length=1, max_length=255),
+    ):
+        """写进节点**声明的产出目录**，不是它的工作区。
+
+        节点没有 ``artifact_path``（还没跑过）→ 404；产出是单个文件 → 400。两条都
+        **不**退回到别处去落 —— 用户要的是「所见即所得」，落到工作区就是所见非所得。
+        """
+        return await _browse_upload(request, resolve(session_id).runtime, "results", node_id, path, name)
+
+    @app.get("/v1/sessions/{session_id}/nodes/{node_id}/results/download")
+    def download_node_result_file(
+        session_id: str, node_id: str, path: str = Query(min_length=1, max_length=4096)
+    ):
+        return _browse_download(resolve(session_id).runtime, "results", node_id, path)
+
+    @app.post("/v1/sessions/{session_id}/nodes/{node_id}/results/reveal")
+    def reveal_node_result_file(
+        session_id: str, node_id: str, path: str = Query(default="", max_length=4096)
+    ):
+        return _browse_reveal(resolve(session_id).runtime, "results", node_id, path)
 
     @app.get("/v1/sessions/{session_id}/nodes/{node_id}/artifact")
     def get_artifact(session_id: str, node_id: str):

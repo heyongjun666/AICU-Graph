@@ -583,6 +583,17 @@ export const zh: Dict = {
   'outputs.folder': '文件夹',
   'outputs.listingTruncated': '列表在 1000 条处截断。',
 
+  // ---- 可浏览根：复制路径 / 拖入 / 拖出（V3-2.3） ----
+  'files.copyPath': '复制路径',
+  'files.pathCopied': '已复制路径',
+  'files.copyFailed': '复制失败，请手动复制',
+  'files.revealInFinder': '在访达中显示',
+  'files.dropHint': '可以把文件或文件夹拖到这里',
+  'files.dropTooMany': '一次最多拖入 {limit} 个文件，多余的已忽略',
+  'files.uploading': '正在上传 {done}/{total}…',
+  'files.uploadedRenamed': '已上传 {count} 个文件（{renamed} 个同名已改名）',
+  'files.uploadPartial': '成功 {ok} 个，失败 {failed} 个',
+
   // ---- 会话工作空间 ----
   'workspace.title': '工作空间设置',
   'workspace.desc': '配置该会话的工作空间与项目目录。',

@@ -399,6 +399,30 @@ export interface WorkspaceFile {
 }
 
 // ============================================================================
+// 可浏览根：复制路径 / 拖入 / 拖出（V3-2.3）
+// ============================================================================
+
+/** 上传落点的两种根。shared = 会话共享区，results = 节点声明的产出目录。 */
+export type BrowseScope = 'shared' | 'results';
+
+/** 「这个相对路径指向磁盘上的哪里」—— 复制路径用。列表响应刻意不带它。 */
+export interface ResolvedPath {
+  path: string;
+  abs_path: string;
+  name: string;
+  type: 'directory' | 'file';
+}
+
+export interface UploadResult {
+  /** 最终文件名。同名时会被改成 `a-1.txt`，所以要以后端返回的为准。 */
+  name: string;
+  /** 相对根（scope 根）的完整路径，用于上传后定位/刷新。 */
+  path: string;
+  size: number;
+  renamed: boolean;
+}
+
+// ============================================================================
 // Session Outputs（V3-2.2 会话级「查看产出」）
 // OutputEntry 与 WorkspaceEntry 分离：Outputs 是「最终产出浏览器」，不是
 // Workspace Debugger。Filesystem = 内容事实源。

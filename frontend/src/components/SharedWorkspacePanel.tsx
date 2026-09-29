@@ -2,8 +2,7 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   ArrowLeft,
   ChevronRight,
-  File,
-  Folder,
+  Copy,
   FolderOpen,
   RefreshCw,
   X,
@@ -11,6 +10,8 @@ import {
 import { OutputEntry, OutputFile, OutputListing } from '../types';
 import { listSessionShared, readSessionSharedFile } from '../utils/api';
 import { formatBytes } from '../utils/format';
+import { useWorkspaceDrop } from '../hooks/useWorkspaceDrop';
+import WorkspaceEntryRow from './WorkspaceEntryRow';
 import { useI18n } from '../i18n';
 
 interface SharedWorkspacePanelProps {
@@ -54,6 +55,14 @@ const SharedWorkspacePanel: React.FC<SharedWorkspacePanelProps> = ({
       .catch((reason) => setError(reason instanceof Error ? reason.message : String(reason)))
       .finally(() => setLoading(false));
   }, [sessionId]);
+
+  const drop = useWorkspaceDrop({
+    sessionId: sessionId ?? '',
+    scope: 'shared',
+    currentDir: currentPath,
+    // 上传完必须重列，否则刚拖进去的东西在界面上看不见，用户会以为没传成功。
+    onUploaded: () => load(currentPath),
+  });
 
   useEffect(() => {
     if (open && sessionId) {
@@ -118,6 +127,14 @@ const SharedWorkspacePanel: React.FC<SharedWorkspacePanelProps> = ({
     load('');
   };
 
+  /**
+   * 拖到某一行目录上。`items` 已由行组件**同步**取出（DataTransferItemList 在事件
+   * 处理器返回后即失效），这里直接转发给 hook。
+   */
+  const uploadInto = (targetDir: string, items: DataTransferItem[]) => {
+    drop.upload(targetDir, items);
+  };
+
   return (
     <aside className="shared-workspace-panel" aria-label={t('sharedWorkspace.browser')}>
       <div className="shared-panel-header">
@@ -150,7 +167,30 @@ const SharedWorkspacePanel: React.FC<SharedWorkspacePanelProps> = ({
                   <button onClick={() => goToPath(index)}>{segment}</button>
                 </React.Fragment>
               ))}
+              <button
+                className="icon-button workspace-breadcrumb-action"
+                title={t('files.copyPath')}
+                aria-label={t('files.copyPath')}
+                onClick={() => drop.onCopyPath(currentPath)}
+              >
+                <Copy size={12} />
+              </button>
             </div>
+            {drop.progress && (
+              <div className="workspace-drop-status">
+                {t('files.uploading', { done: drop.progress.done, total: drop.progress.total })}
+              </div>
+            )}
+            {!!drop.failures.length && (
+              <div className="workspace-drop-failures">
+                {drop.failures.slice(0, 3).map((item) => (
+                  <div key={item.name}>{item.name}: {item.reason}</div>
+                ))}
+                {drop.failures.length > 3 && (
+                  <div>+{drop.failures.length - 3}</div>
+                )}
+              </div>
+            )}
             {error && <div className="inspector-error">{error}</div>}
             {loading && !selectedFile && <div className="detail-empty"><RefreshCw size={15} className="spin" /> {t('common.loading')}</div>}
             {!loading && selectedFile && (
@@ -159,6 +199,14 @@ const SharedWorkspacePanel: React.FC<SharedWorkspacePanelProps> = ({
                   <button className="secondary-button" onClick={() => setSelectedFile(null)}><ArrowLeft size={14} /> {t('common.back')}</button>
                   <span>{selectedFile.path}</span>
                   <small>{formatBytes(selectedFile.size)}</small>
+                  <button
+                    className="icon-button"
+                    title={t('files.copyPath')}
+                    aria-label={t('files.copyPath')}
+                    onClick={() => drop.onCopyPath(selectedFile.path)}
+                  >
+                    <Copy size={13} />
+                  </button>
                 </div>
                 {selectedFile.previewable ? (
                   <>
@@ -171,16 +219,29 @@ const SharedWorkspacePanel: React.FC<SharedWorkspacePanelProps> = ({
               </div>
             )}
             {!loading && !selectedFile && listing && (
-              <div className="workspace-list">
-                {!listing.entries.length && <div className="detail-empty">{currentPath ? t('outputs.emptyDir') : t('outputs.noOutputs')}</div>}
+              <div
+                className={`workspace-list${drop.dropTarget === currentPath ? ' is-drop-target' : ''}`}
+                {...drop.containerProps}
+              >
+                {!listing.entries.length && (
+                  <div className="detail-empty">
+                    {currentPath ? t('outputs.emptyDir') : t('outputs.noOutputs')}
+                    <div className="workspace-drop-hint">{t('files.dropHint')}</div>
+                  </div>
+                )}
                 {listing.entries.map((entry) => (
-                  <button className="workspace-entry outputs-entry" key={entry.path} onClick={() => openEntry(entry)}>
-                    <span className="workspace-entry-icon">{entry.type === 'directory' ? <Folder size={16} /> : <File size={16} />}</span>
-                    <span className="workspace-entry-name">
-                      <span className="outputs-entry-title">{entry.name}</span>
-                    </span>
-                    <small>{entry.type === 'directory' ? t('outputs.folder') : formatBytes(entry.size)}</small>
-                  </button>
+                  <WorkspaceEntryRow
+                    key={entry.path}
+                    entry={entry}
+                    sessionId={sessionId as string}
+                    scope="shared"
+                    onOpen={openEntry}
+                    onCopyPath={(target) => drop.onCopyPath(target.path)}
+                    onReveal={(target) => drop.onReveal(target.path)}
+                    dropTarget={drop.dropTarget}
+                    onDropTargetChange={drop.setDropTarget}
+                    onDrop={uploadInto}
+                  />
                 ))}
                 {listing.truncated && <div className="detail-empty">{t('outputs.listingTruncated')}</div>}
               </div>

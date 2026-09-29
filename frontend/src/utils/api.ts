@@ -15,6 +15,7 @@ import {
   GraphNode,
   GraphEdge,
   NodeStatus,
+  NodeConfig,
   SessionLifecycleState,
   SessionSummary,
   SessionSettings,
@@ -29,7 +30,9 @@ import {
   WorkspaceListing,
   WorkspaceFile,
   LinkCandidate,
-  NodeConfig,
+  BrowseScope,
+  ResolvedPath,
+  UploadResult,
   OutputListing,
   OutputFile,
   AgentEvent,
@@ -748,16 +751,11 @@ export function deleteSkill(skillId: string): Promise<void> {
   return sessionRequest(`skills/${skillId}`, { method: 'DELETE' });
 }
 
-export async function importSkill(skillId: string, zipFile: File): Promise<SkillInfo> {
-  const response = await fetch(
-    `${baseUrl}skills/import?skill_id=${encodeURIComponent(skillId)}`,
-    { method: 'POST', body: zipFile, headers: { 'X-Language': useUIStateStore.getState().language } },
+export function importSkill(skillId: string, zipFile: File): Promise<SkillInfo> {
+  return rawRequest<SkillInfo>(
+    `skills/import?skill_id=${encodeURIComponent(skillId)}`,
+    zipFile,
   );
-  if (!response.ok) {
-    const payload = await response.json().catch(() => null);
-    throw new Error(payload?.detail || `HTTP ${response.status}`);
-  }
-  return response.json();
 }
 
 // ============================================================================
@@ -842,6 +840,86 @@ export function listSessionShared(sessionId: string, path = ''): Promise<OutputL
 
 export function readSessionSharedFile(sessionId: string, path: string): Promise<OutputFile> {
   return sessionRequest(`sessions/${sessionId}/shared/file${workspaceQuery(path)}`);
+}
+
+// ---- 可浏览根：复制路径 / 拖入 / 拖出（V3-2.3） ----
+//
+// 路径形状与上面那八条只读端点对称：读到 `/shared/file` 就会猜到 `/shared/download`。
+
+function browseBase(sessionId: string, scope: BrowseScope, nodeId?: string): string {
+  if (scope === 'shared') return `sessions/${sessionId}/shared`;
+  if (!nodeId) throw new Error('scope=results requires nodeId');
+  return `sessions/${sessionId}/nodes/${nodeId}/results`;
+}
+
+export function resolveBrowsePath(
+  sessionId: string,
+  scope: BrowseScope,
+  path: string,
+  nodeId?: string,
+): Promise<ResolvedPath> {
+  return sessionRequest(`${browseBase(sessionId, scope, nodeId)}/path${workspaceQuery(path)}`);
+}
+
+export function revealBrowsePath(
+  sessionId: string,
+  scope: BrowseScope,
+  path: string,
+  nodeId?: string,
+): Promise<{ revealed: boolean; abs_path: string }> {
+  // POST：这是有副作用的端点（会在用户机器上弹 Finder），服务又默认监听 0.0.0.0。
+  // GET 会被 <img src> 或链接预取之类的东西触发。
+  return sessionRequest(`${browseBase(sessionId, scope, nodeId)}/reveal${workspaceQuery(path)}`, {
+    method: 'POST',
+  });
+}
+
+export function uploadBrowseFile(
+  sessionId: string,
+  scope: BrowseScope,
+  dirPath: string,
+  name: string,
+  file: Blob,
+  nodeId?: string,
+): Promise<UploadResult> {
+  const query = buildQueryString({ path: dirPath, name });
+  // 裸字节，一次一个文件 —— 与 POST /v1/skills/import 同一个范式。
+  //
+  // **不走 sessionRequest**：它只要看到 body 就无条件盖 Content-Type: application/json
+  // （见上面的 sessionRequest）。虽然 init.headers 在展开序里最后、能盖回去，但靠
+  // 「谁在后面」取胜太脆 —— JSON 请求和上传字节本来就是两种东西，各走各的。
+  return rawRequest(`${browseBase(sessionId, scope, nodeId)}/upload${query}`, file);
+}
+
+/** 下载地址。只拼 URL、不发请求 —— 拖出用的 DownloadURL 需要它是**同步**可得的。 */
+export function browseDownloadUrl(
+  sessionId: string,
+  scope: BrowseScope,
+  path: string,
+  nodeId?: string,
+): string {
+  const query = buildQueryString({ path });
+  const relative = `${baseUrl}${browseBase(sessionId, scope, nodeId)}/download${query}`;
+  // 必须是绝对 URL：Chromium 的 DownloadURL 只认 http(s)，给相对串会让 Finder
+  // 落一个 .webloc 或者干脆什么都不落。API_BASE 默认是相对的 /v1/，所以要以当前
+  // 页面为基准解析一次。
+  return new URL(relative, window.location.href).href;
+}
+
+async function rawRequest<T>(path: string, body: Blob): Promise<T> {
+  const response = await fetch(`${baseUrl}${path}`, {
+    method: 'POST',
+    body,
+    headers: {
+      'X-Language': useUIStateStore.getState().language,
+      'Content-Type': 'application/octet-stream',
+    },
+  });
+  if (!response.ok) {
+    const payload = await response.json().catch(() => null);
+    throw new Error(payload?.detail || `HTTP ${response.status}`);
+  }
+  return response.json();
 }
 
 export async function getLinkCandidates(

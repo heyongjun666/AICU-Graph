@@ -12,6 +12,8 @@ Runtime 是系统的中枢协调器，负责：
 import logging
 import os
 import posixpath
+import subprocess
+import sys
 import threading
 import time
 import uuid
@@ -21,6 +23,7 @@ from typing import Any, Callable, Optional, Sequence
 from executables.base import RuntimeGateway, SchedulerDelegate
 from executables.registry import ExecutableRegistry
 from runtime.event_bus import EventBus, SSEEvent
+from runtime.file_transfer import RevealUnsupported
 from runtime.graph import Graph
 from runtime.models import (
     MAX_TASK_LENGTH,
@@ -2496,6 +2499,126 @@ class Runtime(RuntimeGateway, SchedulerDelegate):
         with open(target, "r", encoding="utf-8", errors="replace") as file:
             content = file.read()
         return {"path": os.path.relpath(target, root), "size": size, "content": content}
+
+    # ---- 可浏览根：复制路径 / 拖入 / 拖出（V3-2.3） ----
+    # 「看产出」有两个根（shared 根、节点产出根），而「这个相对路径指向哪、允不允许」
+    # 只有一条事实。所以根解析收敛到 _browse_root，落盘机制收敛到 file_transfer，
+    # 上下文的公开方法只剩一行。
+
+    def _browse_root(self, scope: str, node_id: Optional[str] = None) -> str:
+        """scope → 可浏览的绝对根。``shared`` 用共享根，``results`` 用节点产出根。"""
+        if scope == "shared":
+            return self.get_shared_workspace()
+        if scope != "results":
+            raise ValueError(f"Unknown scope: {scope!r}")
+        if not node_id:
+            raise ValueError("scope=results requires node_id")
+        root = self._get_node_result_root(node_id)
+        if root is None:
+            # 与 read_node_result_file 同一个口径（404）：同一个「没有产出」在
+            # 读和写两条路上必须报同一件事，否则前端要按动作分别翻译。
+            raise FileNotFoundError("Node has no artifact")
+        return root
+
+    def resolve_browse_path(
+        self, scope: str, path: str = "", node_id: Optional[str] = None
+    ) -> dict[str, Any]:
+        """把一个相对路径解析成绝对路径。这是唯一一处把真实根路径交出去的地方。
+
+        ``list_session_shared`` 的 docstring 写着「不暴露真实 shared_root」——那条约束
+        的对象是**列表响应**（别让根泄进每一次正常渲染的 payload、别让前端去拼路径）。
+        而「复制路径」这个需求本身就是用户显式索要「我正看的这个东西在哪」，所以它
+        走一个一次性、显式索取的端点，而不是往条目上加字段。
+
+        ``path=""`` 合法，返回根本身 —— 「复制当前目录路径」是这里最常用的一条。
+        """
+        root = self._browse_root(scope, node_id)
+        real_root = os.path.realpath(root)
+        if scope == "results" and os.path.isfile(real_root):
+            # 产出是单个文件时，这个文件自己就是根，见 list_node_results 的同款分支。
+            if path not in ("", ".", os.path.basename(real_root)):
+                raise FileNotFoundError(path)
+            target = real_root
+        else:
+            target = self._resolve_workspace_path(root, path)
+        exists = os.path.exists(target)
+        if not exists:
+            # 共享根可能还没被创建（此刻由 _build_handle 建，但老会话、或外部项目目录
+            # 被删掉之后仍然会走到这里）：与 list_session_shared 同口径，这不是错误 ——
+            # 列目录那边对同一个状态返回空树，这边就该返回根路径本身。「复制路径」问的
+            # 是「它在哪」，而 404 一个字都没回答。
+            # 只有**根本身**有这个待遇：具体子路径不存在仍然是 404，那是真的找不到。
+            if scope != "shared" or os.path.realpath(target) != real_root:
+                raise FileNotFoundError(path)
+        return {
+            "path": self._norm_shared_rel(real_root, target),
+            "abs_path": target,
+            "name": os.path.basename(target),
+            # 根还没被创建时也报 directory —— 它是共享根，只可能是目录；
+            # 报 file 会让前端的下载/预览分支误判。
+            "type": "directory" if (not exists or os.path.isdir(target)) else "file",
+        }
+
+    def prepare_upload_dir(
+        self, scope: str, path: str = "", node_id: Optional[str] = None
+    ) -> tuple[str, str]:
+        """校验并创建上传落点目录，返回 ``(绝对路径, 相对根的路径)``。
+
+        **顺序不能反**：先 ``_resolve_workspace_path`` 证明落点在根内，再 ``makedirs``。
+        反过来就等于「客户端传什么路径，就在磁盘上造什么」。realpath 对不存在的路径
+        同样成立（只是原样规范化），所以校验对尚未创建的目录依然有效。
+        """
+        root = self._browse_root(scope, node_id)
+        real_root = os.path.realpath(root)
+        if os.path.isfile(real_root):
+            raise ValueError("Node result is a file, not a directory")
+        target = self._resolve_workspace_path(root, path)
+        self._reject_framework_dir(real_root, target)
+        # 已存在但不是目录（同名文件挡路）→ 明确报错，不要让它走到 open() 变成 500
+        if os.path.exists(target) and not os.path.isdir(target):
+            raise ValueError(f"Not a directory: {path}")
+        os.makedirs(target, exist_ok=True)
+        return target, self._norm_shared_rel(real_root, target)
+
+    @staticmethod
+    def _reject_framework_dir(real_root: str, target: str) -> None:
+        """拒绝把文件放进框架自己会重建的目录。
+
+        ``FRAMEWORK_DIR_NAMES`` 里的 ``cc_0`` / ``deliverables`` 等会在多 CC 投票收尾时被
+        rmtree 重来（``aicu.py`` 的 ``_copy_best_to_cc0``），各 CLI 的 skill 目录每次构造
+        CC 都会清空重建。往那里放的东西会**在用户毫不知情的情况下消失** —— 这比报个错
+        难受得多。
+
+        **只看根以下的分量**：worker 节点的产出根本身往往就叫 ``cc_0`` 或 ``deliverables``
+        （见 `_get_node_result_root`），把它自己也挡掉等于整个功能不可用。
+        """
+        relative = os.path.relpath(target, real_root)
+        if relative in (".", ""):
+            return
+        blocked = FRAMEWORK_DIR_NAMES | {"cc_1", "cc_2", "cc_3"}
+        for part in relative.split(os.sep):
+            if part in blocked or part.startswith("cc_"):
+                raise ValueError(
+                    f"Refusing to write into framework-managed directory: {part}"
+                )
+
+    def reveal_browse_path(
+        self, scope: str, path: str = "", node_id: Optional[str] = None
+    ) -> dict[str, Any]:
+        """在系统文件管理器里选中这个路径。
+
+        只能 macOS（``open -R``）。别的平台返回 RevealUnsupported → 501，因为
+        「服务端没有这个能力」与「你的参数写错了」是两回事。
+        """
+        if sys.platform != "darwin":
+            raise RevealUnsupported(
+                "Reveal in Finder is only available on macOS"
+            )
+        target = self.resolve_browse_path(scope, path, node_id)["abs_path"]
+        # list 形式，不经 shell —— 没有注入面。也不需要 ``--``：abs_path 出自
+        # os.path.realpath，必然以 / 开头，不会被 open 当成选项。
+        subprocess.run(["open", "-R", target], check=False, timeout=10)
+        return {"revealed": True, "abs_path": target}
 
     @staticmethod
     def _resolve_workspace_path(root: str, path: str) -> str:

@@ -32,6 +32,10 @@ vi.mock('../../utils/api', () => ({
   reviseSessionNode: vi.fn(),
   listNodeResults: vi.fn(),
   readNodeResultFile: vi.fn(),
+  resolveBrowsePath: vi.fn(),
+  revealBrowsePath: vi.fn(),
+  uploadBrowseFile: vi.fn(),
+  browseDownloadUrl: vi.fn(),
   getGlobalConfig: vi.fn(),
   getRole: vi.fn(),
 }));
@@ -307,3 +311,155 @@ describe('NodeInspector 的 MCP 接线提示', () => {
     expect(warningNotice()).toBeNull();
   });
 });
+
+// ---------------------------------------------------------------------------
+// V3-2.3：节点产出页的「拖入 / 复制路径 / 拖出」
+//
+// 节点侧与会话共享区共用 WorkspaceEntryRow 与 useWorkspaceDrop，接线在共享区那侧
+// 已经测过。这里只测**节点侧独有的两个边界**：
+//   1. 落点是 `/nodes/{nid}/results`，不是共享区 —— 传错 scope 会把参考资料塞进
+//      共享区，界面上看不出来（两边长得一样），只有请求参数能区分；
+//   2. 没有产出目录时**不接受拖入** —— 落到别处就是所见非所得。
+// ---------------------------------------------------------------------------
+describe('NodeInspector 产出页的文件拖入 / 拖出（V3-2.3）', () => {
+  const artifactTab = (): HTMLButtonElement =>
+    document.querySelectorAll('.inspector-tabs button')[2] as HTMLButtonElement;
+
+  const FILE_LISTING = {
+    path: '.',
+    artifact_path: '/tmp/artifacts/node-1',
+    artifact_kind: 'directory',
+    result_root: 'node-1',
+    entries: [{ name: 'report.md', path: 'report.md', type: 'file', size: 20, modified_at: 0 }],
+  };
+
+  function openArtifactTab(listing: unknown) {
+    vi.mocked(api.listNodeResults).mockResolvedValue(listing as never);
+    renderInspectorWithChildAndGetDeleteButton();
+    fireEvent.click(artifactTab());
+  }
+
+  function makeFileEntry(name: string, size = 4) {
+    return {
+      isFile: true,
+      isDirectory: false,
+      name,
+      file: (resolve: (file: File) => void) =>
+        resolve(new File([new Uint8Array(size)], name, { type: 'text/plain' })),
+    };
+  }
+
+  function fileDrop(names: string[]) {
+    return {
+      types: ['Files'],
+      dropEffect: '',
+      items: names.map((name) => ({ kind: 'file', webkitGetAsEntry: () => makeFileEntry(name) })),
+    };
+  }
+
+  beforeEach(() => {
+    vi.mocked(api.uploadBrowseFile).mockResolvedValue({
+      name: 'ref.md', path: 'ref.md', size: 4, renamed: false,
+    });
+    vi.mocked(api.resolveBrowsePath).mockResolvedValue({
+      path: 'report.md', abs_path: '/tmp/artifacts/node-1/report.md',
+      name: 'report.md', type: 'file',
+    });
+    vi.mocked(api.browseDownloadUrl).mockReturnValue('http://localhost/v1/n/download?path=report.md');
+    Object.assign(navigator, { clipboard: { writeText: vi.fn(async () => undefined) } });
+  });
+
+  it('拖进产出目录 → 落在 results 作用域的这个节点上', async () => {
+    openArtifactTab(FILE_LISTING);
+    await screen.findByText('report.md');
+
+    fireEvent.drop(document.querySelector('.workspace-list') as HTMLElement, {
+      dataTransfer: fileDrop(['ref.md']),
+    });
+
+    await waitFor(() => {
+      expect(api.uploadBrowseFile).toHaveBeenCalledWith(
+        'session-1', 'results', '', 'ref.md', expect.anything(), 'node-1',
+      );
+    });
+  });
+
+  it('上传完重列产出目录', async () => {
+    openArtifactTab(FILE_LISTING);
+    await screen.findByText('report.md');
+    const before = vi.mocked(api.listNodeResults).mock.calls.length;
+
+    fireEvent.drop(document.querySelector('.workspace-list') as HTMLElement, {
+      dataTransfer: fileDrop(['ref.md']),
+    });
+
+    await waitFor(() => {
+      expect(vi.mocked(api.listNodeResults).mock.calls.length).toBeGreaterThan(before);
+    });
+  });
+
+  it('复制路径走 results 作用域（不是共享区）', async () => {
+    openArtifactTab(FILE_LISTING);
+    const row = (await screen.findByText('report.md')).closest('.workspace-entry') as HTMLElement;
+
+    fireEvent.click(within(row).getByRole('button', { name: 'Copy path' }));
+
+    await waitFor(() => {
+      expect(api.resolveBrowsePath).toHaveBeenCalledWith('session-1', 'results', 'report.md', 'node-1');
+    });
+    expect(navigator.clipboard.writeText).toHaveBeenCalledWith('/tmp/artifacts/node-1/report.md');
+  });
+
+  it('文件行拖出设的是 DownloadURL', async () => {
+    openArtifactTab(FILE_LISTING);
+    const row = (await screen.findByText('report.md')).closest('.workspace-entry') as HTMLElement;
+    const setData = vi.fn();
+
+    fireEvent.dragStart(row, { dataTransfer: { setData, effectAllowed: '' } });
+
+    expect(setData).toHaveBeenCalledWith(
+      'DownloadURL',
+      'application/octet-stream:report.md:http://localhost/v1/n/download?path=report.md',
+    );
+  });
+
+  it('节点还没产出目录 → 不接受拖入（没有「产出目录」这个落点）', async () => {
+    openArtifactTab({
+      path: '.', artifact_path: null, artifact_kind: null, result_root: null, entries: [],
+    });
+    await screen.findByText(/no declared output/i);
+
+    const list = document.querySelector('.workspace-list') as HTMLElement;
+    fireEvent.dragOver(list, { dataTransfer: { types: ['Files'], dropEffect: '' } });
+    expect(list.className).not.toContain('is-drop-target');
+
+    fireEvent.drop(list, { dataTransfer: fileDrop(['ref.md']) });
+    expect(api.uploadBrowseFile).not.toHaveBeenCalled();
+  });
+
+  it('产出是单个文件 → 同样不接受拖入（父子落点都不存在）', async () => {
+    openArtifactTab({
+      path: '.', artifact_path: '/tmp/artifacts/node-1/out.md', artifact_kind: 'file',
+      result_root: 'out.md', entries: [],
+    });
+    // 有产出，所以显示的是「目录为空」而不是「没有声明产出」
+    await screen.findByText(/output directory is empty/i);
+    // 不能落的话就别提「可以拖进来」——说了却落不下比不说更糟
+    expect(document.querySelector('.workspace-drop-hint')).toBeNull();
+
+    fireEvent.drop(document.querySelector('.workspace-list') as HTMLElement, {
+      dataTransfer: fileDrop(['ref.md']),
+    });
+    expect(api.uploadBrowseFile).not.toHaveBeenCalled();
+  });
+
+  it('空产出目录 → 提示可以拖进来', async () => {
+    openArtifactTab({
+      path: '.', artifact_path: '/tmp/artifacts/node-1', artifact_kind: 'directory',
+      result_root: 'node-1', entries: [],
+    });
+    await screen.findByText(/output directory is empty/i);
+    expect(document.querySelector('.workspace-drop-hint')).not.toBeNull();
+  });
+});
+

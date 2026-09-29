@@ -2,9 +2,8 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   ArrowLeft,
   ChevronRight,
-  File,
+  Copy,
   FileText,
-  Folder,
   PackageOpen,
   Pause,
   Pencil,
@@ -37,6 +36,8 @@ import { formatBytes } from '../utils/format';
 import { useI18n } from '../i18n';
 import { useAvailableClis } from '../hooks/useAvailableClis';
 import { useMcpCompatWarning } from '../hooks/useMcpCompatWarning';
+import { useWorkspaceDrop } from '../hooks/useWorkspaceDrop';
+import WorkspaceEntryRow from './WorkspaceEntryRow';
 import { CliOptions } from './CliOptions';
 
 type Tab = 'overview' | 'logs' | 'artifact' | 'events';
@@ -109,6 +110,18 @@ const NodeInspector: React.FC = () => {
     roleId: role,
     cliId: cliName || '',
     clis,
+  });
+
+  // 上传完要把当前目录重列一遍。用计数器而不是直接调 load：取数逻辑在下面那个
+  // effect 里（依赖 sessionId/nodeId/tab/path），在这儿复刻一遍就会有两份真相。
+  const [workspaceReload, setWorkspaceReload] = useState(0);
+
+  const drop = useWorkspaceDrop({
+    sessionId: sessionId ?? '',
+    scope: 'results',
+    nodeId: selectedNodeId ?? undefined,
+    currentDir: workspacePath,
+    onUploaded: () => setWorkspaceReload((count) => count + 1),
   });
 
   useEffect(() => {
@@ -222,7 +235,7 @@ const NodeInspector: React.FC = () => {
       })
       .finally(() => { if (!cancelled) setWorkspaceBusy(false); });
     return () => { cancelled = true; };
-  }, [sessionId, selectedNodeId, tab, workspacePath]);
+  }, [sessionId, selectedNodeId, tab, workspacePath, workspaceReload]);
 
   useEffect(() => {
     if (!sessionId || tab !== 'events') return;
@@ -433,6 +446,17 @@ const NodeInspector: React.FC = () => {
     setWorkspaceFile(null);
     setWorkspacePath(pathSegments.slice(0, index + 1).join('/'));
   };
+
+  /**
+   * 有产出目录才谈得上「落」。
+   *
+   * 两种没有目录的形态（后端 `_get_node_result_root` 的两种返回）：`artifact_path` 为空
+   * （还没跑、或没声明产出）→ `result_root === null`；产出本身是**单个文件** →
+   * `artifact_kind === 'file'`。两种都不渲染落点 —— 落到别处就是所见非所得，
+   * 而用户定的正是「落在产出目录」。
+   */
+  const canAcceptDrop = Boolean(workspace?.artifact_path) && workspace?.artifact_kind !== 'file';
+
   const editable = node.status === NodeStatus.Waiting || node.status === NodeStatus.Paused;
 
   return (
@@ -544,7 +568,28 @@ const NodeInspector: React.FC = () => {
             <div className="workspace-breadcrumbs">
               <button onClick={() => { setWorkspacePath(''); setWorkspaceFile(null); }} disabled={!workspacePath && !workspaceFile}>{t('inspector.output')}</button>
               {pathSegments.map((segment, index) => <React.Fragment key={`${segment}-${index}`}><ChevronRight size={13} /><button onClick={() => goToWorkspacePath(index)}>{segment}</button></React.Fragment>)}
+              {canAcceptDrop && (
+                <button
+                  className="icon-button workspace-breadcrumb-action"
+                  title={t('files.copyPath')}
+                  aria-label={t('files.copyPath')}
+                  onClick={() => drop.onCopyPath(workspacePath)}
+                >
+                  <Copy size={12} />
+                </button>
+              )}
             </div>
+            {drop.progress && (
+              <div className="workspace-drop-status">
+                {t('files.uploading', { done: drop.progress.done, total: drop.progress.total })}
+              </div>
+            )}
+            {!!drop.failures.length && (
+              <div className="workspace-drop-failures">
+                {drop.failures.slice(0, 3).map((item) => <div key={item.name}>{item.name}: {item.reason}</div>)}
+                {drop.failures.length > 3 && <div>+{drop.failures.length - 3}</div>}
+              </div>
+            )}
             {workspaceError && (
               <div className="inspector-error">
                 <span className="inspector-error-message">{workspaceError}</span>
@@ -562,15 +607,50 @@ const NodeInspector: React.FC = () => {
             {workspaceBusy && <div className="detail-empty"><RefreshCw size={15} className="spin" /> {t('inspector.loadingOutput')}</div>}
             {!workspaceBusy && workspaceFile && (
               <div className="workspace-preview">
-                <div className="workspace-preview-header"><button className="secondary-button" onClick={() => setWorkspaceFile(null)}><ArrowLeft size={14} /> {t('common.back')}</button><span>{workspaceFile.path}</span><small>{formatBytes(workspaceFile.size)}</small></div>
+                <div className="workspace-preview-header">
+                  <button className="secondary-button" onClick={() => setWorkspaceFile(null)}><ArrowLeft size={14} /> {t('common.back')}</button>
+                  <span>{workspaceFile.path}</span>
+                  <small>{formatBytes(workspaceFile.size)}</small>
+                  <button
+                    className="icon-button"
+                    title={t('files.copyPath')}
+                    aria-label={t('files.copyPath')}
+                    onClick={() => drop.onCopyPath(workspaceFile.path)}
+                  >
+                    <Copy size={13} />
+                  </button>
+                </div>
                 <pre>{workspaceFile.content}</pre>
               </div>
             )}
             {!workspaceBusy && !workspaceFile && workspace && (
-              <div className="workspace-list">
+              <div
+                className={`workspace-list${canAcceptDrop && drop.dropTarget === workspacePath ? ' is-drop-target' : ''}`}
+                {...(canAcceptDrop ? drop.containerProps : {})}
+              >
                 {workspace.artifact_path === null && <div className="detail-empty">{t('inspector.noDeclaredOutput')}</div>}
-                {workspace.artifact_path !== null && !workspace.entries.length && <div className="detail-empty">{t('inspector.emptyOutputDir')}</div>}
-                {workspace.entries.map((entry) => <button className="workspace-entry" key={entry.path} onClick={() => openWorkspaceEntry(entry)}><span className="workspace-entry-icon">{entry.type === 'directory' ? <Folder size={16} /> : <File size={16} />}</span><span className="workspace-entry-name">{entry.name}</span><small>{entry.type === 'directory' ? t('outputs.folder') : formatBytes(entry.size)}</small></button>)}
+                {/* 空目录提示与「能不能落」无关：产出是单个文件时照样要说明这里是空的。 */}
+                {workspace.artifact_path !== null && !workspace.entries.length && (
+                  <div className="detail-empty">
+                    {t('inspector.emptyOutputDir')}
+                    {canAcceptDrop && <div className="workspace-drop-hint">{t('files.dropHint')}</div>}
+                  </div>
+                )}
+                {workspace.entries.map((entry) => (
+                  <WorkspaceEntryRow
+                    key={entry.path}
+                    entry={entry}
+                    sessionId={sessionId}
+                    scope="results"
+                    nodeId={node.id}
+                    onOpen={(target) => { void openWorkspaceEntry(target); }}
+                    onCopyPath={(target) => drop.onCopyPath(target.path)}
+                    onReveal={(target) => drop.onReveal(target.path)}
+                    dropTarget={canAcceptDrop ? drop.dropTarget : null}
+                    onDropTargetChange={drop.setDropTarget}
+                    onDrop={canAcceptDrop ? drop.upload : () => undefined}
+                  />
+                ))}
               </div>
             )}
           </div>

@@ -582,6 +582,17 @@ export const en: Dict = {
   'outputs.folder': 'Folder',
   'outputs.listingTruncated': 'Listing truncated at 1000 entries.',
 
+  // ---- 可浏览根：复制路径 / 拖入 / 拖出（V3-2.3） ----
+  'files.copyPath': 'Copy path',
+  'files.pathCopied': 'Path copied',
+  'files.copyFailed': 'Copy failed, please copy manually',
+  'files.revealInFinder': 'Reveal in Finder',
+  'files.dropHint': 'Drag files or folders here',
+  'files.dropTooMany': 'At most {limit} files per drop; the rest were ignored',
+  'files.uploading': 'Uploading {done}/{total}…',
+  'files.uploadedRenamed': 'Uploaded {count} file(s) ({renamed} renamed to avoid a clash)',
+  'files.uploadPartial': '{ok} uploaded, {failed} failed',
+
   // ---- Session workspace ----
   'workspace.title': 'Workspace settings',
   'workspace.desc': 'Configure the workspace and project directory for this session.',

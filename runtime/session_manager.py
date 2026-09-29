@@ -20,6 +20,7 @@ from runtime.models import NUM_CCS_TIERS
 from runtime.persistence import Persistence
 from runtime.runtime import Runtime
 from runtime.sse_manager import SSEManager
+from runtime.workspace_resolver import resolve_shared_workspace
 
 
 _SESSION_CONFIG_KEYS = {
@@ -662,6 +663,22 @@ class SessionManager:
         workspace_dir = os.path.abspath(os.path.expanduser(workspace_dir))
         metadata.workspace_root = workspace_dir
         os.makedirs(workspace_dir, exist_ok=True)
+        # 派生的共享根（{workspace_root}/shared）在这里建。
+        #
+        # 为什么必须有人建它：共享根原先只在「节点开跑」（runtime._prepare_node_config）
+        # 和「连终端」（session_server 的 PTY 端点）时被懒创建，而列目录与解析路径这两条
+        # 读路径都假定它已经在了 —— 于是一个还没跑过节点的会话里，「复制共享区路径」
+        # 会拿到一个 404，而同一时刻的列目录却显示一个空目录。两边口径不一致。
+        # 它是框架自己的地盘，就在上面那层底下，跟 workspace_dir 一样属于「会话一建立
+        # 就该存在」的东西，所以和 workspace_dir 并排建。
+        #
+        # 显式配置的外部项目目录**不在这里建**：_restore_sessions 会给每个历史会话都跑
+        # 一遍 _build_handle，若那个外部目录只是暂时不可达（比如网络盘没挂上），在它的
+        # 位置造一个空目录会把真正的挂载点盖住，还会把「路径配错了」伪装成「建好了」。
+        # 那条路按 validate_shared_workspace 的约定，由 create_session / update_settings
+        # 这两个「调用方」负责 —— 那两个入口都是用户明确在指定一个目录。
+        if not metadata.shared_workspace:
+            os.makedirs(resolve_shared_workspace(workspace_dir), exist_ok=True)
         runtime = Runtime(
             registry=self.registry,
             persistence=Persistence(os.path.join(session_dir, "graph.json")),

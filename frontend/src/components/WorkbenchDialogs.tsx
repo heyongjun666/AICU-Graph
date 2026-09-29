@@ -294,7 +294,9 @@ export const NewNodeDialog: React.FC<NodeDialogProps> = ({
           }}><option value="">{t('dialog.noParent')}</option>{parentCandidates.map((candidate) => <option key={candidate.id} value={candidate.id}>{candidate.label}</option>)}</select></label>
           <label>{t('dialog.cli')}<select value={cliName} onChange={(event) => setCliName(event.target.value as NodeConfig['cli_name'])}><CliOptions clis={clis} defaultCli={defaultCli} /></select>{mcpWarning && <div className="form-notice is-warning">{mcpWarning}</div>}</label>
         </div>
-        <label>{t('dialog.task')}<textarea autoFocus value={task} onChange={(event) => setTask(event.target.value)} rows={5} placeholder={t('dialog.taskPlaceholder')} /></label>
+        {/* 任务正文通常是一整段需求（背景 + 验收标准，几屏长）。默认 5 行只够看个开头，
+            写到一半就没法通读自己写的东西了。这里给足高度。 */}
+        <label>{t('dialog.task')}<textarea autoFocus value={task} onChange={(event) => setTask(event.target.value)} rows={14} placeholder={t('dialog.taskPlaceholder')} /></label>
         <div className="node-dialog-section"><div className="node-dialog-section-title">{t('dialog.dependencies')}</div>{candidateStatus === 'loading' && <div className="picker-status">{t('dialog.loadingCandidates')}</div>}{candidateStatus === 'error' && <div className="picker-status is-error">{candidateError || t('dialog.candidatesLoadFailed')}</div>}<SearchCheckboxPicker
           items={dependencyCandidates.map((candidate) => ({ id: candidate.id, label: candidate.label, detail: candidate.task, description: candidate.task }))}
           selected={dependencies}

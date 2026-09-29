@@ -306,7 +306,7 @@ class TestEventContextBlock:
         mgr = Manager(context=ctx, aicu_instance=_Stub({"steps": []}))
         prompt = mgr._build_expand_prompt(ctx)
         assert "## 📥 待处理事件上下文 (Event)" not in prompt
-        assert "## 你的任务(本节点原始 Task 描述)" in prompt
+        assert "## 你的任务(个人当前目标)" in prompt
 
     def test_block_injected_from_event_inbox_fallback(self, tmp_path):
         """pending_context 为空但 inbox 有事件 → fallback 渲染事件上下文块。

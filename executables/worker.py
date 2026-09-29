@@ -437,7 +437,13 @@ class Worker(Executable):
         node = ctx.node
         runtime = ctx.runtime
 
-        # ----- 项目目标 -----
+        # ----- 项目目标（团队目标） -----
+        # 爬父链取最顶层祖先的 task —— 那是整棵树的团队目标。
+        #
+        # **全文注入，不截断。** 这里曾经是 `root_task[:300]`：砍在半句上，而且没有任何
+        # 标记说明被砍过 —— 节点会把一个残缺的目标当成目标本身，它无从察觉。目标该有多长
+        # 由写这个任务的人决定，不是注入点能替他截的。再加上下面「## 你的任务」里的个人
+        # 当前任务，两级目标连在一起给，节点才知道自己这一步在为什么服务。
         root_task = ""
         cursor_id = node.parent_id
         while cursor_id is not None:
@@ -447,10 +453,14 @@ class Worker(Executable):
             root_task = ancestor.task or ""
             cursor_id = ancestor.parent_id
         if root_task:
+            # 不再用 `**...**` 包住任务正文：多段落文本套粗体会把 markdown 撑坏。
             parts.append(
-                "## 项目目标\n\n"
-                f"你参与的项目的顶层目标为: **{root_task[:300]}**。\n"
-                "请围绕此目标开展工作，所有产出须服务于该目标。"
+                "## 项目目标（团队目标）\n\n"
+                "你参与的项目的顶层目标为:\n\n"
+                f"{root_task}\n\n"
+                "请围绕此目标开展工作，所有产出须服务于该目标。\n"
+                "以上是**团队目标**；下方「## 你的任务（个人当前目标）」"
+                "是你在其中负责的当前任务。"
             )
 
         # ----- 依赖节点产出（显式 depends_on 的上游节点） -----
@@ -825,6 +835,20 @@ class Worker(Executable):
         return "\n".join(lines)
 
     @staticmethod
+    def _compose_task_body(task_parts: list[str], task: str) -> str:
+        """拼首轮任务体：上下文前缀 + 分隔线 + 「## 你的任务」+ 本节点 task 全文。
+
+        两级目标在这里合流 —— 前缀里是**团队目标**（`_build_worker_context` 的
+        「## 项目目标（团队目标）」块），末尾是**个人当前目标**（本节点自己的 task）。
+        两处都是全文，不截断，标题上也都点明了自己是哪一级。
+
+        抽成函数只为可测：它是纯字符串拼接，执行路径的行为与原先内联的那一行完全一致。
+        """
+        if not task_parts:
+            return task
+        return "\n\n".join(task_parts) + "\n\n---\n\n## 你的任务（个人当前目标）\n\n" + task
+
+    @staticmethod
     def _build_resume_task_body(
         node: Any,
         task: str,
@@ -1029,9 +1053,7 @@ class Worker(Executable):
             # 首次执行：构建完整上下文
             context_prefix = self._build_worker_context(ctx, codegraph_block=codegraph_block)
             task_parts = [p for p in [routing_prefix, context_prefix] if p]
-            task_body = ctx.node.task
-            if task_parts:
-                task_body = "\n\n".join(task_parts) + "\n\n---\n\n## 你的任务\n\n" + task_body
+            task_body = Worker._compose_task_body(task_parts, ctx.node.task)
 
         # The AICU owns individual CC start/finish/failure events. Worker owns
         # the outer task handoff so the timeline also explains what entered the

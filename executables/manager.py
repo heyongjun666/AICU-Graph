@@ -1125,8 +1125,11 @@ class Manager(Executable):
                 incremental = pending.get("incremental_task") or base_task
                 revise_lines = [_L(ctx, "## 增量续跑任务", "## Incremental Continue Task"), ""]
                 if original:
+                    # 原任务同样给全文(这里曾是 original[:300]). 它与下面的增量任务是
+                    # 一对 —— 要让 Manager 判断"哪些既有子节点能覆盖这个增量", 被砍掉
+                    # 后半段的那份原任务是没法比的. 与 incremental 的写法保持一致.
                     revise_lines.append(
-                        f"- {_L(ctx, '原任务', 'Original task')}: {original[:300]}"
+                        f"- {_L(ctx, '原任务', 'Original task')}: {original}"
                     )
                 revise_lines.append(
                     f"- {_L(ctx, '增量任务', 'Incremental task')}: {incremental}"
@@ -1153,7 +1156,11 @@ class Manager(Executable):
                 parts.append("\n".join(revise_lines))
         parts.append(codegraph_block)
         parts.append(
-            f"{_L(ctx, '## 你的任务(本节点原始 Task 描述)', '## Your Task (original Task description of this node)')}\n\n{base_task}"
+            # 标题从「(本节点原始 Task 描述)」改成「(个人当前目标)」: node.task 是
+            # **可变**的「现在该执行什么」槽位, 经一次 Revise 后它就是增量任务, 而真正的
+            # 原任务由上面的「## 增量续跑任务」块单独标为「原任务」给出。旧标题管后者叫
+            # 「原始」, 会在同一条 prompt 里和那个「原任务」互相打脸。顺便与团队目标对称。
+            f"{_L(ctx, '## 你的任务(个人当前目标)', '## Your Task (your current personal goal)')}\n\n{base_task}"
         )
         return sep.join(parts)
 
@@ -1419,6 +1426,28 @@ class Manager(Executable):
                  "> 特别注意「已完成」状态的兄弟分支产物可被复用以避免重复劳动; "
                  "若兄弟声明了 shared_workspace，其协作区路径在快照中给出，可直接复用共享分区真实产物.", ""]
 
+        # ---- Part0: 团队目标(根节点 task 全文) ----
+        # 祖先链里每个节点都截到 130 字 —— 那是一条**索引**, 不是正文, 用在链上合适.
+        # 但目标不能只给 130 字: Manager 唯一的职责就是判断「派哪些角色、切成哪几步」,
+        # 它必须看全目标; 而且层级越深, 链上那段摘要离真正的目标越远(对嵌套 Manager 来说
+        # 那已经是"某一步的 step 描述"了). 所以根节点的 task 单独成段给全文, 不截断.
+        # 本节点自己就是 root 时 root_task 为空, 该段跳过 —— 那种情况下本节点的 task
+        # 本身就是团队目标, 见 prompt 末尾的「## 你的任务」.
+        root_task = ""
+        cur = me
+        seen_root = {me.id}
+        while cur.parent_id and cur.parent_id not in seen_root:
+            par = runtime.get_node(cur.parent_id)
+            if par is None:
+                break
+            seen_root.add(par.id)
+            root_task = par.task or ""
+            cur = par
+        if root_task:
+            lines.append("### 〇、团队目标(根节点任务全文)")
+            lines.append(root_task)
+            lines.append("")
+
         # ---- Part1: 祖先链 (从root到本节点的直系上级)
         ancestors = []
         cur = me
@@ -1450,9 +1479,15 @@ class Manager(Executable):
             indent_me = "  " * my_depth
             my_role = getattr(me, 'role', '-') or '-'
             my_step = getattr(me, 'step_ref', '-') or '-'
-            my_tt = self._truncate(getattr(me, 'task',''), 130)
+            # 本节点自己的 task 也给全文(保留换行并逐行缩进, 维持树的形状).
+            # 链上**别人**的任务当索引用, 截断无妨; 但"我这一步要干什么"是 Manager 做规划
+            # 最需要的信息, 砍在 130 字上等于让它在信息不完整的情况下决策.
+            # 标签与 Part0 的「团队目标」成对: 一个是团队级, 一个是个人级.
+            my_task = (getattr(me, 'task', '') or '').strip()
             lines.append(f"{indent_me}← [你在这里 d{my_depth}] [MGR|role={my_role}|step={my_step}]")
-            lines.append(f"{indent_me}      your_task: {my_tt}")
+            lines.append(f"{indent_me}      个人当前目标:")
+            for task_line in (my_task.splitlines() or [""]):
+                lines.append(f"{indent_me}      {task_line}")
         lines.append("")
 
         # ---- Part2: 同父兄弟节点列表 ----

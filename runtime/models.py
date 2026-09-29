@@ -596,12 +596,20 @@ class Node(_JsonSerializable):
                 old = self.__dict__["status"]
                 # 自转换（如 __post_init__ 中 string→enum）放行
                 if value != old:
-                    # 终端状态通常不可转换，但允许 FAILED/STOPPED/COMPLETED → WAITING/READY 的原地重试/路由重激活
+                    # 终端状态通常不可转换，但允许：
+                    #   1) FAILED/STOPPED/COMPLETED → WAITING/READY 的原地重试/路由重激活；
+                    #   2) COMPLETED/FAILED → STOPPED 的「被替代」语义（submit_fix_plan
+                    #      角色不匹配时新建替代节点，原节点退出评审，不再参与评估）。
                     if old in (NodeStatus.COMPLETED, NodeStatus.FAILED, NodeStatus.STOPPED):
-                        if not (
+                        reactivate_ok = (
                             old in (NodeStatus.FAILED, NodeStatus.STOPPED, NodeStatus.COMPLETED)
                             and value in (NodeStatus.WAITING, NodeStatus.READY)
-                        ):
+                        )
+                        supersede_ok = (
+                            old in (NodeStatus.COMPLETED, NodeStatus.FAILED)
+                            and value == NodeStatus.STOPPED
+                        )
+                        if not (reactivate_ok or supersede_ok):
                             raise ValueError(
                                 f"Cannot transition from terminal state '{old.value}' "
                                 f"to '{value.value}'"

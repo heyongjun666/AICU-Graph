@@ -24,7 +24,7 @@ import logging
 import os
 from typing import Any, Optional
 
-from runtime.models import EventMessage
+from runtime.models import EventMessage, NodeStatus
 
 logger = logging.getLogger(__name__)
 
@@ -288,6 +288,10 @@ class AICURouter:
             status = (
                 node.status.value if hasattr(node.status, "value") else str(node.status)
             )
+            # 废弃/已停节点（superseded → Stopped，或用户手动停止）不可再路由：
+            # 它不参与后续评估，事件投进去也不会被 Scheduler 消费（非可重激活态），纯浪费一次路由与投递。
+            if status == NodeStatus.STOPPED.value:
+                continue
             out.append({
                 "id": node.id,
                 "step_ref": node.step_ref or "",

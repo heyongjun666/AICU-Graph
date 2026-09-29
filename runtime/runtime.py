@@ -765,11 +765,15 @@ class Runtime(RuntimeGateway, SchedulerDelegate):
             调度器原地重新拉起。worker 依据 _aicu_cache + --resume 续接原会话，保留
             节点工作区与产出（复用"路由激活"的注入通道，但语义为 Manager review 修复）。
 
-        角色兼容规则（修复能力保障）：
+        角色兼容规则（修复能力保障，exec_type 不可翻转）：
           - fix.role 为空或等于子节点当前角色 → 原地续接（复用原会话，最有价值）
-          - fix.role 为其他角色（能力集不同，原对象无能力修）→ 仍不删除节点：
-            原地更新 role/exec_type 到修复角色 + 清除 _aicu_cache（新能力 → 新会话），
-            保留节点身份/工作区/历史。代码层面不存在任何"删除子节点"的机制。
+          - fix.role 为同类其他角色（worker→worker 或 manager→manager，能力集不同）
+            → 不修改原节点：新建同类替代节点承担修复，原节点 STOPPED 退出评审
+            （review 跳过 STOPPED）。身份/子树/历史/产出原样保留，代码层面不存在
+            任何"删除子节点"的机制。
+          - fix.role 跨类型（manager→worker 或 worker→manager）→ 收敛回原节点角色、
+            原地续接：exec_type 是结构不变量，review 修复绝不翻转，否则有子节点的
+            manager 会被降级成 worker、子树悬空、评审卡死。
 
         Args:
             parent_node_id: Manager 节点 ID。
@@ -777,7 +781,7 @@ class Runtime(RuntimeGateway, SchedulerDelegate):
             iteration_count: 当前迭代次数。
 
         Returns:
-            受影响的子节点列表（全部为原地续接的原节点）。
+            受影响的子节点列表（原地续接的原节点，或角色不匹配时新建的替代节点）。
         """
         # 1. 捕获失败子节点共享配置（原地续接/重建都不得丢失
         #    shared_workspace/output_path，否则失败的共享 worker 会退出共享组）
@@ -811,15 +815,19 @@ class Runtime(RuntimeGateway, SchedulerDelegate):
                     config[key] = old_cfg[key]
             child = failed_by_ref.get(a["step_ref"])
             fix_role = fix.get("role") or (child.role if child else "default")
-            # exec_type 与角色类型对齐（PlanValidator exec_type↔role 一致性）：
-            # 修复 Manager 子节点（如 engineering_coord）必须保留 exec_type="manager"，
-            # 否则 PlanValidationError 会拒绝修复计划、Manager 反复 FAILED 到 max_iterations。
-            # 显式指定了角色时按角色类型对齐（manager 角色→manager，worker 角色→worker）；
-            # default/未知角色沿用子节点 exec_type 作为中性默认。
+            # exec_type 是节点的结构不变量：review 修复绝不翻转 manager↔worker。
+            # 有原节点 → 固定沿用 child.exec_type（替代节点也只允许同类角色内切换）。
+            # 仅 child 为 None（step_ref 无匹配，视为新建）时才按角色类型推导 exec_type。
             fix_exec_type = child.exec_type if child else "worker"
             if fix.get("role"):
                 role_type = self._classify_role_type(fix_role)
-                if role_type is not None:
+                if child is not None:
+                    # 模型给 manager 配了 worker 角色（或反之）→ 收敛回原角色保持同类，
+                    # 杜绝「manager→worker 降级」让有子节点的 manager 子树悬空
+                    # （_check_manager_children_completed 因 parent 非 manager 提前返回 → 评审卡死）。
+                    if role_type is not None and role_type != child.exec_type:
+                        fix_role = child.role or "default"
+                elif role_type is not None:
                     fix_exec_type = role_type
             step = Step(
                 step_id=a["step_ref"],
@@ -848,8 +856,8 @@ class Runtime(RuntimeGateway, SchedulerDelegate):
             [s.config for s in fix_steps] + preserved_configs
         )
 
-        # 3. 全部失败子节点原地续接（角色变化也原地：更新 role/exec_type + 清缓存）。
-        #    role 不变 → 复用原 CC 会话（--resume）；role 变 → 新能力开新会话。
+        # 3. 失败子节点续接：role 不变 → 原地续接（复用原 CC 会话 --resume）；
+        #    role 变化（能力不匹配）→ 新建替代节点 + 原节点 STOPPED（不修改原节点）。
         affected: list[Node] = []
         for a, step in zip(failed_assessments, fix_steps):
             ref = a["step_ref"]
@@ -874,16 +882,68 @@ class Runtime(RuntimeGateway, SchedulerDelegate):
                 updates["task_history"] = history
             role_changed = child is not None and step.role != child.role
             if role_changed:
-                updates["role"] = step.role
-                updates["exec_type"] = step.exec_type
-                # 新能力开新会话：清除缓存，worker.run() 将新建会话而非 --resume
-                # （与 _reactivate_reused_worker 的 role 变更语义一致）。
-                try:
-                    from executables.worker import Worker
-                    with Worker._aicu_cache_lock:
-                        Worker._aicu_cache.pop(child.id, None)
-                except Exception:
-                    pass
+                # 同类角色切换（worker→worker 或 manager→manager，能力集不同）：
+                # 不修改现有节点的 role/exec_type（历史缺陷：原地降级会让有子节点的
+                # manager 变成「worker 的 children」悬空结构，破坏「worker 不展开」
+                # 不变量）。改为新建一个节点（step.role，exec_type 沿用原节点）承担
+                # 修复，原节点标记 STOPPED 退出评审（review 跳过 STOPPED），
+                # 身份/子树/历史/产出原样保留，不再被 reactivate。
+                # 跨类型（manager↔worker）已在 fix_steps 构造处收敛，不会走到这里。
+                new_cfg = dict(child.config or {})
+                if step.config:
+                    new_cfg.update(step.config)
+                new_fix_ctx = dict(fix_ctx)
+                new_fix_ctx["activation_reason"] = (
+                    f"Manager review 第 {iteration_count} 轮发现产出缺陷，且原节点"
+                    f"角色 '{child.role}' 无能力修复（需 '{step.role}' 角色），故"
+                    "新建本节点承担修复；原节点已停用，请独立完成修复任务。"
+                )
+                new_node = Node(
+                    id=str(uuid.uuid4()),
+                    parent_id=parent_node_id,
+                    exec_type=step.exec_type,
+                    role=step.role,
+                    task=step.task,
+                    task_summary=step.task_summary,
+                    config=new_cfg,
+                    status=NodeStatus.WAITING,
+                    step_ref=f"{ref}_fix{iteration_count}",
+                    pending_context=new_fix_ctx,
+                )
+                new_node.config = self._prepare_node_config(
+                    new_node.id, new_node.config, parent_node_id,
+                )
+                self.graph.add_node(new_node)
+                self.graph.add_edge(Edge(
+                    id=str(uuid.uuid4()),
+                    type=EdgeType.PARENT,
+                    from_node=parent_node_id,
+                    to_node=new_node.id,
+                ))
+                # Transfer scheduling dependencies, not organizational/history edges.
+                # Do this before STOPPED so downstream nodes follow the repair rather
+                # than remaining blocked on the retired node forever.
+                for edge in self.graph.all_edges():
+                    if edge.type != EdgeType.DEPENDENCY:
+                        continue
+                    if child.id not in (edge.from_node, edge.to_node):
+                        continue
+                    self.graph.remove_edge(edge.id)
+                    self.graph.add_edge(Edge(
+                        id=edge.id,
+                        type=edge.type,
+                        from_node=new_node.id if edge.from_node == child.id else edge.from_node,
+                        to_node=new_node.id if edge.to_node == child.id else edge.to_node,
+                    ))
+                self.graph.update_node(child.id, status=NodeStatus.STOPPED)
+                affected.append(new_node)
+                logger.info(
+                    "submit_fix_plan: role mismatch for '%s' (%s→%s) — created "
+                    "replacement '%s' (id=%s); original '%s' marked STOPPED",
+                    ref, child.role, step.role, new_node.step_ref,
+                    new_node.id[:8], child.id[:8],
+                )
+                continue
             if step.config:
                 merged = dict(child.config or {}) if child is not None else {}
                 merged.update(step.config)
@@ -898,10 +958,9 @@ class Runtime(RuntimeGateway, SchedulerDelegate):
             self.graph.update_node(child.id, **updates)
             affected.append(child)
             logger.info(
-                "submit_fix_plan: in-place continuation of '%s' (role=%s%s), "
+                "submit_fix_plan: in-place continuation of '%s' (role=%s), "
                 "injecting repair context (iteration=%d)",
                 child.id[:8], child.role,
-                "→" + step.role if role_changed else "",
                 iteration_count,
             )
 

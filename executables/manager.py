@@ -329,6 +329,11 @@ class Manager(Executable):
         children_info: list[dict] = []
         artifacts_for_file: dict[str, str] = {}
         for child in children:
+            # 被替代节点（submit_fix_plan 因角色不匹配新建节点后标记 STOPPED）不再
+            # 参与评审：它已退出活跃评估，评审只面对替代节点与其余存活子节点，
+            # 避免 STOPPED 原节点反复被判失败 → 修复 → 再失败的评审死循环。
+            if child.status == NodeStatus.STOPPED:
+                continue
             step_ref = child.step_ref or child.id
             child_cfg = child.config or {}
             children_info.append({
@@ -373,6 +378,9 @@ class Manager(Executable):
                 assessments, parse_status = self._parse_review_assessments(
                     repaired_content, children_info
                 )
+                if parse_status == "parsed":
+                    # 报告与实际采用的修复判定同源；降级时仍保留原始内容。
+                    review_content = repaired_content
             if parse_status == "unparseable":
                 assessments, parse_status = self._degrade_review(raw_output, children_info)
 

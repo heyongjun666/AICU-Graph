@@ -315,24 +315,33 @@ class TestRuntimeWiring:
         )
         assert node.role == "engineering_coord"
 
-    def test_submit_fix_plan_derives_exec_type_from_role(self, runtime):
-        """C: exec_type 由 fix.role 类型推导（manager 角色→manager，worker 角色→worker）。
+    def test_submit_fix_plan_preserves_exec_type_despite_manager_role_fix(self, runtime):
+        """C: exec_type 是结构不变量，review 修复不因 fix.role 类型翻转 manager↔worker。
 
-        回归根因：修复 Manager 子节点（engineering_coord）曾被硬编码为 exec_type="worker"
-        → PlanValidationError → Manager 反复 FAILED 到 max_iterations。
-        现在 worker 子节点被指定 manager 角色 → exec_type 对齐为 manager，原地续接合法
-        （原地更新 role/exec_type，不删除节点）。
+        回归根因：修复子节点曾被按 fix.role 类型推导 exec_type —— worker 子节点被指定
+        manager 角色会升级成 manager，manager 子节点被指定 worker 角色会降级成 worker
+        （有子节点时子树悬空）。现改为：有原节点时固定沿用 child.exec_type，跨类型
+        fix.role 收敛回原角色、原地续接（不新建替代节点、不 STOPPED）。
         """
         root = runtime.submit_root_manager(task="root")
-        runtime.inject_plan(root, _plan(_step("failed", exec_type="worker", role="dev_member")))
+        old = runtime.inject_plan(
+            root, _plan(_step("failed", exec_type="worker", role="dev_member"))
+        )[0]
         new_nodes = runtime.submit_fix_plan(
             root,
             [{"step_ref": "failed", "fix": {"role": "engineering_coord", "task": "replan"}}],
             1,
         )
+        # 原地续接（非新建替代节点）：worker 保持 worker，未被升级成 manager
         assert len(new_nodes) == 1
-        assert new_nodes[0].exec_type == "manager"
-        assert new_nodes[0].role == "engineering_coord"
+        assert new_nodes[0].id == old.id
+        assert new_nodes[0].exec_type == "worker"
+        assert new_nodes[0].role == "dev_member"
+        assert new_nodes[0].status == NodeStatus.READY
+        original = runtime.get_node(old.id)
+        assert original is not None
+        assert original.exec_type == "worker"
+        assert original.role == "dev_member"
 
     def test_submit_fix_plan_rejects_bad_role_before_mutation(self, runtime):
         """非法角色（不在任何 Manager/Worker 角色集）在任一图变更前拦截。"""

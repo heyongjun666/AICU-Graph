@@ -264,12 +264,12 @@ class TestFixPlanPreservesSharedConfig:
         assert new.artifact_path is None
         assert new.error is None
 
-    def test_role_change_continues_in_place(self, runtime):
-        """A1: fix.role 与子节点角色不同（能力集不同）→ 原地续接（不删除节点）。
+    def test_role_change_creates_replacement_node(self, runtime):
+        """A1: fix.role 与子节点角色不同（能力集不同）→ 新建替代节点，不修改原节点。
 
         新架构原则：清理子节点是严重操作，只有用户在前端手动操作；代码层面不存在
-        任何删除子节点的机制。角色变化 = 新能力 → 原地更新 role/exec_type（并清
-        _aicu_cache 开新会话），保留节点身份/工作区/历史，绝不删除重建。
+        任何删除子节点的机制。角色变化 = 新能力 → 新建一个节点（fix.role/exec_type）
+        承担修复，原节点标记 STOPPED 退出评审，身份/工作区/历史原样保留。
         """
         root = runtime.submit_root_manager("app")
         nodes = runtime.inject_plan(root, ExecutionPlan(steps=[
@@ -284,18 +284,24 @@ class TestFixPlanPreservesSharedConfig:
         )
         assert len(new_nodes) == 1
         new = new_nodes[0]
-        # 原地续接：同一节点身份保留，role/exec_type 更新到修复角色
-        assert new.id == old.id
+        # 新建替代节点：新身份、新角色，等待调度（WAITING）
+        assert new.id != old.id
         assert new.role == "test"
         assert new.task == "verify"
-        assert new.status == NodeStatus.READY
-        # 共享配置仍保留
+        assert new.status == NodeStatus.WAITING
+        # 替代节点继承原节点共享分区（写同一交付区）
         assert new.config["shared_workspace"] == "app"
         assert new.config["output_path"] == "backend"
-        # 原节点未被删除（仍为 root 子节点）
+        # 原节点未被删除、role/exec_type 原样保留，仅标记 STOPPED
+        old_after = runtime.get_node(old.id)
+        assert old_after is not None
+        assert old_after.role == "dev_member"
+        assert old_after.status == NodeStatus.STOPPED
+        # root 现有两个子节点：STOPPED 原节点 + 新替代节点
         child_ids = {c.id for c in runtime.graph.children(root)}
         assert old.id in child_ids
-        assert len(child_ids) == 1
+        assert new.id in child_ids
+        assert len(child_ids) == 2
 
 
 # ============================================================================

@@ -444,6 +444,62 @@ class TestSubmitFixPlanRewindsParent:
         )
         assert len(affected) == 1
 
+    def test_submit_fix_plan_manager_keeps_exec_type_despite_worker_role_fix(self, tmp_path):
+        """有子节点的 manager 修复时 fix.role 给成 worker 角色 → 收敛回原角色原地续接（不降级）。
+
+        回归：review 模型给 manager 子节点（engineering_coord）配了 worker 角色（code）时，
+        旧实现按角色类型推导 exec_type → 新建 worker 替代节点 + STOP 原 manager，让
+        backend_impl 的子树（layer）悬空，破坏「worker 不展开」不变量。
+        现改为：exec_type 是结构不变量，跨类型 fix.role 收敛回原角色，manager 原地续接
+        （身份/子树/exec_type 原样保留，仅重置为 READY 并注入修复上下文）。
+        """
+        runtime = _make_runtime(tmp_path)
+        # 注入角色集，使 _classify_role_type 能把 code 判为 worker 角色
+        runtime._manager_role_ids = {"engineering_coord"}
+        runtime._worker_role_ids = {"code", "dev"}
+
+        parent = Node(
+            id="root", exec_type="manager", role="engineering_coord",
+            task="root task", config={}, status=NodeStatus.WAITING,
+            manager_phase="waiting", step_ref="root",
+        )
+        mgr_child = Node(
+            id="backend_impl", exec_type="manager", role="engineering_coord",
+            task="backend", config={}, status=NodeStatus.FAILED, parent_id="root",
+            step_ref="backend_impl", task_summary="backend summary",
+        )
+        grandchild = Node(
+            id="layer", exec_type="worker", role="dev", task="layer", config={},
+            status=NodeStatus.COMPLETED, parent_id="backend_impl", step_ref="layer",
+        )
+        for n in (parent, mgr_child, grandchild):
+            runtime.graph.add_node(n)
+        runtime.graph.add_edge(
+            Edge(id="e1", type=EdgeType.PARENT, from_node="root", to_node="backend_impl")
+        )
+        runtime.graph.add_edge(
+            Edge(id="e2", type=EdgeType.PARENT, from_node="backend_impl", to_node="layer")
+        )
+
+        affected = runtime.submit_fix_plan(
+            "root",
+            [{"step_ref": "backend_impl", "reason": "code defect",
+              "fix": {"role": "code", "task": "fix the code"}}],
+            1,
+        )
+
+        # 原地续接（非新建替代节点）：返回原节点本身，身份不变
+        assert len(affected) == 1
+        assert affected[0].id == "backend_impl"
+        # exec_type / role 未被降级：仍是 manager/engineering_coord
+        assert affected[0].exec_type == "manager"
+        assert affected[0].role == "engineering_coord"
+        # 修复任务注入 + 重新激活为 READY（而非 STOPPED）
+        assert affected[0].task == "fix the code"
+        assert affected[0].status == NodeStatus.READY
+        # 子树原样保留
+        assert runtime.graph.children("backend_impl")
+
 
 # ============================================================================
 # Fix 2b: rewind_parent_chain_for_retry 对 WAITING Manager 也清通知

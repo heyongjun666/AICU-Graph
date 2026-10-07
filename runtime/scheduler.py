@@ -522,13 +522,24 @@ class Scheduler:
         return any(dep.status != NodeStatus.COMPLETED for dep in deps)
 
     def _has_unexpanded_manager(self) -> bool:
-        """是否存在尚未展开且非终态的 Manager，供全局计划先行屏障使用。"""
+        """是否存在当前可展开的 Manager，供计划先行屏障使用。
+
+        ``plan_before_execute`` 只能阻止会绕过仍可执行的 Manager 的 worker。
+        一个尚未展开、但自身依赖尚未满足的 Manager 不能成为屏障：它可能正依赖
+        某个 worker 的产出，若仍把所有 worker 拦住，就会形成
+        ``worker -> manager dependency`` 的调度死锁。依赖门控仍由
+        ``_process_waiting_nodes`` / ``_schedule_ready_nodes`` 负责；这里仅判断
+        是否有一个已经具备展开条件的 Manager。
+        """
         for n in self.graph.all_nodes():
             if n.exec_type != "manager":
                 continue
             if n.manager_phase not in (None, "expand"):
                 continue
-            if n.status in (NodeStatus.WAITING, NodeStatus.READY, NodeStatus.RUNNING):
+            if n.status not in (NodeStatus.WAITING, NodeStatus.READY, NodeStatus.RUNNING):
+                continue
+            deps = self.graph.dependencies(n.id)
+            if all(dep.status == NodeStatus.COMPLETED for dep in deps):
                 return True
         return False
 

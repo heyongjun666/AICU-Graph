@@ -318,6 +318,20 @@ class TestPlanningBarrier:
         assert graph.get_node("W").status == NodeStatus.WAITING, "worker 被屏障拦住"
         assert graph.get_node("M").status == NodeStatus.READY, "manager 自身不受拦"
 
+    def test_worker_released_when_unexpanded_manager_waits_on_dependency(self):
+        """不可展开的 Manager 不得阻塞其依赖链上的 worker。"""
+        graph = Graph()
+        graph.add_node(_make_node("UPSTREAM", status=NodeStatus.WAITING))
+        graph.add_node(self._mgmt("M", phase=ManagerPhase.EXPAND.value))
+        graph.add_node(_make_node("W", status=NodeStatus.WAITING))
+        _add_dep(graph, "UPSTREAM", "M")
+        sched = _make_scheduler(graph)
+
+        sched._process_waiting_nodes()
+
+        assert graph.get_node("M").status == NodeStatus.WAITING
+        assert graph.get_node("W").status == NodeStatus.READY
+
     def test_worker_released_after_managers_expanded(self):
         graph = Graph()
         graph.add_node(self._mgmt("M", phase=ManagerPhase.WAITING.value))

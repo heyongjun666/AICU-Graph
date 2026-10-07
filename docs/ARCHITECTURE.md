@@ -192,7 +192,7 @@ AICU-Graph 的核心运行服务由 `main.py` 启动，使用 `runtime/` 提供�
 - **Graph**：`add_node/update_node/get_node/all_nodes/add_edge/remove_edge/dependencies/children/...`；边按类型分索引；`graph_version` 单调版本号（持久化契约）。Graph 公开提供底层变更操作，Planner/Runtime 是正常业务流程中的主要写入口。
 - **Planner**：
   - `translate(plan, parent_node_id, iteration_count)`：校验 → 分配 UUID → 建 Node（step_ref 在 iteration>0 时追加 `_v{N}` 后缀）→ 建 PARENT 边 → 建 DEPENDENCY 边 → 注入图。它是计划翻译和常规图构建的主要入口。
-  - `translate_revision(plan, parent_node_id, reuse_map)`：增量续跑专用——`reuse_map` 里的 step 复用既有节点，其余新建；只重建"被重新激活子节点之间"的依赖边。
+  - `translate_revision(plan, parent_node_id, reuse_map)`：增量续跑专用——`reuse_map` 里的 step 复用既有节点，其余新建；只重建"被重新激活子节点之间"的依赖边。空计划在此被 `validate_plan` 拒绝（`ExecutionPlan has no steps`）——**"本轮是否需要行动"由 Manager 判断，不由 Runtime 从计划文字推断**：Manager 用 `{"steps": [], "reason": ...}`（决策 0 ①）显式表达"本子树无需行动"，该判定在 Manager 侧兑现为"不派活、不重激活子节点"，不会走到这里；修复激活（`pending_context.collaboration_type="repair"`）不受此豁免，空计划直接失败。
   - `restore(nodes, edges, skip_validation=True, graph_version)`：崩溃恢复路径。
   - `rewind_parent_chain_for_retry(parent_id, clear_notification)`：子节点重试时把已推进的父 Manager 链拉回 WAITING。
   - `validate_plan(plan)`：结构校验（steps 非空、必填字段、exec_type 合法、step_id 唯一、depends_on 引用存在且无环、单层 worker ≤8）。

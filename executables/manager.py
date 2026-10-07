@@ -247,37 +247,66 @@ class Manager(Executable):
         #    仅无子节点（首跑 / 无子节点重试）走全量通道（inject_plan 已拒绝有子节点注入）。
         has_children = bool(ctx.runtime.get_children(ctx.node.id))
         revision = bool(getattr(ctx.node, "pending_revise", False) or has_children)
+        if revision and has_children and not plan.steps:
+            # 空计划 = Manager 自己判定「本轮增量/事件不需要本子树采取行动」：
+            # 事件/增量不属于本节点职责范畴，或既有子节点已覆盖且无需重新执行。
+            # 「是否需要行动」是语义判断，只能由节点（LLM）作出 —— Runtime 不比对
+            # 计划与现有树的文字差异来替它下结论（那会把「模型没规划出新东西」
+            # 误当成「任务已完成」，静默吞掉真实增量）。
+            # 此处只做机械衔接：不派发、不重激活任何子节点。
+            # 前提是名下确有子树可"不行动"；无子节点的空计划仍按原路交回 Runtime，
+            # 由 validate_plan 结构校验（"ExecutionPlan has no steps"）明确报错，
+            # 不留「静默 WAITING 却永远等不到子节点」的口子。
+            pending = getattr(ctx.node, "pending_context", None) or {}
+            if pending.get("collaboration_type") == "repair":
+                # 修复激活的契约：父级评审（另一个独立判断）已经判定存在缺陷，
+                # 本轮必须产出修复动作。空计划在这里不是「要不要做」的判断问题，
+                # 而是计划不成立 —— 明确失败，不留「静默转入 review 后空转迭代」
+                # 的口子（那正是 max_iterations 被耗尽的假象来源）。
+                raise ValueError(
+                    "Repair activation received an empty ExecutionPlan: node "
+                    f"'{ctx.node.id}' was reactivated to fix "
+                    f"{len(pending.get('defects') or [])} reviewed defect(s) and must "
+                    "plan at least one step"
+                )
+            children = ctx.runtime.get_children(ctx.node.id)
+            terminal = {
+                NodeStatus.COMPLETED,
+                NodeStatus.FAILED,
+                NodeStatus.STOPPED,
+            }
+            next_status = (
+                NodeStatus.READY
+                if children and all(child.status in terminal for child in children)
+                else NodeStatus.WAITING
+            )
+            next_phase = "review" if next_status == NodeStatus.READY else "waiting"
+            reason = (plan.no_action_reason or "").strip()
+            logger.info(
+                "Manager '%s' reported no action needed for this revision: "
+                "next_phase=%s, reason=%s",
+                ctx.node.id[:8], next_phase, reason or "(none)",
+            )
+            ctx.runtime.update_node_status(
+                ctx.node.id,
+                next_status,
+                manager_phase=next_phase,
+                log=[
+                    LogEntry(
+                        ts=datetime.now(),
+                        level=LogLevel.INFO,
+                        message=(
+                            "Manager 判定本轮增量/事件无需本子树采取行动，未派发子节点任务"
+                            f"（理由：{reason or '未给出'}）"
+                        ),
+                    ),
+                ],
+                pending_revise=False,
+                pending_context=None,
+            )
+            return next_status
         if revision:
             submit = getattr(ctx.runtime, "submit_revision_plan", None)
-            is_noop = getattr(ctx.runtime, "is_revision_plan_noop", None)
-            if submit is not None and callable(is_noop) and is_noop(ctx.node.id, plan):
-                # 事件/增量 Expand 若仅原样复用现有组织树，不能再次激活子节点。
-                # 子节点已全部结束时直接进入 review；否则继续等待其正常完成。
-                children = ctx.runtime.get_children(ctx.node.id)
-                terminal = {
-                    NodeStatus.COMPLETED,
-                    NodeStatus.FAILED,
-                    NodeStatus.STOPPED,
-                }
-                next_status = (
-                    NodeStatus.READY
-                    if children and all(child.status in terminal for child in children)
-                    else NodeStatus.WAITING
-                )
-                next_phase = "review" if next_status == NodeStatus.READY else "waiting"
-                logger.info(
-                    "Manager '%s' ignored no-op revision plan: organization and "
-                    "executable work are unchanged; next_phase=%s",
-                    ctx.node.id[:8], next_phase,
-                )
-                ctx.runtime.update_node_status(
-                    ctx.node.id,
-                    next_status,
-                    manager_phase=next_phase,
-                    pending_revise=False,
-                    pending_context=None,
-                )
-                return next_status
             if submit is not None:
                 submit(ctx.node.id, plan)
             else:
@@ -796,13 +825,29 @@ class Manager(Executable):
         return None
 
     @staticmethod
+    def _with_no_action_reason(plan: ExecutionPlan, payload: Any) -> ExecutionPlan:
+        """空计划时带上 LLM 给出的理由（``reason`` / ``no_action_reason``）。
+
+        「本轮不需要行动」是 Manager 自己的判断，理由只用于节点日志留痕（让用户
+        看得见为什么没派活），不参与任何判定。
+        """
+        if plan.steps or not isinstance(payload, dict):
+            return plan
+        reason = payload.get("no_action_reason") or payload.get("reason")
+        if isinstance(reason, str) and reason.strip():
+            plan.no_action_reason = reason.strip()
+        return plan
+
+    @staticmethod
     def _execution_plan_from_payload(payload: Any) -> Optional[ExecutionPlan]:
         """从已解析的 AICU payload 提取执行计划。"""
         if not isinstance(payload, dict):
             return None
 
         if "steps" in payload and isinstance(payload["steps"], list):
-            return Manager._dict_to_execution_plan(payload["steps"])
+            return Manager._with_no_action_reason(
+                Manager._dict_to_execution_plan(payload["steps"]), payload
+            )
 
         nested = payload.get("execution_plan_json")
         if isinstance(nested, dict):
@@ -1049,7 +1094,10 @@ class Manager(Executable):
 
         parts = [
             "这是当前最高优先级的增量请求。请基于已有会话、已有子节点和已有产物，"
-            "重新生成当前版本的 ExecutionPlan；不要直接沿用历史计划。",
+            "重新生成当前版本的 ExecutionPlan；不要直接沿用历史计划。"
+            "先判断这次增量是否落在你的职责范畴内、是否需要本子树采取任何行动："
+            "无需行动时输出 {\"steps\": [], \"reason\": \"<理由>\"}（见决策 0 ①），"
+            "不要为了凑出一份计划把既有子节点原样重发。",
             f"当前增量请求:\n{incremental}",
         ]
         event_block = self._build_event_context_block(ctx)
@@ -1138,13 +1186,29 @@ class Manager(Executable):
                 revise_lines.append(
                     _L(
                         ctx,
-                        "必须按「决策 0 · 增量续跑」处理：先逐项比较增量任务与全部既有子节点的 role、职责和产物。"
+                        "必须按「决策 0 · 增量续跑」处理。第一步先判断：这次增量任务/事件，是否需要本子树"
+                        "采取任何行动 —— 它可能落在你的职责范畴之外（与你和你的子节点负责的能力无关），"
+                        "也可能既有子节点已经在做的事就是它要求的、无需任何人重新执行。**这是你自己的判断。**"
+                        "若确实无需行动，就输出 {\"steps\": [], \"reason\": \"<为什么无需本子树的任何节点行动>\"}："
+                        "空 steps 表示本轮不派活，框架不会重激活任何子节点，你随后进入复核。"
+                        "**绝不要为了凑出一份非空计划，把既有子节点按原样重发一遍** —— 那等于让它们白跑一轮，"
+                        "既浪费执行、又掩盖了真正的增量。\n"
+                        "若确有行动要做：再逐项比较增量任务与全部既有子节点的 role、职责和产物，"
                         "只要某个既有子节点能够承担该增量任务，就必须原地复用它，并在对应 step 中填写该节点的 "
                         "reuse_step_ref（使用候选中的 step_ref 或 node_id）；此时禁止填写 null，也禁止新建同职责 step。"
                         "只有既有子节点都无法覆盖的全新能力才允许新建 step；新建 step 的 task 必须描述当前增量任务中的该新能力，"
                         "不得照抄候选节点原 task。复用意味着保留原产物和 Agent 会话，重新执行当前增量任务。",
-                        "You MUST follow \"Decision 0 · Incremental Continue\": first compare the incremental task "
-                        "with every existing child by role, responsibility, and artifacts. If any existing child "
+                        "You MUST follow \"Decision 0 · Incremental Continue\". First decide whether this "
+                        "increment/event requires ANY action from your subtree at all: it may fall outside your "
+                        "remit (unrelated to what you and your children are responsible for), or your existing "
+                        "children may already be doing exactly what it asks, so nobody needs to rerun. "
+                        "**This judgement is yours.** If no action is needed, output "
+                        "{\"steps\": [], \"reason\": \"<why no node in this subtree needs to act>\"} — empty "
+                        "steps means nothing is dispatched this round and no child is reactivated; you then move "
+                        "to review. Do NOT pad out a non-empty plan by re-sending existing children unchanged: "
+                        "that makes them rerun for nothing and hides the real increment.\n"
+                        "If action IS needed: compare the incremental task with every existing child by role, "
+                        "responsibility, and artifacts. If any existing child "
                         "can perform the increment, you MUST reuse it in place and fill that step's reuse_step_ref "
                         "with the candidate step_ref or node_id; null is forbidden and creating a new step with the "
                         "same responsibility is forbidden. Create a new step only for a genuinely new capability "

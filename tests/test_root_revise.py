@@ -15,6 +15,8 @@
 9.  _build_revise_candidates_block 含子节点 step_ref/role/task
 10. session_server /revise：200 + {"status":"revising"}；非法 node → 409；/restart 已删除（404/405）
 11. worker resume 失败兜底：revise_resume 首 ask 抛错 → pop cache + 新会话重试一次成功
+12. 「本轮是否需要行动」由 Manager(LLM) 判定：空计划 + reason = 不派活（终态子节点进
+    review / 运行中子节点继续等待）；Runtime 不再比对计划文字替它推断 no-op
 """
 
 import os
@@ -473,15 +475,20 @@ class TestPrevalidateReuse:
         reuse = rt._prevalidate_reuse(_plan([_step("s1", reuse_step_ref="A1")]), mgr_id)
         assert reuse == {"s1": "A1"}
 
-    def test_duplicate_unreferenced_revision_step_rejected(self, tmp_path):
+    def test_unreferenced_step_is_created_as_new_node(self, tmp_path):
+        """缺 reuse_step_ref 的 step 按契约由 Manager 自己负责（提示词要求"有候选覆盖必须复用"）。
+
+        代码不再比对 role/task 文本判定"重复"：那是语义判断，只能由节点作出 ——
+        误判会把 Manager 真正想新建的能力挡在 graph 变更之前，并让节点以
+        manager_execution_error 失败。
+        """
         rt, mgr_id = self._harness(tmp_path)
-        before = {node.id for node in rt.graph.all_nodes()}
         plan = _plan([_step("new_step", role="dev", task="Task A1")])
 
-        with pytest.raises(ValueError, match="without reuse_step_ref"):
-            rt.inject_revision_plan(mgr_id, plan)
+        created = rt.inject_revision_plan(mgr_id, plan)
 
-        assert {node.id for node in rt.graph.all_nodes()} == before
+        assert len(created) == 1
+        assert created[0].step_ref == "new_step"
 
 
 # ============================================================================
@@ -662,57 +669,120 @@ class TestReactivateReusedWorker:
 # ============================================================================
 
 
-class TestRevisionPlanNoop:
-    """增量计划未改变组织结构和可执行工作时应被识别为 no-op。"""
+class TestNoActionVerdict:
+    """「本轮增量/事件是否需要本子树行动」是 Manager(LLM) 的判断。
 
-    def _runtime_with_children(self, tmp_path):
-        rt = _make_runtime(tmp_path)
-        parent_id = rt.submit_root_manager("root")
-        initial = _plan([
-            _step("first", role="dev", task="Do A", task_summary="A"),
-            _step(
-                "second", role="qa", task="Do B", task_summary="B",
-                depends_on=["first"],
-            ),
+    唯一表达方式是空计划 + reason（决策 0 ①）；Runtime 不再比对计划与现有树的
+    文字差异来替它推断 no-op —— 那种代理指标会把「模型没规划出新东西」误判成
+    「任务已完成」，静默吞掉真实增量。
+    """
+
+    def test_empty_plan_skips_dispatch_when_children_terminal(self):
+        """空计划 + 子节点已全部终态 → 不派活、不提交，直接进入 review。"""
+        rt = _DuckRuntime(with_revision=True)
+        node = _manager_node(pending_revise=True)
+        rt.add_node(node)
+        rt.add_children("M1", [
+            _worker_node("A1", "M1", role="dev", status=NodeStatus.COMPLETED),
         ])
-        children = rt.inject_plan(parent_id, initial)
-        return rt, parent_id, children
+        ctx = ExecutableContext(node=node, runtime=rt)
 
-    def _unchanged_plan(self, children):
-        return _plan([
-            _step(
-                "revised-first", role="dev", task="Do A", task_summary="A",
-                reuse_step_ref=children[0].step_ref,
-            ),
-            _step(
-                "revised-second", role="qa", task="Do B", task_summary="B",
-                depends_on=["revised-first"],
-                reuse_step_ref=children[1].step_ref,
-            ),
+        result = Manager(
+            context=ctx,
+            aicu_instance=_NoActionStub("该事件属于其他分支的职责"),
+        ).run(ctx)
+
+        assert result == NodeStatus.READY
+        assert rt.submitted_revisions == []
+        assert rt.submitted_plans == []
+        assert node.manager_phase == "review"
+        assert node.pending_revise is False
+        assert node.pending_context is None
+        # 理由落进节点日志，用户能看见「为什么这次没派活」
+        assert any("该事件属于其他分支的职责" in e.message for e in node.log)
+
+    def test_empty_plan_stays_waiting_for_active_children(self):
+        """空计划 + 仍有运行中的子节点 → 继续等待，不重激活、不提交计划。"""
+        rt = _DuckRuntime(with_revision=True)
+        node = _manager_node(pending_revise=True)
+        rt.add_node(node)
+        rt.add_children("M1", [
+            _worker_node("A1", "M1", role="dev", status=NodeStatus.RUNNING),
         ])
+        ctx = ExecutableContext(node=node, runtime=rt)
 
-    def test_identical_reused_plan_is_noop(self, tmp_path):
-        rt, parent_id, children = self._runtime_with_children(tmp_path)
-        assert rt.is_revision_plan_noop(
-            parent_id, self._unchanged_plan(children)
-        ) is True
+        result = Manager(
+            context=ctx, aicu_instance=_NoActionStub("无需行动"),
+        ).run(ctx)
 
-    @pytest.mark.parametrize(
-        "change",
-        ["new_step", "task", "partial_reuse", "dependency"],
-    )
-    def test_structural_or_executable_change_is_not_noop(self, tmp_path, change):
-        rt, parent_id, children = self._runtime_with_children(tmp_path)
-        plan = self._unchanged_plan(children)
-        if change == "new_step":
-            plan.steps.append(_step("new", role="writer", task="Do C"))
-        elif change == "task":
-            plan.steps[0].task = "Do something else"
-        elif change == "partial_reuse":
-            plan.steps[1].reuse_step_ref = None
-        else:
-            plan.steps[1].depends_on = []
-        assert rt.is_revision_plan_noop(parent_id, plan) is False
+        assert result == NodeStatus.WAITING
+        assert rt.submitted_revisions == []
+        assert rt.submitted_plans == []
+        assert node.manager_phase == "waiting"
+        assert node.pending_revise is False
+
+    def test_empty_plan_on_repair_activation_fails_loudly(self):
+        """修复激活（父级评审已判定缺陷）收到空计划 → 明确失败，不静默转入 review。
+
+        这不是「要不要行动」的判断（那次判断已经由父级 review 作出），而是计划本身
+        不成立；静默滑进 review 会退化成「反复评审不通过 → 迭代耗尽」的假象。
+        """
+        rt = _DuckRuntime(with_revision=True)
+        node = _manager_node(pending_revise=False)
+        node.pending_context = {
+            "collaboration_type": "repair",
+            "defects": [{"step_ref": "A1", "reason": "产物缺失"}],
+        }
+        rt.add_node(node)
+        rt.add_children("M1", [
+            _worker_node("A1", "M1", role="dev", status=NodeStatus.COMPLETED),
+        ])
+        ctx = ExecutableContext(node=node, runtime=rt)
+
+        result = Manager(
+            context=ctx, aicu_instance=_NoActionStub("无需行动"),
+        ).run(ctx)
+
+        assert result == NodeStatus.FAILED
+        assert rt.submitted_revisions == []
+        assert rt.submitted_plans == []
+
+    def test_childless_revision_empty_plan_still_goes_to_runtime(self):
+        """无子节点时「本子树无需行动」不成立：空计划仍交回 Runtime 做结构校验
+        （validate_plan 报 "ExecutionPlan has no steps"），不让节点静默停在 WAITING。"""
+        rt = _DuckRuntime(with_revision=True)
+        node = _manager_node(pending_revise=True)
+        rt.add_node(node)
+        ctx = ExecutableContext(node=node, runtime=rt)
+
+        result = Manager(
+            context=ctx, aicu_instance=_NoActionStub("无需行动"),
+        ).run(ctx)
+
+        assert result == NodeStatus.WAITING
+        assert rt.submitted_revisions == ["M1"]
+        assert rt.submitted_plans == []
+
+    def test_identical_reuse_plan_is_still_submitted(self):
+        """复用计划与既有子节点逐字相同也不再被代码拦截 —— 提交与否由 Manager 决定。"""
+        rt = _DuckRuntime(with_revision=True)
+        node = _manager_node(pending_revise=True)
+        rt.add_node(node)
+        child = _worker_node(
+            "A1", "M1", role="dev", status=NodeStatus.COMPLETED,
+            step_ref="dev",
+        )
+        rt.add_children("M1", [child])
+        plan = _plan([
+            _step("dev", role="dev", task=child.task, reuse_step_ref="dev"),
+        ])
+        ctx = ExecutableContext(node=node, runtime=rt)
+
+        result = Manager(context=ctx, aicu_instance=_PlanStub(plan)).run(ctx)
+
+        assert result == NodeStatus.WAITING
+        assert rt.submitted_revisions == ["M1"]
+        assert rt.submitted_plans == []
 
 
 class _ExpandStub:
@@ -739,6 +809,43 @@ class _IncrementalExpandStub(_ExpandStub):
     def ask_incremental(self, prompt: str) -> dict:
         self.incremental_prompts.append(prompt)
         return super().ask(prompt)
+
+
+class _NoActionStub(_IncrementalExpandStub):
+    """Manager 判定「本轮无需本子树行动」：空计划 + reason（决策 0 ①）。
+
+    ask / ask_incremental 都要覆盖：_IncrementalExpandStub.ask_incremental 里的
+    super() 按 type(self).__mro__ 解析，会直接落到 _ExpandStub 而跳过本类。
+    """
+
+    def __init__(self, reason: str = "与本子树职责无关"):
+        super().__init__()
+        self.reason = reason
+
+    def _no_action(self) -> dict:
+        plan = ExecutionPlan(steps=[], no_action_reason=self.reason)
+        return {"execution_plan_json": plan.to_json()}
+
+    def ask(self, prompt: str) -> dict:
+        self.normal_prompts.append(prompt)
+        return self._no_action()
+
+    def ask_incremental(self, prompt: str) -> dict:
+        self.incremental_prompts.append(prompt)
+        return self._no_action()
+
+
+class _PlanStub:
+    """原样返回给定计划（用于验证提交路径，不关心计划内容）。"""
+
+    def __init__(self, plan: ExecutionPlan):
+        self.plan = plan
+
+    def ask(self, prompt: str) -> dict:
+        return {"execution_plan_json": self.plan.to_json()}
+
+    def ask_incremental(self, prompt: str) -> dict:
+        return self.ask(prompt)
 
 
 class _DuckRuntime:
@@ -898,51 +1005,6 @@ class TestExpandDuckTyping:
 
         assert rt.submitted_revisions == ["M1"]
         assert rt.submitted_plans == []
-
-    def test_expand_skips_noop_revision_when_children_are_terminal(self):
-        """no-op Revise 不提交计划，已有终态子节点直接进入 review。"""
-        rt = _DuckRuntime(with_revision=True)
-        node = _manager_node(pending_revise=True)
-        rt.add_node(node)
-        child = _worker_node(
-            "A1", "M1", role="dev", status=NodeStatus.COMPLETED,
-        )
-        rt.add_children("M1", [child])
-        calls: list[str] = []
-        rt.is_revision_plan_noop = lambda node_id, plan: calls.append(node_id) or True
-
-        result = Manager(
-            context=ExecutableContext(node=node, runtime=rt),
-            aicu_instance=_ExpandStub(),
-        ).run(ExecutableContext(node=node, runtime=rt))
-
-        assert result == NodeStatus.READY
-        assert calls == ["M1"]
-        assert rt.submitted_revisions == []
-        assert rt.submitted_plans == []
-        assert node.manager_phase == "review"
-        assert node.pending_revise is False
-        assert node.pending_context is None
-
-    def test_expand_keeps_waiting_for_active_children_on_noop_revision(self):
-        """no-op Revise 遇到运行中的子节点时继续等待，不重新激活。"""
-        rt = _DuckRuntime(with_revision=True)
-        node = _manager_node(pending_revise=True)
-        rt.add_node(node)
-        child = _worker_node("A1", "M1", role="dev", status=NodeStatus.RUNNING)
-        rt.add_children("M1", [child])
-        rt.is_revision_plan_noop = lambda node_id, plan: True
-
-        result = Manager(
-            context=ExecutableContext(node=node, runtime=rt),
-            aicu_instance=_ExpandStub(),
-        ).run(ExecutableContext(node=node, runtime=rt))
-
-        assert result == NodeStatus.WAITING
-        assert rt.submitted_revisions == []
-        assert rt.submitted_plans == []
-        assert node.manager_phase == "waiting"
-        assert node.pending_revise is False
 
     def test_repair_context_block_renders_defects(self):
         """2c：pending_context 为 repair 类型（本 Manager 被父级 review 修复）→ 渲染缺陷明细。"""

@@ -478,9 +478,15 @@ class ExecutionPlan(_JsonSerializable):
     """逻辑执行计划（Manager 的输出协议）。
 
     字段:
-        steps: 逻辑步骤列表。
+        steps: 逻辑步骤列表。**空列表是合法计划** —— 它表示 Manager 自行判定
+            「本轮增量/事件不需要本子树采取任何行动」（不属于本节点职责范畴，
+            或既有子节点已覆盖且无需重新执行）。「是否需要行动」是语义判断，
+            由 Manager（LLM）作出；Runtime 只做机械衔接（不派活、不重激活子节点）。
+        no_action_reason: 空计划的理由（LLM 输出的 ``reason`` / ``no_action_reason``），
+            仅用于节点日志留痕；steps 非空时忽略。
     """
     steps: list[Step] = field(default_factory=list)
+    no_action_reason: Optional[str] = None
 
     @classmethod
     def from_json(cls, json_str: str) -> "ExecutionPlan":
@@ -498,7 +504,10 @@ class ExecutionPlan(_JsonSerializable):
                 depends_on=s.get("depends_on", []),
                 reuse_step_ref=s.get("reuse_step_ref"),
             ))
-        return cls(steps=steps)
+        return cls(
+            steps=steps,
+            no_action_reason=data.get("no_action_reason") or data.get("reason"),
+        )
 
 
 # ============================================================================

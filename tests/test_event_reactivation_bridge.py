@@ -554,16 +554,24 @@ def test_manager_run_receives_all_five_routed_events(tmp_path, revise, language)
             graph.update_node(node_id, status=status, **updates)
 
     class CapturingAI:
+        # 非空计划：空 steps 在 Revise 语义下是「Manager 判定本轮无需行动」的显式
+        # 判定（决策 0 ①，见 tests/test_root_revise.py::TestNoActionVerdict），
+        # 本用例只关心事件是否送达 prompt，故给一份最小的真实计划走提交路径。
+        _PLAN = {"steps": [{
+            "step_id": "s1", "exec_type": "worker", "role": "dev",
+            "task": "do the work", "task_summary": "do the work",
+        }]}
+
         def __init__(self):
             self.calls = []
 
         def ask(self, prompt):
             self.calls.append((False, prompt))
-            return {"steps": []}
+            return dict(self._PLAN)
 
         def ask_incremental(self, prompt):
             self.calls.append((True, prompt))
-            return {"steps": []}
+            return dict(self._PLAN)
 
     events = [
         {"event_id": f"batch-{i}", "producer": f"producer-{i}",

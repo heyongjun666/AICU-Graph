@@ -581,11 +581,13 @@ export function getEffectiveBaseUrl(params: {
   cliName?: string | null;
   model?: string | null;
   apiBaseUrl?: string | null;
+  providerId?: string | null;
 }): Promise<EffectiveBaseUrlResponse> {
   const query = new URLSearchParams();
   if (params.cliName) query.set('cli_name', params.cliName);
   if (params.model) query.set('model', params.model);
   if (params.apiBaseUrl) query.set('api_base_url', params.apiBaseUrl);
+  if (params.providerId) query.set('provider_id', params.providerId);
   return sessionRequest<EffectiveBaseUrlResponse>(`effective-base-url?${query.toString()}`);
 }
 
@@ -603,6 +605,7 @@ export function testConnection(payload: {
   model?: string | null;
   api_base_url?: string | null;
   api_key_env?: string | null;
+  provider_id?: string | null;
 }): Promise<{ ok: boolean; message?: string; result?: string | null }> {
   return sessionRequest('config/test-connection', {
     method: 'POST',
@@ -612,14 +615,16 @@ export function testConnection(payload: {
 
 // ---- 凭据（按模型厂商保存的 API Key），明文存储 ----
 
-export function getApiKey(model: string): Promise<ApiKeyResponse> {
-  return sessionRequest(`config/api-key?model=${encodeURIComponent(model)}`);
+export function getApiKey(model: string, provider_id?: string | null): Promise<ApiKeyResponse> {
+  const query = new URLSearchParams({ model });
+  if (provider_id) query.set('provider_id', provider_id);
+  return sessionRequest(`config/api-key?${query.toString()}`);
 }
 
-export function saveApiKey(model: string, api_key: string): Promise<ApiKeyResponse> {
+export function saveApiKey(model: string, api_key: string, provider_id?: string | null): Promise<ApiKeyResponse> {
   return sessionRequest('config/api-key', {
     method: 'PUT',
-    body: JSON.stringify({ model, api_key }),
+    body: JSON.stringify({ model, provider_id, api_key }),
   });
 }
 

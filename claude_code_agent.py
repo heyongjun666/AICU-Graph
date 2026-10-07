@@ -12,8 +12,9 @@ from cli_adapters import (
     mcp_enabled_clis,
     native_base_url,
     provider_slot_base_url,
+    provider_route,
 )
-from runtime.credentials import resolve_sk_for_model
+from runtime.credentials import resolve_sk_for_provider
 
 
 class CCExecutionError(RuntimeError):
@@ -110,6 +111,7 @@ class ClaudeCodeAgent:
                  output_callback: Optional[Callable[[str, str], None]] = None,
                  api_base_url: Optional[str] = None,
                  api_key_env: Optional[str] = None,
+                 provider_id: Optional[str] = None,
                  mcp_servers: Optional[list] = None):
         """
         初始化一个 CC 实例
@@ -141,6 +143,7 @@ class ClaudeCodeAgent:
         self.output_callback = output_callback
         self.api_base_url = api_base_url
         self.api_key_env = api_key_env
+        self.provider_id = provider_id
         # 权限白名单（CC 族）必须与实际下发的 server 逐字对应，所以名字就在 adapter 里
         # 从同一个列表上取，而不是在这里另算一份传下去 —— 同源才不可能对不上。
         self.mcp_servers = list(mcp_servers or [])
@@ -187,12 +190,21 @@ class ClaudeCodeAgent:
                 f"或从角色配置中移除 mcp 字段。"
             )
 
+        # Provider route 是显式连接身份，优先于按模型厂商推断的旧逻辑。
+        # 一个 gateway provider 可以针对不同 CLI 使用不同 wire protocol/endpoint，
+        # 因此必须在 native routing 和 provision 之前归一化。
+        route = provider_route(self.provider_id, self.cli_name)
+        if route:
+            self.api_base_url = route.get("api_base_url") or self.api_base_url
+            self.api_key_env = route.get("auth_env") or route.get("api_key_env") or self.api_key_env
+
         # 模型厂商与 CLI 原生协议不一致时（例如 claude CLI 选了 GLM），把 base_url
-        # 指向该厂商对应协议的原生端点。厂商自己就实现这套协议，不需要任何翻译。
-        # 放在 provision 之前是关键：provision 与 _build_process_env 都读
-        # self.api_base_url，改这一处即可同时覆盖两条下游路径。
+        # 指向该厂商对应协议的原生端点。显式 provider route 会在 native_base_url
+        # 内被保护，不会被 OpenRouter 模型前缀改写。
         configured_base_url = self.api_base_url
-        native_endpoint = native_base_url(self.cli_name, self.model, configured_base_url)
+        native_endpoint = native_base_url(
+            self.cli_name, self.model, configured_base_url, provider_id=self.provider_id
+        )
         if native_endpoint:
             self.api_base_url = native_endpoint
 
@@ -219,7 +231,7 @@ class ClaudeCodeAgent:
         # 自己会把同族该接管的那份端点算出来（qwen 同族照样接管，codex 同族撤槽）。
         self.adapter.provision(
             api_base_url=provider_slot_base_url(
-                self.cli_name, self.model, self.api_base_url
+                self.cli_name, self.model, self.api_base_url, provider_id=self.provider_id
             ),
             api_key_env=self.api_key_env,
             model=self.model,
@@ -356,11 +368,21 @@ class ClaudeCodeAgent:
         sk = None
         key_env_name = None
         if self.cli_name != "internal":  # Internal 使用 --username 认证
-            sk = resolve_sk_for_model(self.model)
-            key_env_name = self.adapter.api_key_env_for_model(self.model)
+            provider_id = getattr(self, "provider_id", None)
+            sk = resolve_sk_for_provider(provider_id, self.model)
+            key_env_name = (
+                self.api_key_env
+                if provider_id and self.api_key_env
+                else self.adapter.api_key_env_for_model(self.model)
+            )
 
+        base_env = os.environ.copy()
+        # managed-slot CLI（例如 qwen）会在 build_env 阶段把源变量复制到自身固定变量；
+        # 先放入源 key，随后再写回最终 env，既不泄露到日志也兼容 OpenCode/Pi 的 env 引用。
+        if sk and key_env_name:
+            base_env[key_env_name] = sk
         env = self.adapter.build_env(
-            os.environ.copy(),
+            base_env,
             api_base_url=self.api_base_url,
             api_key_env=key_env_name or self.api_key_env,
             model=self.model,
@@ -368,6 +390,12 @@ class ClaudeCodeAgent:
         )
         if sk and key_env_name:
             env[key_env_name] = sk
+            route = provider_route(getattr(self, "provider_id", None), self.cli_name)
+            # Claude Code's OpenRouter route authenticates with AUTH_TOKEN and
+            # intentionally clears ANTHROPIC_API_KEY; do not re-add the native key.
+            adapter_key_env = None if route and route.get("auth_env") else self.adapter.api_key_env_for_model(self.model)
+            if adapter_key_env:
+                env[adapter_key_env] = sk
         return env
 
     def chat(self, prompt: str, max_turns: Optional[int] = None, timeout: int = 36000) -> str:
@@ -526,19 +554,23 @@ class ClaudeCodeAgent:
         # 子目录路径 = 当前 workspace / 子文件夹名（在父目录内部，方便管控）
         child_workspace = self.workspace / sub_workspace_name
 
-        child_agent = ClaudeCodeAgent(
-            workspace_path=str(child_workspace),
-            instruction_md_path=child_instruction_md,
-            model=kwargs.get('model', self.model),
-            skip_permissions=kwargs.get('skip_permissions', self.skip_permissions),
-            cli_name=kwargs.get('cli_name', self.cli_name),
-            enable_project_skills=kwargs.get(
+        child_kwargs = {
+            "workspace_path": str(child_workspace),
+            "instruction_md_path": child_instruction_md,
+            "model": kwargs.get('model', self.model),
+            "skip_permissions": kwargs.get('skip_permissions', self.skip_permissions),
+            "cli_name": kwargs.get('cli_name', self.cli_name),
+            "enable_project_skills": kwargs.get(
                 'enable_project_skills', self.enable_project_skills
             ),
-            api_base_url=kwargs.get('api_base_url', self.api_base_url),
-            api_key_env=kwargs.get('api_key_env', self.api_key_env),
-            mcp_servers=kwargs.get('mcp_servers', self.mcp_servers),
-        )
+            "api_base_url": kwargs.get('api_base_url', self.api_base_url),
+            "api_key_env": kwargs.get('api_key_env', self.api_key_env),
+            "mcp_servers": kwargs.get('mcp_servers', self.mcp_servers),
+        }
+        provider_id = kwargs.get('provider_id', getattr(self, 'provider_id', None))
+        if provider_id is not None:
+            child_kwargs["provider_id"] = provider_id
+        child_agent = ClaudeCodeAgent(**child_kwargs)
         return child_agent
 
     def interactive(self):

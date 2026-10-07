@@ -47,9 +47,9 @@ _PREFIX_VENDOR = (
 
 
 def vendor_of_model(model: Optional[str]) -> Optional[str]:
-    """把模型名归到 9 个厂商之一；内部模型返回 None。
+    """把模型名归到已知原生厂商；网关模型保留 None，内部模型也返回 None。
 
-    anthropic / openai / moonshot / xai / google / deepseek / zhipu / minimax / aliyun。
+    OpenRouter 等路由网关通过显式 provider 传入，不参与模型原厂商推断。
     """
     if not model:
         return None
@@ -78,6 +78,7 @@ _VENDOR_API_KEY_ENV = {
     "zhipu": "ZHIPU_API_KEY",
     "minimax": "MINIMAX_API_KEY",
     "aliyun": "DASHSCOPE_API_KEY",
+    "openrouter": "OPENROUTER_API_KEY",
 }
 
 
@@ -177,9 +178,14 @@ def set_credential_store(store: Optional[CredentialStore]) -> None:
 
 def resolve_sk_for_model(model: Optional[str]) -> Optional[str]:
     """按模型厂商解析已保存的 sk；store 未初始化或内部模型返回 None（安全降级）。"""
+    return resolve_sk_for_provider(None, model)
+
+
+def resolve_sk_for_provider(provider: Optional[str], model: Optional[str]) -> Optional[str]:
+    """按显式连接 provider 解析 sk，旧调用仍按模型原厂商解析。"""
     if _store is None:
         return None
-    vendor = vendor_of_model(model)
+    vendor = (provider or "").strip().lower() or vendor_of_model(model)
     if not vendor:
         return None
     return _store.get(vendor)

@@ -268,6 +268,7 @@ class AICU:
                  output_callback: Optional[Callable[[str, str], None]] = None,
                  api_base_url: Optional[str] = None,
                  api_key_env: Optional[str] = None,
+                 provider_id: Optional[str] = None,
                  skills: Optional[List[str]] = None,
                  skills_dir: Optional[str] = None,
                  mcp: Optional[List[str]] = None,
@@ -489,6 +490,7 @@ class AICU:
         self.output_callback = output_callback
         self.api_base_url = api_base_url
         self.api_key_env = api_key_env
+        self.provider_id = provider_id
         self.skip_permissions = skip_permissions
 
         # ---- AICU 角色人格 ----
@@ -576,6 +578,7 @@ class AICU:
                 output_callback=cc_output,
                 api_base_url=self.api_base_url,
                 api_key_env=self.api_key_env,
+                provider_id=self.provider_id,
                 mcp_servers=self._mcp_servers,
             )
             # 写入一次性的角色与长期决策上下文；输出格式由每轮生成请求显式携带。

@@ -3091,6 +3091,8 @@ class TestCrossVendorEndpoint:
         """
         checked = 0
         for preset in cli_adapters.list_provider_presets():
+            if preset.get("provider_kind") == "gateway":
+                continue
             native = cli_adapters._CLI_NATIVE.get(preset.get("cli_name", ""))
             url = preset.get("api_base_url")
             if not native or not url or native[1] not in {"messages", "responses", "chat"}:
@@ -3344,6 +3346,88 @@ class TestEffectiveBaseUrl:
             "https://open.bigmodel.cn/api/anthropic",
             "model_vendor",
         )
+
+
+class TestProviderRoutes:
+    @pytest.mark.parametrize(
+        ("cli", "wire_api", "base_url"),
+        [
+            ("opencode", "chat", "https://openrouter.ai/api/v1"),
+            ("pi", "chat", "https://openrouter.ai/api/v1"),
+            ("qwen", "chat", "https://openrouter.ai/api/v1"),
+            ("kimi", "chat", "https://openrouter.ai/api/v1"),
+            ("codebuddy", "chat", "https://openrouter.ai/api/v1"),
+            ("claude", "messages", "https://openrouter.ai/api"),
+            ("codex", "responses", "https://openrouter.ai/api/v1"),
+        ],
+    )
+    def test_openrouter_route_selects_cli_protocol(self, cli, wire_api, base_url):
+        route = cli_adapters.provider_route("openrouter", cli)
+        assert route["wire_api"] == wire_api
+        assert route["api_base_url"] == base_url
+        assert route["provider_id"] == "openrouter"
+
+    def test_openrouter_credentials_are_cli_specific(self):
+        assert cli_adapters.provider_route("openrouter", "claude")["auth_env"] == "ANTHROPIC_AUTH_TOKEN"
+        assert cli_adapters.provider_route("openrouter", "codex")["api_key_env"] == "OPENROUTER_API_KEY"
+        assert cli_adapters.provider_route("openrouter", "codebuddy")["api_key_env"] == "OPENROUTER_API_KEY"
+
+    def test_openrouter_route_keeps_full_model_and_endpoint(self):
+        model = "anthropic/claude-sonnet-4.5"
+        route = cli_adapters.provider_route("openrouter", "claude")
+        assert cli_adapters.effective_base_url("claude", model, route["api_base_url"], "openrouter") == (
+            "https://openrouter.ai/api", "configured"
+        )
+        assert cli_adapters.native_base_url("claude", model, route["api_base_url"], "openrouter") is None
+
+    def test_unknown_or_disabled_route_does_not_fallback(self, monkeypatch):
+        presets = cli_adapters.list_provider_presets()
+        patched = [dict(item) for item in presets]
+        openrouter = next(item for item in patched if item["id"] == "openrouter")
+        openrouter["routes"] = {"codex": {"enabled": False}}
+        monkeypatch.setattr(cli_adapters, "list_provider_presets", lambda: patched)
+        assert cli_adapters.provider_route("openrouter", "codex") is None
+        assert cli_adapters.provider_route("openrouter", "gemini") is None
+
+
+class TestOpenRouterAgentEnvironment:
+    @pytest.fixture
+    def openrouter_store(self, tmp_path):
+        store = CredentialStore(str(tmp_path / "api_keys.json"))
+        store.set("openrouter", "sk-or-test")
+        set_credential_store(store)
+        yield store
+        set_credential_store(None)
+
+    def _agent(self, cli, model, base_url, api_key_env):
+        agent = object.__new__(ClaudeCodeAgent)
+        agent.provider_id = "openrouter"
+        agent.cli_name = cli
+        agent.model = model
+        agent.api_base_url = base_url
+        agent.api_key_env = api_key_env
+        agent.adapter = get_adapter(cli)
+        agent.mcp_servers = []
+        return agent
+
+    def test_claude_uses_openrouter_auth_token_only(self, monkeypatch, openrouter_store):
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-parent")
+        agent = self._agent("claude", "anthropic/claude-sonnet-4.5", "https://openrouter.ai/api", "ANTHROPIC_AUTH_TOKEN")
+        env = agent._build_process_env()
+        assert env["ANTHROPIC_BASE_URL"] == "https://openrouter.ai/api"
+        assert env["ANTHROPIC_AUTH_TOKEN"] == "sk-or-test"
+        assert "ANTHROPIC_API_KEY" not in env
+
+    def test_codebuddy_maps_openrouter_key(self, monkeypatch, openrouter_store):
+        agent = self._agent("codebuddy", "openai/gpt-4.1", "https://openrouter.ai/api/v1", "OPENROUTER_API_KEY")
+        env = agent._build_process_env()
+        assert env["CODEBUDDY_BASE_URL"] == "https://openrouter.ai/api/v1"
+        assert env["CODEBUDDY_API_KEY"] == "sk-or-test"
+
+    def test_codex_keeps_openrouter_env_key(self, monkeypatch, openrouter_store):
+        agent = self._agent("codex", "openai/gpt-4.1", "https://openrouter.ai/api/v1", "OPENROUTER_API_KEY")
+        env = agent._build_process_env()
+        assert env["OPENROUTER_API_KEY"] == "sk-or-test"
 
 
 class TestResultEventShapes:

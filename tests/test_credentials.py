@@ -4,7 +4,9 @@ import os
 
 from runtime.credentials import (
     CredentialStore,
+    api_key_env_for_vendor,
     resolve_internal_username,
+    resolve_sk_for_provider,
     resolve_sk_for_model,
     set_credential_store,
     vendor_of_model,
@@ -37,6 +39,10 @@ class TestVendorOfModel:
         assert vendor_of_model("auto-内部") is None
         assert vendor_of_model("DeepSeek-V4-Flash-内部") is None
         assert vendor_of_model("GLM-5.2-内部") is None
+
+    def test_openrouter_model_keeps_gateway_namespace(self):
+        assert vendor_of_model("openai/gpt-4.1") is None
+        assert api_key_env_for_vendor("openrouter") == "OPENROUTER_API_KEY"
 
     def test_empty_or_unknown_returns_none(self):
         assert vendor_of_model(None) is None
@@ -103,6 +109,17 @@ class TestResolveSingletons:
         set_credential_store(store)
         try:
             assert resolve_internal_username() == "v-user"
+        finally:
+            set_credential_store(None)
+
+    def test_resolve_sk_by_explicit_provider(self, tmp_path):
+        store = CredentialStore(str(tmp_path / "api_keys.json"))
+        store.set("openrouter", "sk-or")
+        store.set("openai", "sk-openai")
+        set_credential_store(store)
+        try:
+            assert resolve_sk_for_provider("openrouter", "openai/gpt-4.1") == "sk-or"
+            assert resolve_sk_for_provider(None, "gpt-5.6") == "sk-openai"
         finally:
             set_credential_store(None)
 

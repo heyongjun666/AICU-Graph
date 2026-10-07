@@ -1639,6 +1639,25 @@ def test_effective_base_url_follows_the_model(session_client):
     }
 
 
+def test_effective_base_url_uses_provider_route(session_client):
+    for cli_name, expected_url in (
+        ("claude", "https://openrouter.ai/api"),
+        ("codex", "https://openrouter.ai/api/v1"),
+        ("codebuddy", "https://openrouter.ai/api/v1"),
+    ):
+        resp = session_client.get(
+            "/v1/effective-base-url",
+            params={
+                "cli_name": cli_name,
+                "model": "anthropic/claude-sonnet-4.5",
+                "api_base_url": "https://openrouter.ai/api/v1",
+                "provider_id": "openrouter",
+            },
+        )
+        assert resp.status_code == 200, resp.text
+        assert resp.json() == {"base_url": expected_url, "source": "configured"}
+
+
 def test_effective_base_url_keeps_user_gateway(session_client):
     """用户手填的网关不被改写 —— 换模型也不动。"""
     params = {"cli_name": "codex", "model": "gpt-5.6", "api_base_url": "https://my-gw.corp/v1"}
@@ -1658,6 +1677,25 @@ def test_effective_base_url_missing_params_degrade_quietly(session_client):
 
 
 # ============================================================================
+def test_provider_id_persists_and_is_inherited_by_new_session(session_client, session_manager):
+    resp = session_client.patch(
+        "/v1/config",
+        json={
+            "config": {
+                "cli_name": "claude",
+                "model": "anthropic/claude-sonnet-4.5",
+                "provider_id": "openrouter",
+            }
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["config"]["provider_id"] == "openrouter"
+    assert session_client.get("/v1/config").json()["config"]["provider_id"] == "openrouter"
+
+    session_id = _create_session(session_client)["id"]
+    assert session_manager.get_settings(session_id)["config"]["provider_id"] == "openrouter"
+
+
 # 单节点 agent 数量策略（dynamic_num_ccs / default_num_ccs）
 # ============================================================================
 

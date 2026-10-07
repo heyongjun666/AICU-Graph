@@ -96,10 +96,12 @@ class TestConnectionRequest(BaseModel):
     model: Optional[str] = None
     api_base_url: Optional[str] = None
     api_key_env: Optional[str] = None
+    provider_id: Optional[str] = None
 
 
 class ApiKeyRequest(BaseModel):
     model: str = Field(min_length=1, max_length=200)
+    provider_id: Optional[str] = Field(default=None, max_length=80)
     api_key: Optional[str] = Field(default=None, max_length=4096)
 
 
@@ -474,7 +476,12 @@ def create_session_app(
         }
 
     @app.get("/v1/effective-base-url")
-    def get_effective_base_url(cli_name: str = "", model: str = "", api_base_url: str = ""):
+    def get_effective_base_url(
+        cli_name: str = "",
+        model: str = "",
+        api_base_url: str = "",
+        provider_id: str = "",
+    ):
         """给定 (CLI, 模型, 已配置地址) 时**真正会被用到**的端点。
 
         连接表单用它显示「生效地址」：换模型就重新问一次，显示的永远是与实际请求同源的
@@ -482,7 +489,7 @@ def create_session_app(
         传的是表单里的**当前**值而非已保存的值 —— 用户改了模型还没保存时也要能看见。
         """
         base_url, source = effective_base_url(
-            cli_name or None, model or None, api_base_url or None
+            cli_name or None, model or None, api_base_url or None, provider_id
         )
         return {"base_url": base_url, "source": source}
 
@@ -514,6 +521,7 @@ def create_session_app(
         model = body.model or saved_config.get("model")
         api_base_url = body.api_base_url or saved_config.get("api_base_url")
         api_key_env = body.api_key_env or saved_config.get("api_key_env")
+        provider_id = body.provider_id or saved_config.get("provider_id")
 
         # 兜底：模型名能匹配公开 provider 预置时，自动补齐连接参数。
         # 这样即使前端尚未保存全局配置，测试也不会回落到 OpenAI 默认 provider。
@@ -525,6 +533,7 @@ def create_session_app(
                     cli_id = cli_id or preset.get("cli_name")
                     api_base_url = api_base_url or preset.get("api_base_url")
                     api_key_env = api_key_env or preset.get("api_key_env")
+                    provider_id = provider_id or preset.get("id")
                     break
 
         if not cli_id:
@@ -543,7 +552,7 @@ def create_session_app(
         key_env = api_key_env or getattr(adapter, "api_key_env", None)
         key_missing = bool(key_env) and not os.environ.get(key_env)
         if key_missing and model:
-            vendor = vendor_of_model(model)
+            vendor = provider_id or vendor_of_model(model)
             if vendor and session_manager.get_api_key(vendor):
                 key_missing = False
 
@@ -556,6 +565,7 @@ def create_session_app(
                     cli_name=cli_id,
                     api_base_url=api_base_url,
                     api_key_env=api_key_env,
+                    provider_id=provider_id,
                 )
                 result = agent.chat("请只回复两个字：OK", max_turns=1, timeout=120)
             except CCExecutionError as error:
@@ -573,17 +583,20 @@ def create_session_app(
         return {"ok": True, "message": message, "result": (result or "")[:500]}
 
     @app.get("/v1/config/api-key")
-    def get_api_key(model: str = Query(min_length=1, max_length=200)):
-        """按模型厂商回显已保存的 sk（明文）；内部模型返回 vendor=null。"""
-        vendor = vendor_of_model(model)
+    def get_api_key(
+        model: str = Query(min_length=1, max_length=200),
+        provider_id: str = Query(default="", max_length=80),
+    ):
+        """按显式 provider 或模型厂商回显已保存的 sk（明文）。"""
+        vendor = provider_id.strip().lower() or vendor_of_model(model)
         if not vendor:
             return {"vendor": None, "api_key": None}
         return {"vendor": vendor, "api_key": session_manager.get_api_key(vendor)}
 
     @app.put("/v1/config/api-key")
     def put_api_key(body: ApiKeyRequest):
-        """按模型厂商保存 sk；空 api_key 视为删除该厂商凭据。"""
-        vendor = vendor_of_model(body.model)
+        """按显式 provider 或模型厂商保存 sk；空 api_key 视为删除。"""
+        vendor = (body.provider_id or "").strip().lower() or vendor_of_model(body.model)
         if not vendor:
             raise HTTPException(
                 status_code=400,
@@ -1292,7 +1305,7 @@ def create_session_app(
 # model 以独立键 _session_model 注入，与节点显式 model 区分，保证解析优先级：
 #   节点显式 model > 角色 yaml 显式 model > 系统设置(_session_model) > CLI 自身默认
 # 全程无代码级兜底默认值（不要代码兜底）。
-_SESSION_FALLBACK_KEYS = ("cli_name", "api_base_url", "api_key_env")
+_SESSION_FALLBACK_KEYS = ("cli_name", "api_base_url", "api_key_env", "provider_id")
 
 
 def _merge_session_connection(

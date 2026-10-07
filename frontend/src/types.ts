@@ -141,6 +141,7 @@ export interface NodeConfig {
   model?: string;
   api_base_url?: string;
   api_key_env?: string;
+  provider_id?: string | null;
   skip_permissions?: boolean;
   num_ccs?: number;
   skills?: string[];
@@ -190,12 +191,22 @@ export interface CliInfo {
 export interface ProviderPreset {
   id: string;
   display_name: string;
+  provider_kind?: 'native' | 'gateway';
   cli_name?: string;
   model?: string;
   api_base_url?: string;
   api_key_env?: string;
   wire_api?: string;
   models?: string[];
+  cli_names?: string[];
+  routes?: Record<string, {
+    api_base_url?: string;
+    api_key_env?: string;
+    auth_env?: string;
+    wire_api?: string;
+    enabled?: boolean;
+  }>;
+  allow_custom_model?: boolean;
   available?: boolean;
   note?: string;
 }
@@ -207,6 +218,7 @@ export interface GlobalConfig {
   model: string | null;
   api_base_url: string | null;
   api_key_env: string | null;
+  provider_id?: string | null;
   language?: 'zh' | 'en';
   /** 单节点 agent 数量是否由 Manager 动态规划（false = 全部节点使用 default_num_ccs）。 */
   dynamic_num_ccs?: boolean;

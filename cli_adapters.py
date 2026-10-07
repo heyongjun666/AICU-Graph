@@ -84,6 +84,39 @@ def list_provider_presets() -> list[dict]:
     return [item for item in presets if isinstance(item, dict) and item.get("id")]
 
 
+def provider_route(provider_id: Optional[str], cli_name: Optional[str]) -> Optional[dict]:
+    """Resolve a provider's CLI-specific connection profile.
+
+    Legacy presets only have top-level connection fields, so they continue to return
+    a synthesized profile. Gateway presets may override protocol and endpoint per CLI.
+    """
+    provider = (provider_id or "").strip().lower()
+    cli = (cli_name or "").strip().lower()
+    if not provider or not cli:
+        return None
+    preset = next((item for item in list_provider_presets() if str(item.get("id", "")).lower() == provider), None)
+    if not preset:
+        return None
+    routes = preset.get("routes")
+    if isinstance(routes, dict) and cli not in routes:
+        return None
+    route = routes.get(cli) if isinstance(routes, dict) else None
+    if route is not None and not isinstance(route, dict):
+        return None
+    if route is not None and route.get("enabled") is False:
+        return None
+    result = {
+        "provider_id": provider,
+        "cli_name": cli,
+        "api_base_url": preset.get("api_base_url"),
+        "api_key_env": preset.get("api_key_env"),
+        "wire_api": preset.get("wire_api"),
+    }
+    if isinstance(route, dict):
+        result.update({key: value for key, value in route.items() if value is not None})
+    return result
+
+
 # ---- 跨厂商模型：直连厂商对应协议的原生端点 ------------------------------------
 #
 # 背景：每个 CLI 只认自己那一种协议（claude 只会说 Anthropic Messages，
@@ -208,8 +241,19 @@ def _preset_base_urls() -> set:
     }
 
 
+def _gateway_preset_base_urls() -> set:
+    """返回显式网关预置地址，模型原厂商路由不得覆盖这些地址。"""
+    return {
+        str(preset["api_base_url"])
+        for preset in list_provider_presets()
+        if preset.get("api_base_url")
+        and (preset.get("provider_kind") == "gateway" or preset.get("id") == "openrouter")
+    }
+
+
 def native_base_url(
-    cli_name: Optional[str], model: Optional[str], configured_base_url: Optional[str]
+    cli_name: Optional[str], model: Optional[str], configured_base_url: Optional[str],
+    provider_id: Optional[str] = None,
 ) -> Optional[str]:
     """该 (CLI, 模型) 组合应当直连的厂商原生端点；不需要改写时返回 None。
 
@@ -225,8 +269,14 @@ def native_base_url(
     native = _CLI_NATIVE.get(cli_name or "")
     if not native:
         return None
+    # Gateway routes are already explicit and must never be rerouted by the
+    # model's original vendor (e.g. openrouter/anthropic/* -> api.anthropic.com).
+    if provider_route(provider_id, cli_name):
+        return None
 
     if configured_base_url and str(configured_base_url) not in _preset_base_urls():
+        return None
+    if configured_base_url and str(configured_base_url) in _gateway_preset_base_urls():
         return None
 
     native_vendor, protocol = native
@@ -262,7 +312,8 @@ def _has_managed_slot(cli_name: Optional[str]) -> bool:
 
 
 def provider_slot_base_url(
-    cli_name: Optional[str], model: Optional[str], configured_base_url: Optional[str]
+    cli_name: Optional[str], model: Optional[str], configured_base_url: Optional[str],
+    provider_id: Optional[str] = None,
 ) -> Optional[str]:
     """本次运行 AICU 托管槽该持有的端点；返回 None 表示「把自己上次写的撤掉」。
 
@@ -285,6 +336,8 @@ def provider_slot_base_url(
     """
     if not _has_managed_slot(cli_name):
         return None
+    if provider_route(provider_id, cli_name):
+        return str(configured_base_url) if configured_base_url else None
     if configured_base_url:
         return str(configured_base_url)
     native = _CLI_NATIVE.get(cli_name or "")
@@ -301,7 +354,8 @@ def provider_slot_base_url(
 
 
 def effective_base_url(
-    cli_name: Optional[str], model: Optional[str], configured_base_url: Optional[str]
+    cli_name: Optional[str], model: Optional[str], configured_base_url: Optional[str],
+    provider_id: Optional[str] = None,
 ) -> tuple[Optional[str], str]:
     """这次运行**真正会用到**的端点，以及它是怎么定下来的 —— 给界面看的那个答案。
 
@@ -321,12 +375,17 @@ def effective_base_url(
          （codex 顶层 ``model_provider = "aicu"`` 指过去就是它），照抄配置里的预置地址
          会让「选了 OpenAI 预置再把模型换成 deepseek」打到 openai 去。
     """
+    route = provider_route(provider_id, cli_name)
+    if route:
+        route_url = route.get("api_base_url") or configured_base_url
+        return (str(route_url) if route_url else None), "configured"
+
     configured = str(configured_base_url) if configured_base_url else None
 
-    endpoint = native_base_url(cli_name, model, configured)
+    endpoint = native_base_url(cli_name, model, configured, provider_id=provider_id)
     addressed = endpoint or configured
 
-    slot = provider_slot_base_url(cli_name, model, addressed)
+    slot = provider_slot_base_url(cli_name, model, addressed, provider_id=provider_id)
     if slot:
         return slot, "configured" if slot == configured else "model_vendor"
 
@@ -2027,10 +2086,9 @@ class CodexAdapter(CliAdapter):
             _release_codex_config()
             return
         # config.toml 的 env_key 必须与 _build_process_env 注入 sk 用的变量名逐字一致，
-        # 否则 codex 报「Missing environment variable: OPENAI_API_KEY」。后者走
-        # api_key_env_for_model（按厂商），所以这里也优先按厂商解析；显式传入的
-        # api_key_env 只作兜底（模型判不出厂商时）。
-        env_key = api_key_env_for_vendor(vendor_of_model(model)) or api_key_env
+        # 否则 codex 报「Missing environment variable」。显式 provider route 的
+        # api_key_env（例如 OpenRouter）优先；旧的无 provider 配置才按模型厂商回退。
+        env_key = api_key_env or api_key_env_for_vendor(vendor_of_model(model))
         _provision_codex_config(api_base_url, env_key, model)
 
     def format_stream_event(self, line: str) -> str:
@@ -2475,7 +2533,11 @@ class QwenAdapter(CliAdapter):
             return
         # 同 codex：envKey 走 api_key_env_for_model，与注入 sk 的变量名同源，
         # 显式传入的 api_key_env 只作兜底。
-        env_key = self.api_key_env_for_model(model) or api_key_env
+        env_key = (
+            api_key_env
+            if api_key_env == "OPENROUTER_API_KEY"
+            else self.api_key_env_for_model(model) or api_key_env
+        )
         _provision_qwen_config(api_base_url, env_key, model)
 
     def format_stream_event(self, line: str) -> str:
@@ -2741,7 +2803,19 @@ class OpenCodeAdapter(CliAdapter):
         # 需要这个环境变量，否则 MCP 配置没有下发通道、静默丢失。
         if api_base_url or mcp_servers:
             env["OPENCODE_CONFIG_CONTENT"] = _opencode_config_content(
-                api_base_url, KNOWN_MODELS.get("all", []), api_key_env, mcp_servers
+                api_base_url,
+                list(dict.fromkeys([
+                    *KNOWN_MODELS.get("all", []),
+                    *[
+                        item_model
+                        for preset in list_provider_presets()
+                        if model and preset.get("provider_kind") == "gateway"
+                        for item_model in (preset.get("models") or [])
+                    ],
+                    *([model] if model else []),
+                ])),
+                api_key_env,
+                mcp_servers,
             )
         return env
 
@@ -2906,7 +2980,11 @@ class PiAdapter(CliAdapter):
             return
         # 同 codex / qwen：models.json 里 apiKey 引用的变量名必须与注入 sk 的变量名一致，
         # 两边同源取 api_key_env_for_model；显式传入的 api_key_env 只作兜底。
-        env_key = self.api_key_env_for_model(model) or api_key_env
+        env_key = (
+            api_key_env
+            if api_key_env == "OPENROUTER_API_KEY"
+            else self.api_key_env_for_model(model) or api_key_env
+        )
         _provision_pi_config(api_base_url, env_key, model)
 
     def build_base_command(

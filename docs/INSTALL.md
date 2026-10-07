@@ -174,6 +174,23 @@ export ANTHROPIC_API_KEY="你的 API Key"
 
 不要把真实 API Key 写入源码、README、`.env` 文件或 Git 提交中。
 
+### OpenRouter
+
+设置页中的 **OpenRouter** 是一个聚合网关，不是模型原厂商。AICU 按 CLI 使用的 wire protocol 选择对应 route：
+
+- OpenAI Chat-compatible：OpenCode、Pi、Qwen Code、Kimi Code、CodeBuddy；
+- Anthropic Messages：Claude Code，使用 `https://openrouter.ai/api`；
+- OpenAI Responses：Codex CLI，使用 `https://openrouter.ai/api/v1`；
+- Cursor 的专用后端、Gemini/Antigravity 的 Google native 协议以及 Grok 当前不在这个普通 OpenRouter 预置中，仍需单独适配或验证。
+
+OpenRouter 使用以下端点和环境变量：
+
+```bash
+export OPENROUTER_API_KEY="你的 OpenRouter API Key"
+```
+
+也可以直接在设置页输入并保存 Key。模型名使用 OpenRouter 的完整 ID，例如 `openai/gpt-4.1` 或 `anthropic/claude-sonnet-4.5`；选择 OpenRouter 后，既可以从常用模型列表选择，也可以输入其它合法模型 ID。模型权限、计费和可用性由 OpenRouter 账户决定。
+
 ## 8. 基本验证
 
 服务启动后，检查 API 是否正常响应：

@@ -171,6 +171,37 @@
       "wire_api": "messages",
       "available": true,
       "note": "MiniMax 提供 Anthropic 兼容端点，用 Claude Code 接入"
+    },
+    {
+      "id": "openrouter",
+      "provider_kind": "gateway",
+      "display_name": "OpenRouter",
+      "cli_name": "opencode",
+      "cli_names": ["opencode", "pi", "qwen", "kimi", "codebuddy", "claude", "codex"],
+      "model": "openai/gpt-4.1",
+      "models": [
+        "openai/gpt-4.1",
+        "openai/gpt-4.1-mini",
+        "anthropic/claude-sonnet-4.5",
+        "anthropic/claude-haiku-4.5",
+        "google/gemini-2.5-flash",
+        "deepseek/deepseek-chat-v3.1"
+      ],
+      "api_base_url": "https://openrouter.ai/api/v1",
+      "api_key_env": "OPENROUTER_API_KEY",
+      "wire_api": "chat",
+      "routes": {
+        "opencode": {"api_base_url": "https://openrouter.ai/api/v1", "wire_api": "chat", "enabled": true},
+        "pi": {"api_base_url": "https://openrouter.ai/api/v1", "wire_api": "chat", "enabled": true},
+        "qwen": {"api_base_url": "https://openrouter.ai/api/v1", "wire_api": "chat", "enabled": true},
+        "kimi": {"api_base_url": "https://openrouter.ai/api/v1", "wire_api": "chat", "enabled": true},
+        "codebuddy": {"api_base_url": "https://openrouter.ai/api/v1", "wire_api": "chat", "enabled": true},
+        "claude": {"api_base_url": "https://openrouter.ai/api", "wire_api": "messages", "auth_env": "ANTHROPIC_AUTH_TOKEN", "enabled": true},
+        "codex": {"api_base_url": "https://openrouter.ai/api/v1", "wire_api": "responses", "enabled": true}
+      },
+      "available": true,
+      "allow_custom_model": true,
+      "note": "按 CLI 使用 Chat、Anthropic Messages 或 OpenAI Responses 协议；Cursor/Gemini 等仍需单独适配"
     }
   ]
 }

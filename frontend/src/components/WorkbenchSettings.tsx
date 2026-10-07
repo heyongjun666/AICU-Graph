@@ -79,6 +79,19 @@ const MAX_CONCURRENCY_MAX = 16;
  *  因为「什么都没选」和「我要自己填」在界面上长得一样，用户却以为是两回事。 */
 const MANUAL_PROVIDER = '__manual__';
 
+type ProviderRoute = NonNullable<ProviderPreset['routes']>[string];
+
+function providerRouteFor(preset: ProviderPreset | undefined, cliName: string | null | undefined): ProviderRoute | undefined {
+  if (!preset || !cliName) return undefined;
+  const route = preset.routes?.[cliName];
+  if (route?.enabled === false) return undefined;
+  return route;
+}
+
+function routeApiKeyEnv(route: ProviderRoute | undefined, preset: ProviderPreset | undefined): string | null {
+  return route?.auth_env || route?.api_key_env || preset?.api_key_env || null;
+}
+
 const clampNumCcs = (value: unknown): number => {
   const parsed = Number.parseInt(String(value ?? ''), 10);
   if (Number.isNaN(parsed)) return NUM_CCS_MIN;
@@ -524,9 +537,13 @@ const WorkbenchSettings: React.FC<WorkbenchSettingsProps> = ({ open, onClose, on
       // 它就不是当前这套配置的来源（用户选了预置又改了 CLI 就会这样）。
       const presetCliId = globalResp.config.cli_name || globalResp.default_cli;
       const usablePresets = providerPresets.filter(
-        (preset) => preset.available !== false && preset.cli_name === presetCliId,
+        (preset) => preset.available !== false
+          && (!preset.cli_names?.length
+            ? preset.cli_name === presetCliId
+            : preset.cli_names.includes(presetCliId || '')),
       );
-      const initialPreset = usablePresets.find((preset) => preset.model === globalResp.config.model)
+      const initialPreset = providerPresets.find((preset) => preset.id === globalResp.config.provider_id)
+        ?? usablePresets.find((preset) => preset.model === globalResp.config.model)
         ?? usablePresets.find(
           (preset) => globalResp.config.api_base_url && preset.api_base_url === globalResp.config.api_base_url,
         );
@@ -535,6 +552,10 @@ const WorkbenchSettings: React.FC<WorkbenchSettingsProps> = ({ open, onClose, on
       // 宣称一套用户从没选过的参数。仓库里没有任何 config.json 迁移代码
       //（session_manager.py:388-401 对未知键静默丢弃、不做归一），兼容只能在这做。
       setSelectedProviderId(initialPreset?.id ?? MANUAL_PROVIDER);
+      setConfig((current) => ({
+        ...current,
+        provider_id: initialPreset?.id ?? globalResp.config.provider_id ?? null,
+      }));
       // 预置是靠地址认出来的、而模型是空的时候（手改过 config.json），把预置的模型带上：
       // 严格下拉里没有「空」这一项，不补值用户看到的就是一个空框。
       if (initialPreset && !globalResp.config.model) {
@@ -604,7 +625,12 @@ const WorkbenchSettings: React.FC<WorkbenchSettingsProps> = ({ open, onClose, on
   }, [open]);
 
   // 按当前 CLI 回显 Internal 账号或模型厂商 API Key。
-  const loadCredential = async (cliName: string | null, model: string | null, fallbackCli: string | null) => {
+  const loadCredential = async (
+    cliName: string | null,
+    model: string | null,
+    fallbackCli: string | null,
+    providerId: string | null = selectedProviderId,
+  ) => {
     if ((cliName || fallbackCli) === 'internal') {
       setApiKey('');
       setApiKeyVendor(null);
@@ -617,7 +643,7 @@ const WorkbenchSettings: React.FC<WorkbenchSettingsProps> = ({ open, onClose, on
     setInternalUsername('');
     if (!model) { setApiKey(''); setApiKeyVendor(null); return; }
     try {
-      const resp = await getApiKey(model);
+      const resp = await getApiKey(model, providerId === MANUAL_PROVIDER ? null : providerId);
       setApiKey(resp.api_key || '');
       setApiKeyVendor(resp.vendor);
     } catch { setApiKey(''); setApiKeyVendor(null); }
@@ -625,38 +651,56 @@ const WorkbenchSettings: React.FC<WorkbenchSettingsProps> = ({ open, onClose, on
 
   useEffect(() => {
     if (!open) return;
-    void loadCredential(config.cli_name, config.model, defaultCli);
-  }, [open, config.cli_name, config.model, defaultCli]);
+    void loadCredential(config.cli_name, config.model, defaultCli, selectedProviderId);
+  }, [open, config.cli_name, config.model, defaultCli, selectedProviderId]);
 
   const setGlobal = <K extends keyof GlobalConfig>(key: K, value: GlobalConfig[K]) =>
     setConfig((current) => ({ ...current, [key]: value }));
 
   /** Provider 下拉：选预置则自动填充 CLI/模型/API 参数；选「手动配置」则把端点交还用户。
    *  取值只有预置 id 与 MANUAL_PROVIDER 两种（与旁边的 CLI 下拉取值一致，不是 display_name）。 */
+  const selectedProvider = providerPresets.find((preset) => preset.id === selectedProviderId);
   const chooseProvider = (value: string) => {
     setSelectedProviderId(value);
     if (value === MANUAL_PROVIDER) {
       // 必须清空地址：预置残留值若恰好等于某个预置地址，后端会按模型厂商把它改写掉
       //（cli_adapters.py:216-217），界面上写着「手动配置」而实际地址被换掉。
-      setConfig((current) => ({ ...current, api_base_url: null }));
+      setConfig((current) => ({ ...current, api_base_url: null, provider_id: null }));
       return;
     }
     const preset = providerPresets.find((item) => item.id === value);
     if (!preset || preset.available === false) return;  // 认不出的取值：各字段保持原样
+    const allowedClis = preset.cli_names?.length ? preset.cli_names : (preset.cli_name ? [preset.cli_name] : []);
+    const nextCli = allowedClis.includes(config.cli_name || '')
+      ? config.cli_name
+      : (preset.cli_name || allowedClis[0] || config.cli_name);
+    const route = providerRouteFor(preset, nextCli);
     setConfig((current) => ({
       ...current,
-      cli_name: preset.cli_name || current.cli_name,
+      provider_id: preset.id,
+      cli_name: nextCli,
       model: preset.model || preset.models?.[0] || current.model,
-      api_base_url: preset.api_base_url || null,
-      api_key_env: preset.api_key_env || null,
+      api_base_url: route?.api_base_url || preset.api_base_url || null,
+      api_key_env: routeApiKeyEnv(route, preset),
+    }));
+  };
+
+  const chooseCli = (value: string) => {
+    const route = providerRouteFor(selectedProvider, value);
+    setConfig((current) => ({
+      ...current,
+      cli_name: value || null,
+      ...(selectedProvider ? {
+        api_base_url: route?.api_base_url || selectedProvider.api_base_url || null,
+        api_key_env: routeApiKeyEnv(route, selectedProvider),
+      } : {}),
     }));
   };
 
   const manualMode = selectedProviderId === MANUAL_PROVIDER;
-  const selectedProvider = providerPresets.find((preset) => preset.id === selectedProviderId);
   // 模型能不能手输 = 端点是不是用户自己的：手动配置下名单无从算起，只能让他填；
   // 其余情形（某个预置）名单是确定的，就不该让人把 gpt-5.6 敲进 claude 的下拉里。
-  const modelIsFreeText = manualMode;
+  const modelIsFreeText = manualMode || Boolean(selectedProvider?.allow_custom_model);
   // 地址框只在手动模式下可编辑。其余模式下框架里显示的是后端算出的「生效地址」——
   // 它随模型厂商变，用户改它没有意义（存进去也会被后端按模型改写掉）。
   const addressLocked = Boolean(selectedProvider);
@@ -669,12 +713,17 @@ const WorkbenchSettings: React.FC<WorkbenchSettingsProps> = ({ open, onClose, on
       return;
     }
     let cancelled = false;
-    getEffectiveBaseUrl({ cliName: config.cli_name, model: config.model, apiBaseUrl: config.api_base_url })
+    getEffectiveBaseUrl({
+      cliName: config.cli_name,
+      model: config.model,
+      apiBaseUrl: config.api_base_url,
+      providerId: selectedProviderId === MANUAL_PROVIDER ? null : selectedProviderId,
+    })
       .then((resp) => { if (!cancelled) setEffectiveBaseUrl(resp); })
       // 问不到就退回显示已存地址（下面 displayedBaseUrl 的 `??`）：宁可少说，不可说错。
       .catch(() => { if (!cancelled) setEffectiveBaseUrl(null); });
     return () => { cancelled = true; };
-  }, [open, addressLocked, config.cli_name, config.model, config.api_base_url]);
+  }, [open, addressLocked, config.cli_name, config.model, config.api_base_url, selectedProviderId]);
 
   // 非手动模式下这个框是只读的「生效地址」，值不来自 config（config 里存的是预置地址，
   // 后端会按模型把它改写掉）——所以显示与落盘本来就会不一致，显示的那个才是真的。
@@ -689,13 +738,25 @@ const WorkbenchSettings: React.FC<WorkbenchSettingsProps> = ({ open, onClose, on
         ? t('settings.apiBaseUrlCliDefault')
         : t('settings.apiBaseUrlLocked');
 
+  // 当前 Provider 若声明了兼容 CLI，只在下拉中展示这些 CLI；旧预置仍按 cli_name 工作。
+  const providerCliIds = selectedProvider?.routes
+    ? Object.entries(selectedProvider.routes)
+      .filter(([, route]) => route.enabled !== false)
+      .map(([cliId]) => cliId)
+    : selectedProvider?.cli_names?.length
+      ? selectedProvider.cli_names
+      : (selectedProvider?.cli_name ? [selectedProvider.cli_name] : null);
+  const visibleClis = providerCliIds
+    ? clis.filter((cli) => providerCliIds.includes(cli.id))
+    : clis;
   // 当前 CLI 的已知模型清单：显式选择时用该 CLI 的 models；
   // Auto-detect 时用默认 CLI 的 models；都无法确定则用全部 CLI 模型的并集（去重）。
   const selectedCliId = config.cli_name || defaultCli;
   // 找不到当前 CLI（例如配置里存着已从下拉隐藏的 CLI id）时退回默认 CLI，而不是落到
   // 下面的「全部并集」—— 那会把别家 CLI 才能用的模型全带回来。
-  const selectedCli = clis.find((cli) => cli.id === selectedCliId)
-    ?? clis.find((cli) => cli.id === defaultCli);
+  const selectedCli = visibleClis.find((cli) => cli.id === selectedCliId)
+    ?? visibleClis.find((cli) => cli.id === defaultCli)
+    ?? clis.find((cli) => cli.id === selectedCliId);
   const modelOptions = selectedCli?.models?.length
     ? selectedCli.models
     : Array.from(new Set(clis.flatMap((cli) => cli.models || [])));
@@ -703,7 +764,8 @@ const WorkbenchSettings: React.FC<WorkbenchSettingsProps> = ({ open, onClose, on
   // 厂商预置的模型只在「预置自己的 CLI == 当前 CLI」时才并入候选。否则选了 OpenAI
   // 预置、再把 CLI 切成 claude 时，那几个 gpt-* 仍会留在 claude 的下拉里 —— 而
   // OpenAI 没有 /v1/messages 端点，选中必然连不上。
-  const providerModelOptions = selectedProvider && selectedProvider.cli_name === selectedCliId
+  const providerModelOptions = selectedProvider
+    && (selectedProvider.cli_names?.includes(selectedCliId || '') || selectedProvider.cli_name === selectedCliId)
     ? selectedProvider.models || []
     : [];
 
@@ -728,13 +790,18 @@ const WorkbenchSettings: React.FC<WorkbenchSettingsProps> = ({ open, onClose, on
       if ((config.cli_name || defaultCli) === 'internal') {
         await saveInternalUsername(internalUsername);
       } else if (config.model) {
-        await saveApiKey(config.model, apiKey);
+        await saveApiKey(
+          config.model,
+          apiKey,
+          selectedProviderId === MANUAL_PROVIDER ? null : selectedProviderId,
+        );
       }
       await updateGlobalConfig({
         cli_name: config.cli_name,
         model: config.model,
         api_base_url: config.api_base_url,
         api_key_env: config.api_key_env,
+        provider_id: selectedProviderId === MANUAL_PROVIDER ? null : selectedProviderId,
       });
       const message = t('settings.connectionSaved');
       setNotice(message); addToast({ type: 'success', message });
@@ -754,6 +821,7 @@ const WorkbenchSettings: React.FC<WorkbenchSettingsProps> = ({ open, onClose, on
         model: config.model,
         api_base_url: config.api_base_url,
         api_key_env: config.api_key_env,
+        provider_id: selectedProviderId === MANUAL_PROVIDER ? null : selectedProviderId,
       });
       if (resp.ok) {
         const message = resp.result ? t('settings.connectionSuccessResult', { result: resp.result.slice(0, 200) }) : (resp.message || t('settings.connectionSuccess'));
@@ -1335,7 +1403,7 @@ const WorkbenchSettings: React.FC<WorkbenchSettingsProps> = ({ open, onClose, on
             {error && <div className="settings-message is-error">{error}</div>}
             {notice && <div className="settings-message is-success">{notice}</div>}
             {tab === 'mcp' && mcpError && <div className="settings-message is-error">{mcpError}</div>}
-            {tab === 'connection' && <div className="settings-section"><div className="section-heading"><div><h3>{t('settings.connectionTitle')}</h3><p>{t('settings.connectionDesc')}</p></div></div><div className="form-grid"><label>{t('settings.provider')}<select id="provider-select" value={selectedProviderId} onChange={(event) => chooseProvider(event.target.value)}><option value={MANUAL_PROVIDER}>{t('settings.providerManual')}</option>{providerPresets.filter((preset) => preset.available !== false).map((preset) => <option key={preset.id} value={preset.id}>{preset.display_name}</option>)}</select><small>{manualMode ? t('settings.providerManualHint') : t('settings.providerHint')}</small></label><label>{t('settings.cli')}<select id="cli-select" value={config.cli_name || ''} onChange={(event) => setGlobal('cli_name', event.target.value || null)}><CliOptions clis={clis} defaultCli={defaultCli} /></select></label><label>{t('settings.model')}{modelIsFreeText ? <><input list="model-options" value={config.model || ''} onChange={(event) => setGlobal('model', event.target.value || null)} placeholder={t('settings.selectOrTypeModel')} /><datalist id="model-options">{allModelOptions.map((model) => <option key={model} value={model} />)}</datalist></> : <select id="model-select" value={config.model || ''} onChange={(event) => setGlobal('model', event.target.value || null)}>{modelIsForeign && <option value={config.model as string}>{t('settings.modelNotInList', { model: config.model as string })}</option>}{allModelOptions.map((model) => <option key={model} value={model}>{model}</option>)}</select>}</label><label>{t('settings.apiBaseUrl')}<input id="api-base-url" value={displayedBaseUrl} disabled={addressLocked} onChange={(event) => setGlobal('api_base_url', event.target.value || null)} placeholder={t('common.optional')} /><small>{baseUrlHint}</small></label>{(config.cli_name || defaultCli) === 'internal' ? <label>{t('settings.accountName')}<input value={internalUsername} onChange={(event) => setInternalUsername(event.target.value)} placeholder={t('settings.accountNamePlaceholder')} /><small>{t('settings.accountNameNote')}</small></label> : <label>{t('settings.apiKey')}<input type="password" value={apiKey} onChange={(event) => setApiKey(event.target.value)} placeholder={t('settings.apiKeyPlaceholder')} /><small>{apiKeyVendor ? t('settings.vendor', { vendor: apiKeyVendor }) : ''}{t('settings.localPlaintextNote')}</small></label>}</div><div className="settings-actions"><button className="secondary-button" disabled={testing || busy} onClick={runConnectionTest}>{testing ? t('settings.testing') : t('settings.testConnection')}</button><button className="primary-button" disabled={busy} onClick={saveConnection}><Save size={15} /> {t('settings.saveConnection')}</button></div></div>}
+            {tab === 'connection' && <div className="settings-section"><div className="section-heading"><div><h3>{t('settings.connectionTitle')}</h3><p>{t('settings.connectionDesc')}</p></div></div><div className="form-grid"><label>{t('settings.provider')}<select id="provider-select" value={selectedProviderId} onChange={(event) => chooseProvider(event.target.value)}><option value={MANUAL_PROVIDER}>{t('settings.providerManual')}</option>{providerPresets.filter((preset) => preset.available !== false).map((preset) => <option key={preset.id} value={preset.id}>{preset.display_name}</option>)}</select><small>{manualMode ? t('settings.providerManualHint') : t('settings.providerHint')}</small></label><label>{t('settings.cli')}<select id="cli-select" value={config.cli_name || ''} onChange={(event) => chooseCli(event.target.value)}><CliOptions clis={visibleClis} defaultCli={defaultCli} /></select></label><label>{t('settings.model')}{modelIsFreeText ? <><input list="model-options" value={config.model || ''} onChange={(event) => setGlobal('model', event.target.value || null)} placeholder={t('settings.selectOrTypeModel')} /><datalist id="model-options">{allModelOptions.map((model) => <option key={model} value={model} />)}</datalist></> : <select id="model-select" value={config.model || ''} onChange={(event) => setGlobal('model', event.target.value || null)}>{modelIsForeign && <option value={config.model as string}>{t('settings.modelNotInList', { model: config.model as string })}</option>}{allModelOptions.map((model) => <option key={model} value={model}>{model}</option>)}</select>}</label><label>{t('settings.apiBaseUrl')}<input id="api-base-url" value={displayedBaseUrl} disabled={addressLocked} onChange={(event) => setGlobal('api_base_url', event.target.value || null)} placeholder={t('common.optional')} /><small>{baseUrlHint}</small></label>{(config.cli_name || defaultCli) === 'internal' ? <label>{t('settings.accountName')}<input value={internalUsername} onChange={(event) => setInternalUsername(event.target.value)} placeholder={t('settings.accountNamePlaceholder')} /><small>{t('settings.accountNameNote')}</small></label> : <label>{t('settings.apiKey')}<input type="password" value={apiKey} onChange={(event) => setApiKey(event.target.value)} placeholder={t('settings.apiKeyPlaceholder')} /><small>{apiKeyVendor ? t('settings.vendor', { vendor: apiKeyVendor }) : ''}{t('settings.localPlaintextNote')}</small></label>}</div><div className="settings-actions"><button className="secondary-button" disabled={testing || busy} onClick={runConnectionTest}>{testing ? t('settings.testing') : t('settings.testConnection')}</button><button className="primary-button" disabled={busy} onClick={saveConnection}><Save size={15} /> {t('settings.saveConnection')}</button></div></div>}
             {tab === 'workspace' && (
               <div className="settings-section">
                 <div className="section-heading">

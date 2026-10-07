@@ -234,6 +234,7 @@ class AICURouter:
             cli_name=self._config.get("cli_name"),
             api_base_url=self._config.get("api_base_url"),
             api_key_env=self._config.get("api_key_env"),
+            provider_id=self._config.get("provider_id"),
             skip_permissions=True,
         )
 

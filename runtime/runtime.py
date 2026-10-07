@@ -378,6 +378,7 @@ class Runtime(RuntimeGateway, SchedulerDelegate):
                 "_session_model",
                 "api_base_url",
                 "api_key_env",
+                "provider_id",
                 "skip_permissions",
                 "skills",
             ):
@@ -1327,7 +1328,7 @@ class Runtime(RuntimeGateway, SchedulerDelegate):
         """
         from executables.worker import Worker
 
-        aicu_keys = ("cli_name", "model", "api_base_url", "api_key_env", "skills")
+        aicu_keys = ("cli_name", "model", "api_base_url", "api_key_env", "provider_id", "skills")
         # 工作区存在性检查：不能直接用 get_node_workspace —— 它内部会
         # os.makedirs(exist_ok=True) 后返回，恒为已存在路径，导致「workspace 失效 →
         # 新建会话」兜底失效。这里从节点已持久化的 config 推导工作区路径做纯存在性判断。

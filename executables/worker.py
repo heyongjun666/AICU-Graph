@@ -305,6 +305,7 @@ def _create_real_aicu(ctx: ExecutableContext) -> Any:
         output_callback=append_output,
         api_base_url=node.config.get("api_base_url"),
         api_key_env=node.config.get("api_key_env"),
+        provider_id=node.config.get("provider_id"),
         skills=selected_skills,
         skills_dir=skills_dir,
         mcp=selected_mcp,

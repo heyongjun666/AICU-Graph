@@ -74,6 +74,16 @@
 
 AICU-Graph 的核心运行服务由 `main.py` 启动，使用 `runtime/` 提供的 FastAPI、SSE 和任务执行能力；`frontend/` 是对应的 Web 工作台。
 
+### Provider 与模型厂商
+
+设置页中的 Provider 不一定等于模型原厂商。这里有三个相互独立的维度：
+
+1. **Provider**：请求的凭据归属与网关身份，例如 `openrouter`；
+2. **模型原厂商**：由模型 ID 推断的来源，例如 `openai/gpt-4.1` 的原厂商是 OpenAI，但这不表示请求要使用 `OPENAI_API_KEY`；
+3. **CLI wire protocol**：具体 CLI 发出的协议，例如 Chat Completions、Anthropic Messages 或 OpenAI Responses。
+
+原生 Provider（如 OpenAI、Anthropic）可以在没有显式 provider 时按模型名兼容推断凭据；网关 Provider（如 OpenRouter）必须通过 `provider_id` 显式保存和读取凭据。一个 gateway provider 可以按 CLI 拥有多个 route：OpenCode/Pi/Qwen/Kimi/CodeBuddy 使用 Chat，Claude Code 使用 Messages，Codex 使用 Responses。因此不能只用一个顶层 `wire_api` 代表所有 CLI。Runtime 只透传 `provider_id`，route 解析集中在 CLI adapter 中，并同时服务生效端点、连接测试和真实子进程配置。实际请求仍由 CLI 子进程发出，AICU 不新增独立 HTTP client。
+
 ---
 
 ## 三、源码目录 vs 运行时数据目录（重要）

@@ -29,6 +29,7 @@ _SESSION_CONFIG_KEYS = {
     "model",
     "api_base_url",
     "api_key_env",
+    "provider_id",
     "skip_permissions",
     "skills",
     "candidate_roles",
@@ -45,6 +46,7 @@ _GLOBAL_CONFIG_KEYS = {
     "model",
     "api_base_url",
     "api_key_env",
+    "provider_id",
     "language",
     "dynamic_num_ccs",
     "default_num_ccs",
@@ -57,6 +59,7 @@ _GLOBAL_CONFIG_DEFAULTS = {
     "model": None,
     "api_base_url": None,
     "api_key_env": None,
+    "provider_id": None,
     "language": "zh",
     # 单节点 agent（CC）数量策略：开 = 由 Manager 规划决定（现状）；
     # 关 = 全部节点统一钉死为 default_num_ccs。
@@ -205,7 +208,7 @@ class SessionManager:
         # 会话未显式指定的 CLI/model 等配置，继承全局默认值。
         inherited = {
             key: self.global_config.get(key)
-            for key in ("cli_name", "model", "api_base_url", "api_key_env", "language")
+            for key in ("cli_name", "model", "api_base_url", "api_key_env", "provider_id", "language")
             if self.global_config.get(key)
         }
         # 会话生效的工作空间根（与 _build_handle 的解析保持一致：显式指定优先，

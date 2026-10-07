@@ -361,6 +361,60 @@ class TestRuntimeWiring:
         children_after = {c.id for c in runtime.graph.children(root)}
         assert children_after == children_before
 
+    def test_submit_fix_plan_derives_summary_when_child_has_none(self, runtime):
+        """回归：子节点 task_summary 为空时修复计划仍可提交，不得抛 PlanValidationError。
+
+        根因：修复步骤的摘要只取 fix.task_summary 与 child.task_summary，二者皆空
+        （早期创建的历史节点不会携带该字段）时撞上「task_summary 必填」硬校验 →
+        异常在任何图变更前抛出 → Manager 被置 plan_validation_error，随后自动重试
+        只重开评审 → 同一处再抛 → 迭代耗尽，真因被「Max iterations exceeded」掩盖。
+        摘要对修复步骤无独立信息量（职责沿用原节点），修复任务文本即可充当索引。
+        """
+        root = runtime.submit_root_manager(task="root")
+        old = runtime.inject_plan(
+            root, _plan(_step("legacy", exec_type="worker", role="dev_member"))
+        )[0]
+        # 模拟历史节点：节点上没有持久化职责摘要
+        runtime.graph.update_node(old.id, task_summary=None)
+
+        fixed = runtime.submit_fix_plan(
+            root,
+            [{
+                "step_ref": "legacy",
+                "fix": {"role": "dev_member", "task": "补出复核结论并落盘"},
+            }],
+            1,
+        )
+
+        # 原地续接：不新建替代节点，原节点被重新激活并带上修复任务
+        assert len(fixed) == 1
+        assert fixed[0].id == old.id
+        assert fixed[0].status == NodeStatus.READY
+        assert runtime.get_node(old.id).task == "补出复核结论并落盘"
+
+    def test_submit_fix_plan_replacement_node_gets_derived_summary(self, runtime):
+        """角色切换新建替代节点时，用修复任务文本兜底其职责摘要（Router 索引不为空）。"""
+        root = runtime.submit_root_manager(task="root")
+        old = runtime.inject_plan(
+            root, _plan(_step("legacy", exec_type="worker", role="dev_member"))
+        )[0]
+        runtime.graph.update_node(old.id, task_summary=None)
+
+        replacements = runtime.submit_fix_plan(
+            root,
+            [{
+                "step_ref": "legacy",
+                "fix": {"role": "test", "task": "补测试覆盖"},
+            }],
+            2,
+        )
+
+        assert len(replacements) == 1
+        assert replacements[0].id != old.id
+        assert replacements[0].step_ref == "legacy_fix2"
+        assert replacements[0].task_summary == "补测试覆盖"
+        assert runtime.get_node(old.id).status == NodeStatus.STOPPED
+
     def test_real_roles_sets_match_directory(self, runtime):
         """roles_dir 注入后，manager/worker 角色 ID 集与 roles/ 目录一致（含 default 由校验器放行）。"""
         assert "engineering_coord" in runtime._manager_role_ids

@@ -842,13 +842,24 @@ class Runtime(RuntimeGateway, SchedulerDelegate):
                         fix_role = child.role or "default"
                 elif role_type is not None:
                     fix_exec_type = role_type
+            fix_task = fix.get("task", a.get("reason", "Fix issue"))
+            # task_summary 是 PlanValidator 的必填项，理由仅有一条：Router 需要
+            # 「职责索引」来匹配新建节点。修复步骤不在此列——原地续接沿用原节点
+            # 职责，角色变更新建的替代节点也承接同一职责，修复任务文本本身同样
+            # 足以充当索引。故逐级兜底，不让 task_summary 为空的历史节点（如早期
+            # 创建的 manager 节点）把整份修复计划卡在 plan_validation_error 上，
+            # 进而退化成「评审反复不通过 → max_iterations 耗尽」的假象。
+            fix_summary = (
+                fix.get("task_summary")
+                or (child.task_summary if child else "")
+                or str(fix_task or "").strip()[:100]
+            )
             step = Step(
                 step_id=a["step_ref"],
                 exec_type=fix_exec_type,
                 role=fix_role,
-                task=fix.get("task", a.get("reason", "Fix issue")),
-                task_summary=fix.get("task_summary")
-                or (child.task_summary if child else ""),
+                task=fix_task,
+                task_summary=fix_summary,
                 config=config,
                 depends_on=[],
             )

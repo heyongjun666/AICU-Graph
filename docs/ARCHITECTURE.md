@@ -484,7 +484,7 @@ Shared FS（共享分区）是产物单一事实源。
 | `mcp_client.py` | MCP server stdio 预检：`probe_server` / `probe_servers`（initialize + tools/list，连完即收子进程） |
 | `repo_paths.py` | `REPO_ROOT` + `resolve_repo_relative`：仓库根相对路径的唯一实现（skills_dir 与 MCP 注册表共用） |
 | `role_pools_manager.py` | 候选角色池管理：`RolePoolsManager` |
-| `shared_io.py` | Runtime 与交付路径共用的文件系统助手：`previewable_path` / `mime_type_for` / `build_dir_index` |
+| `shared_io.py` | Runtime 与交付路径共用的文件系统助手：`previewable_path` / `mime_type_for` |
 | `credentials.py` | 凭据存储（明文）与模型厂商映射：`CredentialStore` / `set_credential_store` / `resolve_sk_for_model` / `resolve_internal_username` / `vendor_of_model` / `api_key_env_for_vendor` |
 | `i18n.py` | 后端面向用户消息的轻量 i18n：`t` / `localized_detail` / `LanguageMiddleware` |
 | `sse_manager.py` | SSE 事件流：环形缓冲、微批合并、`get_events_since`（空→snapshot 回退）、`get_snapshot_event` |
@@ -649,7 +649,7 @@ cd frontend && npx vitest run src/components/__tests__/NodeInspector.test.tsx
 | 想做什么 | 读这些文件 |
 |---|---|
 | 改闭环台账内容 | `runtime/closed_loop.py` |
-| 改产物目录索引 / 预览规则 | `runtime/shared_io.py`（`build_dir_index` / `previewable_path` / `mime_type_for`） |
+| 改产物目录索引 / 预览规则 | `runtime/shared_io.py`（`previewable_path` / `mime_type_for`） |
 | 改共享工作区路径规则 | `runtime/workspace_resolver.py` |
 
 ### E. 调度 / 状态 / 生命周期

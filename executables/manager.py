@@ -39,7 +39,6 @@ from runtime.context import (
     build_codegraph_guidance,
     build_review_context,
 )
-from runtime.shared_io import build_dir_index as _build_dir_index
 from runtime.workspace_resolver import partition_of
 
 logger = logging.getLogger(__name__)
@@ -1193,7 +1192,7 @@ class Manager(Executable):
                         "空 steps 表示本轮不派活，框架不会重激活任何子节点，你随后进入复核。"
                         "**绝不要为了凑出一份非空计划，把既有子节点按原样重发一遍** —— 那等于让它们白跑一轮，"
                         "既浪费执行、又掩盖了真正的增量。\n"
-                        "若确有行动要做：再逐项比较增量任务与全部既有子节点的 role、职责和产物，"
+                        "若确有行动要做：再逐项比较增量任务与全部既有子节点的 role、任务和任务摘要，"
                         "只要某个既有子节点能够承担该增量任务，就必须原地复用它，并在对应 step 中填写该节点的 "
                         "reuse_step_ref（使用候选中的 step_ref 或 node_id）；此时禁止填写 null，也禁止新建同职责 step。"
                         "只有既有子节点都无法覆盖的全新能力才允许新建 step；新建 step 的 task 必须描述当前增量任务中的该新能力，"
@@ -1208,7 +1207,7 @@ class Manager(Executable):
                         "to review. Do NOT pad out a non-empty plan by re-sending existing children unchanged: "
                         "that makes them rerun for nothing and hides the real increment.\n"
                         "If action IS needed: compare the incremental task with every existing child by role, "
-                        "responsibility, and artifacts. If any existing child "
+                        "task, and task summary. If any existing child "
                         "can perform the increment, you MUST reuse it in place and fill that step's reuse_step_ref "
                         "with the candidate step_ref or node_id; null is forbidden and creating a new step with the "
                         "same responsibility is forbidden. Create a new step only for a genuinely new capability "
@@ -1231,7 +1230,8 @@ class Manager(Executable):
     def _build_revise_candidates_block(self, ctx: ExecutableContext) -> str:
         """Revise（增量续跑）：列出既有子节点作为可复用候选，供 Manager 决策 0 选择复用。
 
-        每个候选给出 step_ref / node_id / role / task / status / 产物路径与摘要；
+        每个候选只给出 step_ref / node_id / role / status / task_summary / task，
+        不读取子节点产物或目录；Manager 仅凭任务与摘要判断能力是否覆盖增量需求。
         Manager 按角色匹配增量需求 → 填 reuse_step_ref，无候选覆盖的新能力才新建 step。
         未复用的已完成兄弟保持不动。
         """
@@ -1250,9 +1250,9 @@ class Manager(Executable):
             "",
             _L(
                 ctx,
-                "上级要求在本节点既有子节点产出之上做增量续跑。以下是本节点现有的全部子节点：",
+                "上级要求在本节点既有子节点之上做增量续跑。以下是本节点现有的全部子节点（仅含任务与任务摘要）：",
                 "The parent requires incremental continuation on top of this node's existing "
-                "child-node outputs. Below are all current child nodes of this node:",
+                "child nodes. Below are all current child nodes (task and task summary only):",
             ),
             "",
         ]
@@ -1265,21 +1265,10 @@ class Manager(Executable):
                 f"- step_ref: `{step_ref}` | node_id: `{child.id}` | "
                 f"role: {child.role} | status: {status}"
             )
+            summary = (child.task_summary or "").strip()
+            if summary:
+                lines.append(f"  task_summary: {summary}")
             lines.append(f"  task: {child.task or ''}")
-            if child.artifact_path:
-                lines.append(f"  artifact: {child.artifact_path}")
-                try:
-                    content = ctx.runtime.read_artifact(child.id, child.artifact_path)
-                    lines.append(f"  artifact_summary: {content[:400]!r}")
-                except IsADirectoryError:
-                    lines.append(
-                        f"  artifact_summary: {_build_dir_index(child.artifact_path)}"
-                    )
-                except Exception as exc:  # noqa: BLE001
-                    logger.warning(
-                        "Failed reading artifact for revise candidate '%s': %s",
-                        child.id, exc,
-                    )
         lines.append("")
         lines.append(
             _L(

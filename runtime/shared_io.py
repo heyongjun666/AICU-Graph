@@ -41,27 +41,8 @@ def mime_type_for(path: str) -> str | None:
     return mimetypes.guess_type(path)[0]
 
 
-def build_dir_index(path: str) -> str:
-    """Build the local file listing used in Manager review context."""
-    if not os.path.isdir(path):
-        return f"(not a directory: {path})"
-    lines = ["(目录产物 — 文件清单):"]
-    for root, _dirs, files in os.walk(path):
-        rel = os.path.relpath(root, path)
-        for name in sorted(files):
-            fp = os.path.join(root, name)
-            relf = name if rel == "." else os.path.join(rel, name)
-            try:
-                size = os.path.getsize(fp)
-            except OSError:
-                size = 0
-            lines.append(f"- {relf} ({size} B)")
-    return "\n".join(lines) if len(lines) > 1 else "(empty directory)"
-
-
 __all__ = [
     "FRAMEWORK_DIR_NAMES",
     "previewable_path",
     "mime_type_for",
-    "build_dir_index",
 ]

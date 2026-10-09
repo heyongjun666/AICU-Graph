@@ -1070,6 +1070,34 @@ class TestReviseCandidatesBlock:
         assert "候选角色能够完成" in block
         assert "可由候选覆盖" in block
 
+    def test_block_does_not_read_child_artifacts(self, tmp_path):
+        art_dir = tmp_path / "child_ws"
+        art_dir.mkdir()
+        (art_dir / "secret_output.md").write_text("OUTPUT_BODY")
+        rt = _DuckRuntime(with_revision=True)
+        node = _manager_node(pending_revise=True)
+        rt.add_node(node)
+        c1 = _worker_node("A1", "M1", role="dev", status=NodeStatus.COMPLETED,
+                          step_ref="dev")
+        c1.task_summary = "SUMMARY_A1"
+        c1.artifact_path = str(art_dir)
+        rt.add_children("M1", [c1])
+
+        def _forbidden(node_id, path):
+            raise AssertionError("candidates block must not read child artifacts")
+
+        rt.read_artifact = _forbidden
+        ctx = ExecutableContext(node=node, runtime=rt)
+        mgr = Manager(context=ctx, aicu_instance=_ExpandStub())
+
+        block = mgr._build_revise_candidates_block(ctx)
+
+        assert "SUMMARY_A1" in block
+        assert "Task A1" in block
+        assert "artifact" not in block
+        assert "secret_output.md" not in block
+        assert "OUTPUT_BODY" not in block
+
 
 # ============================================================================
 # Test 10: session_server /revise endpoint

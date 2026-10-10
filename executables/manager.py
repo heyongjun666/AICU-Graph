@@ -975,7 +975,7 @@ class Manager(Executable):
             steps.append(Step(
                 step_id=s["step_id"],
                 exec_type=s.get("exec_type", "worker"),
-                role=s.get("role", "dev"),
+                role=s.get("role", "default"),
                 task=s.get("task", ""),
                 task_summary=s.get("task_summary", ""),
                 config=s.get("config", {}),
@@ -1047,7 +1047,7 @@ class Manager(Executable):
                     exec_type = 'manager' if 'manager' in exec_type_raw else 'worker'
 
                     # role
-                    role = 'dev'
+                    role = 'default'
                     for key in Manager._ROLE_KEYS:
                         if key in norm_row:
                             role = norm_row[key].strip('*').strip('**').strip()
@@ -1071,7 +1071,7 @@ class Manager(Executable):
                     steps.append(Step(
                         step_id=step_id,
                         exec_type=exec_type,
-                        role=role or 'dev',
+                        role=role or 'default',
                         task=task,
                         task_summary=task,
                         config={},

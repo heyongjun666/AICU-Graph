@@ -422,6 +422,15 @@ class TestManagerPlanParsing:
         assert plan.steps[0].step_id == "step_1"
         assert plan.steps[0].task == "implement the requested change"
 
+    def test_step_without_role_falls_back_to_default_role(self):
+        """计划里缺 role 的步骤落到 "default"（任何角色池都有），而不是某个领域角色 id。"""
+        step = self._step()
+        step.pop("role", None)
+        plan = self._manager()._parse_plan(
+            {"content_parsed": {"execution_plan_json": {"steps": [step]}}}
+        )
+        assert plan.steps[0].role == "default"
+
     def test_parse_plan_from_content_string(self):
         """没有 content_parsed 时应从 content JSON 字符串提取计划。"""
         payload = {

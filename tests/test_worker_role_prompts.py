@@ -138,6 +138,7 @@ class TestPlaceholderHygiene:
 _BASELINE_CONTRACT = {
     "acceptance": ("acceptance_report.md", "output", None, True, "_INDEX.md"),
     "architecture": ("design.md", "output", None, True, "_INDEX.md"),
+    "backend_dev": (None, "output", None, True, None),
     "code": (None, "output", "output", True, None),
     "data_analysis": (None, "output", "output", None, None),
     "default": (None, "output", "output", False, None),
@@ -145,6 +146,7 @@ _BASELINE_CONTRACT = {
     "dev_lead": ("task_assignment.md", "output", None, True, "_INDEX.md"),
     "dev_member": (None, "output", None, True, None),
     "document": (None, "output", "output", None, None),
+    "frontend_dev": (None, "output", None, True, None),
     "grill": (None, "output", "output", None, None),
     "incremental_plan": ("plan.json", "output", None, True, "_INDEX.md"),
     "prototype": ("prototype.md", "output", None, True, "_INDEX.md"),
@@ -155,9 +157,9 @@ _BASELINE_CONTRACT = {
 
 # num_ccs 本次「完全不改分配」（决策 2），基线即当前值。
 _BASELINE_NUM_CCS = {
-    "acceptance": 2, "architecture": 4, "code": 2, "data_analysis": 2,
+    "acceptance": 2, "architecture": 4, "backend_dev": 2, "code": 2, "data_analysis": 2,
     "default": 2, "deploy": 2, "dev_lead": 3, "dev_member": 2,
-    "document": 2, "grill": 3, "incremental_plan": 3, "prototype": 3,
+    "document": 2, "frontend_dev": 2, "grill": 3, "incremental_plan": 3, "prototype": 3,
     "requirements": 2, "test": 2, "visual_designer": 4,
 }
 
@@ -227,7 +229,7 @@ class TestRoleBoundaries:
         assert "不做任务级拆分" in txt
         assert "不写代码" in txt
 
-    @pytest.mark.parametrize("role", ["code", "dev_member"])
+    @pytest.mark.parametrize("role", ["code", "dev_member", "frontend_dev", "backend_dev"])
     def test_code_roles_do_not_own_requirements_or_architecture(self, role):
         nf = _flat(role, "not_for")
         assert "需求分析" in nf, f"{role}.not_for 未排除需求分析"
@@ -244,6 +246,49 @@ class TestRoleBoundaries:
     def test_verification_roles_report_only(self, role):
         txt = _text(role, "generate_instruction", "revise_instruction", "role_md")
         assert "不修复" in txt
+
+    def test_frontend_backend_roles_split_and_route_each_other(self):
+        """前端/后端角色互相排除，且 code / dev_member 把专项任务让给它们。"""
+        assert "backend_dev" in _flat("frontend_dev", "not_for")
+        assert "frontend_dev" in _flat("backend_dev", "not_for")
+        assert "visual_designer" in _flat("frontend_dev", "not_for")
+        for role in ("code", "dev_member"):
+            nf = _flat(role, "not_for")
+            assert "frontend_dev" in nf and "backend_dev" in nf, f"{role}.not_for 未指向前后端专项角色"
+
+    def test_frontend_dev_mounts_design_skill_without_asset_skills(self):
+        skills = _cfg("frontend_dev").get("skills") or []
+        assert {"frontend-design", "anti-generic-ui"} <= set(skills)
+        assert not {"canvas-design", "theme-factory", "vercel-react-best-practices"} & set(skills)
+
+    def test_backend_dev_mounts_security_skill(self):
+        assert "secure-code-guardian" in (_cfg("backend_dev").get("skills") or [])
+
+    @pytest.mark.parametrize("name", ["anti-generic-ui", "secure-code-guardian"])
+    def test_vendored_skill_is_well_formed(self, name):
+        """引入的第三方 skill：目录名 = frontmatter name，带许可证，说明文件不引用已删除的文件。"""
+        d = Path(__file__).resolve().parent.parent / "skills" / name
+        text = (d / "SKILL.md").read_text(encoding="utf-8")
+        assert re.search(rf"(?m)^name:\s*{re.escape(name)}\s*$", text), f"{name} 的 frontmatter name 与目录名不一致"
+        assert (d / "LICENSE.txt").is_file(), f"{name} 缺许可证文件"
+        assert "AGENTS.md" not in text and "cssfx-design" not in text
+
+    def test_frontend_dev_requires_states_responsive_a11y_and_honest_verification(self):
+        txt = _text("frontend_dev", "generate_instruction", "role_md")
+        for kw in ("加载中", "空", "出错", "prefers-reduced-motion", "未做视觉验证", "设计忠实"):
+            assert kw in txt, f"frontend_dev 缺少关键要求：{kw}"
+
+    def test_frontend_dev_screenshots_by_default_and_skips_when_unsupported(self):
+        """默认截图自查；仅当上次报错表明模型不支持图片输入时才跳过（不一刀切禁止）。"""
+        txt = _text("frontend_dev", "generate_instruction", "role_md")
+        assert "截图自查" in txt and "有浏览器就截图看" in txt
+        assert "上次报错" in txt and "不支持图片输入" in txt and "未做视觉验证" in txt
+        assert "严禁用 Read 等工具打开截图" not in txt
+
+    def test_backend_dev_requires_validation_authz_and_real_run(self):
+        txt = _text("backend_dev", "generate_instruction", "role_md")
+        for kw in ("参数化", "资源归属", "统一错误模型", "启动", "不新增测试套件"):
+            assert kw in txt, f"backend_dev 缺少关键要求：{kw}"
 
     def test_prototype_defers_visual_and_code_details(self):
         txt = _text("prototype", "generate_instruction", "role_md")

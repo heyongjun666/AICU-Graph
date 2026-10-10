@@ -32,8 +32,8 @@ from runtime.runtime import Runtime
 
 MANAGER_ROLES = {"engineering_coord", "release_planner"}
 WORKER_ROLES = {
-    "acceptance", "architecture", "code", "data_analysis", "deploy",
-    "dev_lead", "dev_member", "document", "grill", "incremental_plan",
+    "acceptance", "architecture", "backend_dev", "code", "data_analysis", "deploy",
+    "dev_lead", "dev_member", "document", "frontend_dev", "grill", "incremental_plan",
     "prototype", "requirements", "test", "test_role",
 }
 

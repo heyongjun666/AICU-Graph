@@ -498,7 +498,7 @@ Shared FS（共享分区）是产物单一事实源。
 | `roles/Manager/default.yaml` | Manager 基类配置（8 步决策策略） |
 | `roles/Manager/backend_manager.yaml` `frontend_manager.yaml` `engineering_coord.yaml` `release_planner.yaml` | 具体 Manager 角色覆盖 |
 | `roles/Worker/default.yaml` | Worker 基类配置 |
-| `roles/Worker/acceptance.yaml` `architecture.yaml` `code.yaml` `data_analysis.yaml` `deploy.yaml` `dev_lead.yaml` `dev_member.yaml` `document.yaml` `grill.yaml` `incremental_plan.yaml` `prototype.yaml` `requirements.yaml` `test.yaml` `visual_designer.yaml` | 具体 Worker 角色 |
+| `roles/Worker/acceptance.yaml` `architecture.yaml` `backend_dev.yaml` `code.yaml` `data_analysis.yaml` `deploy.yaml` `dev_lead.yaml` `dev_member.yaml` `document.yaml` `frontend_dev.yaml` `grill.yaml` `incremental_plan.yaml` `prototype.yaml` `requirements.yaml` `test.yaml` `visual_designer.yaml` | 具体 Worker 角色 |
 | `roles/system_role/default.yaml` `roles/system_role/router.yaml` | 系统级角色配置 |
 
 MCP 联调 lab 角色使用 `roles/**/_mcp_lab_*.yaml` 命名，仅供仓库内的本地联调/回归夹具使用；下划线前缀使它们不会进入 AICU 的生产角色面板。生产面板只暴露正常角色，例如 `roles/Worker/mcp_probe.yaml`。仓库根 `mcp_servers.json` 的生产注册表同样只保留可验证的 `echo-probe` 条目，lab 需要的其它通道必须放在测试自己的临时注册表中，不能混入生产配置。

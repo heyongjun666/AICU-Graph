@@ -422,3 +422,66 @@ class TestExistingValidationIsUnchanged:
         message = str(info.value)
         assert "ghost-skill" in message
         assert "alpha-skill" in message  # 可用清单仍要列出来
+
+
+# ============================================================================
+# 「Skill 优先」提示块
+# ============================================================================
+
+
+def _capture_chat(aicu):
+    """打在 cc.chat 这一层记录送出的 prompt；换掉 _cc_chat_with_retry 会绕过被测逻辑。"""
+    sent = []
+    for cc in aicu.ccs:
+        cc.chat = lambda prompt, max_turns=None, timeout=7200, _s=sent: (_s.append(prompt) or "ok")
+    return sent
+
+
+class TestSkillsNote:
+    NOTE_HEAD = "【Skill 优先】"
+
+    def test_note_reaches_every_send_with_names_and_path(self, tmp_path):
+        src = _make_skill_source(tmp_path)
+        aicu = _make_aicu(
+            tmp_path, cli_name="claude", skills=[SKILL_NAME], skills_dir=src
+        )
+        sent = _capture_chat(aicu)
+
+        aicu._cc_chat_with_retry(aicu.ccs[0], "任务一")
+        aicu._cc_chat_with_retry(aicu.ccs[0], "任务二")
+
+        assert len(sent) == 2
+        for prompt in sent:
+            assert self.NOTE_HEAD in prompt
+            assert SKILL_NAME in prompt
+            assert ".claude/skills" in prompt
+        assert sent[0].endswith("任务一")
+
+    def test_path_follows_adapter_dir(self, tmp_path):
+        from aicu import _render_skills_note
+
+        note = _render_skills_note(["a", "b"], (".codebuddy", "skills"))
+        assert ".codebuddy/skills/<skill 名>/SKILL.md" in note
+        assert "a、b" in note
+
+    def test_empty_when_not_applicable(self):
+        from aicu import _render_skills_note
+
+        assert _render_skills_note([], (".claude", "skills")) == ""
+        assert _render_skills_note(["a"], None) == ""
+
+    def test_no_half_width_braces(self):
+        from aicu import _render_skills_note
+
+        assert "{" not in _render_skills_note(["a"], (".claude", "skills"))
+        assert "}" not in _render_skills_note(["a"], (".claude", "skills"))
+
+    def test_no_skills_prompt_is_byte_identical(self, tmp_path):
+        aicu = _make_aicu(
+            tmp_path, cli_name="claude", skills=[], skills_dir=tmp_path / "none"
+        )
+        sent = _capture_chat(aicu)
+
+        aicu._cc_chat_with_retry(aicu.ccs[0], "原始任务")
+
+        assert sent[0] == f"{aicu.ccs[0]._workspace_boundary}\n\n原始任务"

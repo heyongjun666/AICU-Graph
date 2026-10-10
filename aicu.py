@@ -153,6 +153,27 @@ def _render_mcp_capability_note(
     return "\n".join(lines)
 
 
+# ========== Skill 优先说明（只在该角色确实挂了 skill 且该 CLI 接得上时注入） ==========
+# 为什么需要：skill 清单只是会话开头的一段附带信息，其触发描述写给「用户说了什么」，而节点收到的
+# 是框架拼好的任务提示词，两者对不上；实测（60e70127 会话 + 单节点复测）带 skill 的角色一次
+# 都没主动调用过。所以由发送口明确要求「开工前先对照 skill」。
+# 与 MCP 说明同挂发送口，且同样要求：没挂 skill 时返回空串，调用方必须过滤，既有提示词字节不变。
+# 末尾「不要为了用而用」同 MCP 说明：硬凑一次调用比不用更糟。
+# 正文不得出现半角花括号（与工作区边界块同理：审查/审计 prompt 要求只输出 JSON）。
+def _render_skills_note(names: List[str], skills_workspace_dir) -> str:
+    """渲染「开工前先对照 skill」块；没配 skill 或该 CLI 接不上 skill 目录时返回 **空串**。"""
+    if not names or not skills_workspace_dir:
+        return ""
+    skills_dir = "/".join(skills_workspace_dir)
+    return (
+        f"【Skill 优先】你配置了这些 skill：{'、'.join(names)}。"
+        "开工前先判断任务里有没有哪一步属于其中某个 skill 的适用场景（以各 skill 的说明为准）：\n"
+        "- 有：先用 Skill 工具调用它，再按它的流程做；"
+        f"Skill 工具被拒绝或不可用时，直接 Read `{skills_dir}/<skill 名>/SKILL.md` 照做；\n"
+        "- 没有：照常做，不要为了用而用，也不要在产物里声称用过实际没用的 skill。"
+    )
+
+
 class AICU:
     """
     AI Computing Unit — 多 Agent 并行生成 + 交叉评审 + 对抗审查 + 深度审计
@@ -547,6 +568,7 @@ class AICU:
         # 没挂 MCP 时 `_mcp_capability_note` 是空串，发送口与 CLAUDE.md 都据此跳过 ——
         # 绝大多数角色都是 `mcp: []`，它们的提示词必须逐字节不变。
         self._mcp_capability_note = ""
+        self._skills_note = ""
         if self._mcp_servers:
             # 预检的返回值是 server 名 → 工具名，正好是能力说明要写的东西 —— 接住它，
             # 不额外多探一次。（预检失败的 server 不在返回值里，那正是「配了但没连通」。）
@@ -598,6 +620,10 @@ class AICU:
             # 写入该 CLI 自己的项目级 skill 目录（仅当配置了 skills）
             if enable_skills:
                 self._install_skills_to_cc(cc)
+                if not self._skills_note:
+                    self._skills_note = _render_skills_note(
+                        self.skills, cc.adapter.skills_workspace_dir
+                    )
             # 创建交付物子目录（deliverable_dir 指定时），技能内部产物自然隔离
             # V3-2.1：shared_target 模式下 CC 直写共享分区（产物唯一权威），
             # 不建私有 deliverables 死目录（避免 cc_{i}/deliverables 空壳）。
@@ -786,7 +812,8 @@ class AICU:
                 # 空串过滤后再 join：没挂 MCP 时产出的字节与加这段之前完全相同。
                 _prefixes = [
                     p for p in (getattr(cc, "_workspace_boundary", ""),
-                                getattr(self, "_mcp_capability_note", ""))
+                                getattr(self, "_mcp_capability_note", ""),
+                                getattr(self, "_skills_note", ""))
                     if p
                 ]
                 _outgoing = "\n\n".join([*_prefixes, prompt])

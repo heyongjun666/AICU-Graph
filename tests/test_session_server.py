@@ -1892,6 +1892,24 @@ def test_session_binding_to_candidate_roles_reaches_the_runtime(session_manager,
         assert session_manager.get_session(session_id).runtime.candidate_roles is None
 
 
+def test_candidate_roles_can_be_bound_when_the_session_is_created(session_manager, tmp_path):
+    """建会话时直接带 candidate_roles：一步到位，Runtime 上的候选集立即生效。"""
+    roles_manager = _seed_roles(tmp_path / "roles")
+    app = create_session_app(session_manager, roles_manager)
+
+    with TestClient(app) as client:
+        created = client.post(
+            "/v1/sessions",
+            json={"task": "", "title": "bound", "config": {"candidate_roles": ["code", "test", "code"]}},
+        )
+        assert created.status_code == 201
+        session_id = created.json()["id"]
+
+        assert client.get(f"/v1/sessions/{session_id}/settings").json()["config"]["candidate_roles"] == ["code", "test", "code"]
+        # 重复 id 在装入 Runtime 时归一（去重保序）
+        assert session_manager.get_session(session_id).runtime.candidate_roles == ["code", "test"]
+
+
 def test_deleting_a_pool_leaves_bound_sessions_untouched(session_manager, tmp_path):
     """会话存的是角色 id 快照，不是池 id —— 删池不得影响已绑定会话。"""
     roles_manager = _seed_roles(tmp_path / "roles")

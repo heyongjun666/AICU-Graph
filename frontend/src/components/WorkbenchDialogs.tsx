@@ -1,7 +1,7 @@
 import React, { FormEvent, useEffect, useRef, useState } from 'react';
 import { X } from 'lucide-react';
-import { GraphNode, LinkCandidate, NodeConfig, RoleInfo, SessionSummary, SkillInfo } from '../types';
-import { getRole, getRoles, getSkills } from '../utils/api';
+import { GraphNode, LinkCandidate, NodeConfig, RoleInfo, RolePool, SessionSummary, SkillInfo } from '../types';
+import { getRole, getRolePools, getRoles, getSkills } from '../utils/api';
 import { useAvailableClis } from '../hooks/useAvailableClis';
 import { useMcpCompatWarning } from '../hooks/useMcpCompatWarning';
 import { useI18n, translate } from '../i18n';
@@ -12,19 +12,29 @@ interface NewSessionDialogProps {
   open: boolean;
   busy: boolean;
   onClose: () => void;
-  onSubmit: (title: string) => Promise<void>;
+  /** candidateRoles 为空/缺省 = 不限制，Manager 看到全部角色。 */
+  onSubmit: (title: string, candidateRoles?: string[]) => Promise<void>;
 }
 
 export const NewSessionDialog: React.FC<NewSessionDialogProps> = ({ open, busy, onClose, onSubmit }) => {
   const { t } = useI18n();
   const [title, setTitle] = useState('');
   const [error, setError] = useState('');
+  const [pools, setPools] = useState<RolePool[]>([]);
+  const [poolId, setPoolId] = useState('');
 
   useEffect(() => {
-    if (open) {
-      setTitle('');
-      setError('');
-    }
+    if (!open) return;
+    setTitle('');
+    setError('');
+    setPoolId('');
+    setPools([]);
+    // 角色池是可选项：拉取失败只是不显示选择器，不能挡住建会话。
+    let cancelled = false;
+    getRolePools()
+      .then((next) => { if (!cancelled) setPools(next); })
+      .catch(() => { if (!cancelled) setPools([]); });
+    return () => { cancelled = true; };
   }, [open]);
 
   if (!open) return null;
@@ -32,9 +42,11 @@ export const NewSessionDialog: React.FC<NewSessionDialogProps> = ({ open, busy, 
   const submit = async (event: FormEvent) => {
     event.preventDefault();
     if (!title.trim()) return;
+    // 写入会话的是角色 id 快照，之后改池/删池不影响本会话。
+    const selectedPool = pools.find((pool) => pool.id === poolId);
     try {
       setError('');
-      await onSubmit(title.trim());
+      await onSubmit(title.trim(), selectedPool?.roles.length ? selectedPool.roles : undefined);
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : String(reason));
     }
@@ -48,6 +60,15 @@ export const NewSessionDialog: React.FC<NewSessionDialogProps> = ({ open, busy, 
           <button type="button" className="icon-button" onClick={onClose} title={t('common.close')}><X size={18} /></button>
         </div>
         <label>{t('dialog.sessionName')}<input autoFocus value={title} onChange={(event) => setTitle(event.target.value)} placeholder={t('dialog.sessionNamePlaceholder')} /></label>
+        {pools.length > 0 && (
+          <label>{t('dialog.newSessionPool')}
+            <select value={poolId} onChange={(event) => setPoolId(event.target.value)}>
+              <option value="">{t('dialog.newSessionPoolNone')}</option>
+              {pools.map((pool) => <option key={pool.id} value={pool.id}>{`${pool.name} (${pool.roles.length})`}</option>)}
+            </select>
+            <small>{t('dialog.newSessionPoolHint')}</small>
+          </label>
+        )}
         {error && <div className="form-error">{error}</div>}
         <div className="dialog-actions"><button type="button" className="secondary-button" onClick={onClose}>{t('common.cancel')}</button><button className="primary-button" disabled={!title.trim() || busy}>{busy ? t('dialog.creating') : t('dialog.createSession')}</button></div>
       </form>

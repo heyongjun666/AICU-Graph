@@ -15,7 +15,7 @@ interface SessionState {
   error: string | null;
   loadSessions: () => Promise<void>;
   selectSession: (sessionId: string) => void;
-  createSession: (task: string, title?: string) => Promise<SessionSummary>;
+  createSession: (title: string, candidateRoles?: string[]) => Promise<SessionSummary>;
   renameSession: (sessionId: string, title: string) => Promise<void>;
   deleteSession: (sessionId: string) => Promise<void>;
   refreshSessions: () => Promise<void>;
@@ -125,9 +125,13 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     set({ activeSessionId: sessionId });
   },
 
-  createSession: async (title: string) => {
+  createSession: async (title: string, candidateRoles?: string[]) => {
     // 新会话生成空白图：task 传空串（后端不再自动创建根节点），由用户后续创建节点。
-    const session = await createSessionRequest({ task: '', title });
+    const session = await createSessionRequest({
+      task: '',
+      title,
+      ...(candidateRoles?.length ? { config: { candidate_roles: candidateRoles } } : {}),
+    });
     // 新会话接管 activeSessionId，同样要先清掉上一个会话的选中节点，理由见上面那个函数。
     // 放在 await 之后：请求失败时 activeSessionId 并没有变，不该把当前的图白白抹掉。
     resetGraphIfSessionChanged(get().activeSessionId, session.id);

@@ -111,6 +111,18 @@ describe('createSession —— 新会话接管时同样清图', () => {
     expect(useGraphStore.getState().nodes.size).toBe(0);
   });
 
+  it('带候选角色 → 写进会话 config.candidate_roles；不带则不发 config', async () => {
+    vi.mocked(api.createSession).mockResolvedValue(makeSession('s-new'));
+
+    await useSessionStore.getState().createSession('新会话', ['code', 'test']);
+    expect(api.createSession).toHaveBeenLastCalledWith({
+      task: '', title: '新会话', config: { candidate_roles: ['code', 'test'] },
+    });
+
+    await useSessionStore.getState().createSession('另一个');
+    expect(api.createSession).toHaveBeenLastCalledWith({ task: '', title: '另一个' });
+  });
+
   it('创建失败 → 当前会话没变，图不能被白白抹掉', async () => {
     seedSessions('s-1');
     seedGraphWithSelection();

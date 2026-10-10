@@ -285,7 +285,28 @@ def test_is_code_file_excludes_log_and_out(tmp_path):
     aicu, _, _ = _make_aicu(tmp_path, shared_target=partition)
     for name in ("app_run.log", "manifest.out", "app.py"):
         Path(partition, name).write_text("x", encoding="utf-8")
-    assert not aicu._is_code_file(Path(partition, "app_run.log"))
-    assert not aicu._is_code_file(Path(partition, "manifest.out"))
+    assert not aicu._is_code_file(Path(partition, "app_run.log"), Path(partition))
+    assert not aicu._is_code_file(Path(partition, "manifest.out"), Path(partition))
     # 对照组：普通 .py 仍算代码（上两条不能是靠「一切非 .md 都不算」蒙对的）
-    assert aicu._is_code_file(Path(partition, "app.py"))
+    assert aicu._is_code_file(Path(partition, "app.py"), Path(partition))
+
+
+def test_read_cc_file_skips_binary_files_of_any_suffix(tmp_path):
+    """非代码领域的产出（docx/xlsx 等）与已知二进制后缀都不拼进文本；无扩展名但含 NUL 的同理。"""
+    _, partition = _make_shared_layout(tmp_path)
+    aicu, _, _ = _make_aicu(tmp_path, shared_target=partition, modular=False)
+    Path(partition, "report.md").write_text("# 季度报告\n", encoding="utf-8")
+    Path(partition, "report.docx").write_bytes(b"PK\x03\x04\x14\x00\x06\x00garbage")
+    Path(partition, "sheet.xlsx").write_bytes(b"PK\x03\x04\x00\x00\x00")
+    Path(partition, "chart.png").write_bytes(b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR")
+    Path(partition, "blob").write_bytes(b"\x00\x01\x02")
+    content = aicu._read_cc_file(0)
+    assert content == "# 季度报告\n"
+
+
+def test_read_text_file_decodes_text_beyond_first_4k(tmp_path):
+    """NUL 探测只看头 4 KB，但文本必须完整读出（含 4 KB 之后的部分）。"""
+    f = tmp_path / "long.txt"
+    f.write_text("a" * 5000 + "TAIL", encoding="utf-8")
+    text = AICU._read_text_file(f)
+    assert text is not None and text.endswith("TAIL") and len(text) == 5004

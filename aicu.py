@@ -923,7 +923,8 @@ class AICU:
                 if raw.exists():
                     return raw.read_text(encoding="utf-8", errors="replace")
                 return ""
-            return "\n".join(f.read_text(encoding='utf-8', errors='replace') for f in files if f.exists())
+            texts = (self._read_text_file(f) for f in files if f.exists())
+            return "\n".join(t for t in texts if t is not None)
         path = self._cc_deliverable_dir(cc_id) / target
         if not path.exists():
             return ""
@@ -1011,12 +1012,33 @@ class AICU:
         'review.json', 'audit.json', 'aicu_result.json',
         'best_solution_summary.txt',
     }
-    def _is_code_file(self, f: Path) -> bool:
-        """判断一个文件是否是代码文件（排除模式：非代码的才算非代码，其余都是代码）"""
+    # 已知二进制后缀（拼接文本时直接跳过，省一次打开）；未列出的二进制由 _read_text_file 的 NUL 探测兜住
+    BINARY_SUFFIXES = {'.png', '.jpg', '.jpeg', '.gif', '.bmp', '.ico',
+                       '.pdf', '.zip', '.gz', '.tar', '.bin', '.exe',
+                       '.dll', '.so', '.class', '.pyc', '.pyo'}
+
+    @classmethod
+    def _read_text_file(cls, f: Path) -> Optional[str]:
+        """读文本文件；二进制文件（已知后缀，或前 4 KB 含 NUL 字节）返回 None。"""
+        if f.suffix.lower() in cls.BINARY_SUFFIXES:
+            return None
+        with open(f, 'rb') as fh:
+            head = fh.read(4096)
+            if b'\0' in head:
+                return None
+            data = head + fh.read()
+        return data.decode('utf-8', errors='replace')
+
+    def _is_code_file(self, f: Path, root: Path) -> bool:
+        """判断 ``root`` 下的文件是否是代码文件（排除模式：非代码的才算非代码，其余都是代码）
+
+        目录排除只看 ``f`` 相对 ``root`` 的路径：``root`` 自身及其祖先目录叫什么
+        （例如工作区恰好位于名为 build / env 的目录下）与"这个文件是不是产出"无关。
+        """
         if not f.is_file():
             return False
         # 排除非代码目录下的文件
-        if any(part in self.NONCODE_DIRS for part in f.parts):
+        if any(part in self.NONCODE_DIRS for part in f.relative_to(root).parts):
             return False
         # 排除非代码文件名
         if f.name in self.NONCODE_FILENAMES:
@@ -1036,7 +1058,7 @@ class AICU:
         """列出目录下所有代码文件（排除模式，支持任意语言）"""
         if not directory.exists() or not directory.is_dir():
             return []
-        files = [f for f in directory.rglob("*") if self._is_code_file(f)]
+        files = [f for f in directory.rglob("*") if self._is_code_file(f, directory)]
         return sorted(files)
 
     def _files_to_prompt_lines(self, files: List[Path]) -> str:
@@ -1910,22 +1932,17 @@ class AICU:
         """
         avg_scores = self._aggregate_scores(scores) if scores else {0: 8.0}
 
-        # 二进制后缀（best_solution_summary 拼接时跳过）
-        BINARY_SUFFIXES = {'.png', '.jpg', '.jpeg', '.gif', '.bmp', '.ico',
-                           '.pdf', '.zip', '.gz', '.tar', '.bin', '.exe',
-                           '.dll', '.so', '.class', '.pyc', '.pyo'}
-
         # 保存最佳方案摘要
         if self.is_modular_output:
             # 跳过二进制文件，文本文件用 errors='replace' 防止 UnicodeDecodeError
             text_parts = []
             for f in self._list_code_files(0):
-                if f.suffix.lower() in BINARY_SUFFIXES:
-                    continue
                 try:
-                    text_parts.append(f.read_text(encoding='utf-8', errors='replace'))
-                except Exception:
-                    pass  # 跳过无法读取的文件
+                    text = self._read_text_file(f)
+                except OSError:
+                    continue  # 跳过无法读取的文件
+                if text is not None:
+                    text_parts.append(text)
             self._save_to_workspace("best_solution_summary.txt", "\n".join(text_parts))
 
         # 复制到 final 目录
@@ -2041,7 +2058,7 @@ class AICU:
                 continue
             if f.name == self.index_file:
                 continue
-            if any(part in self.NONCODE_DIRS for part in f.parts):
+            if any(part in self.NONCODE_DIRS for part in f.relative_to(final_dir).parts):
                 continue
             rel = f.relative_to(final_dir).as_posix()
             files.append((rel, f.suffix.lower()))

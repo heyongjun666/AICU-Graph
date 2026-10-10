@@ -268,7 +268,7 @@ class TestSkillFilesAreNotDeliverables:
             skills=[],
             skills_dir=_make_skill_source(tmp_path),
         )
-        assert not aicu._is_code_file(skill_md)
+        assert not aicu._is_code_file(skill_md, tmp_path)
 
     def test_an_ordinary_markdown_file_is_still_code(self, tmp_path):
         """对照组：普通目录下的 .md 仍然算代码 —— 上一条不能是靠「.md 一律不算」蒙对的。"""
@@ -279,7 +279,22 @@ class TestSkillFilesAreNotDeliverables:
         aicu = _make_aicu(
             tmp_path, cli_name="qwen", skills=[], skills_dir=_make_skill_source(tmp_path)
         )
-        assert aicu._is_code_file(notes)
+        assert aicu._is_code_file(notes, tmp_path)
+
+    def test_ancestor_dir_named_like_noncode_dir_does_not_hide_files(self, tmp_path):
+        """工作区的祖先目录恰好叫 build / env 时，里面的产出不能被整棵判成非代码。"""
+        root = tmp_path / "build" / "env" / "ws"
+        notes = root / "report.md"
+        skill_md = root / ".qwen" / "skills" / "x" / "SKILL.md"
+        for f in (notes, skill_md):
+            f.parent.mkdir(parents=True, exist_ok=True)
+            f.write_text("# x\n", encoding="utf-8")
+        aicu = _make_aicu(
+            tmp_path, cli_name="qwen", skills=[], skills_dir=_make_skill_source(tmp_path)
+        )
+        assert aicu._is_code_file(notes, root)
+        assert not aicu._is_code_file(skill_md, root)  # 相对 root 的排除仍生效
+        assert aicu._list_code_files_in_dir(root) == [notes]
 
 
 # ============================================================================

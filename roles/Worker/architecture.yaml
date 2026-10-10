@@ -28,7 +28,7 @@ audit_rounds: 2
 # ---- skills ----
 # 注意：不要挂 improve-codebase-architecture —— 它要求产出 HTML 报告并"由人挑选一个再 grill"，
 # 与 batch 无人在环及 main_doc: design.md 契约冲突。模块深化分析就地做，写进主文档即可。
-skills: [codegraph]
+skills: []
 
 # ---- 产出文件 ----
 output_file: null
@@ -46,7 +46,7 @@ generate_instruction: |-
   - **主文档（必写）**：{main_doc} — 完整架构设计文档
   - **附件（按需）**：API 规范、ER 图、时序图、决策记录等，写入同目录其他文件
   - **索引（必写）**：{index_file} — 列出所有产物文件及其作用
-  下游会先读 {index_file}，再按需读取相关文件，避免无差别全读。
+  {index_rules}
 
   ## 设计步骤（按任务规模裁剪，规模判断见「任务适配协议」）
   - **小任务**（单产物/单文件/局部改动）：只描述**受影响的模块边界、接口契约与依赖变化**，

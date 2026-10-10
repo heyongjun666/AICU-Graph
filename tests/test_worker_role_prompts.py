@@ -104,7 +104,7 @@ class TestParseAndProtocol:
 # 泄漏进提示词，因此必须静态拦截。{available_roles} 在 init 期一次性替换，
 # {output_path} 仅用于 revise_instruction。
 _KNOWN_PLACEHOLDERS = {
-    "output_file", "main_doc", "index_file", "final_file",
+    "output_file", "main_doc", "index_file", "index_rules", "final_file",
     "deliverable_dir", "output_path", "available_roles",
 }
 
@@ -273,9 +273,9 @@ class TestSkillsHygiene:
         assert "improve-codebase-architecture" not in (_cfg(role).get("skills") or [])
 
     def test_kept_batch_safe_skills(self):
-        assert _cfg("prototype").get("skills") == ["to-prd", "codegraph"]
-        assert _cfg("dev_lead").get("skills") == ["to-issues", "codegraph"]
-        assert _cfg("incremental_plan").get("skills") == ["to-issues", "codegraph"]
+        assert _cfg("prototype").get("skills") == ["to-prd"]
+        assert _cfg("dev_lead").get("skills") == ["to-issues"]
+        assert _cfg("incremental_plan").get("skills") == ["to-issues"]
 
     def test_no_human_in_the_loop_skill_mounted(self):
         """任何角色都不得挂载要求人工交互/人工挑选的 skill。"""
@@ -490,6 +490,37 @@ class TestRequirementsSpecial:
         for expected in ("provenance", "concretization", "scope_discipline",
                          "decisions_made", "intake_rulings"):
             assert expected in names, f"requirements 审查清单缺 {expected}"
+
+
+# ============================================================================
+# 10b. _INDEX.md 只做导航（{index_rules} 单一来源）
+# ============================================================================
+
+_INDEX_ROLES = [
+    r for r in ALL_ROLES
+    if "{index_rules}" in str(_cfg(r).get("generate_instruction") or "")
+]
+
+
+class TestIndexRules:
+    def test_all_index_roles_use_shared_rules(self):
+        """配置了 index_file 的角色都引用 {index_rules}，没有各写一份。"""
+        with_index = [r for r in ALL_ROLES if _cfg(r).get("index_file")]
+        assert with_index and set(with_index) == set(_INDEX_ROLES)
+        for r in with_index:
+            assert "下游会先读 {index_file}" not in str(_cfg(r).get("generate_instruction"))
+
+    @pytest.mark.parametrize("role", _INDEX_ROLES)
+    def test_rendered_rules_restrict_index_to_navigation(self, tmp_path, role):
+        rendered = _make_aicu(tmp_path, role=role)._format_instruction()
+        assert "{index_rules}" not in rendered and "{index_file}" not in rendered
+        assert "只写文件清单" in rendered
+        assert "版本沿革" in rendered and "不要写进 _INDEX.md" in rendered
+        assert "不累积历史" in rendered
+
+    def test_role_without_placeholder_renders_no_rules(self, tmp_path):
+        """不引用 {index_rules} 的角色（code/dev_member）提示词不受影响。"""
+        assert "只写文件清单" not in _make_aicu(tmp_path, role="code")._format_instruction()
 
 
 # ============================================================================

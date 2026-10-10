@@ -562,16 +562,19 @@ class TestManagerReviewPhase:
 
         assert result == NodeStatus.COMPLETED
 
-    def test_review_prompt_omits_main_task(self):
-        """review prompt 不重新注入 Manager 的完整 Main Task，只展示子节点元数据。
+    def test_review_prompt_carries_goals_once_for_fresh_session(self):
+        """Review 是新会话：prompt 必须自带团队目标与本节点目标（各一次），不依赖 Expand 会话。
 
-        Context 规则：Main Task 只在同一 AICU 会话首次初始化注入一次；review 是
-        增量阶段，只能注入子节点元数据 + 关键产物定向检查流程，不得重新拼接 Main
-        Task，也不得包含逐个 Artifact 全量读取或截断读取提示。
+        同时仍只展示子节点元数据 + 关键产物定向检查流程，不得包含逐个 Artifact
+        全量读取或截断读取提示。
         """
+        root = _make_manager_node(manager_phase="waiting", task="TEAM_GOAL_FULL_TEXT")
+        root.id = "root-mgr"
         node = _make_manager_node(
-            manager_phase="review", task="MAIN_TASK_MUST_NOT_REPEAT"
+            manager_phase="review", task="MY_CURRENT_GOAL"
         )
+        node.parent_id = root.id
+        self.runtime.add_node(root)
         self.runtime.add_node(node)
         ctx = ExecutableContext(node=node, runtime=self.runtime)
 
@@ -589,9 +592,10 @@ class TestManagerReviewPhase:
         prompt = Manager._build_review_prompt(ctx, children_info)
 
         assert "## Review Task" in prompt
-        assert "MAIN_TASK_MUST_NOT_REPEAT" not in prompt, (
-            "review prompt 不得重新注入 Main Task"
-        )
+        assert "## Review Context" in prompt
+        assert prompt.count("TEAM_GOAL_FULL_TEXT") == 1
+        assert prompt.count("MY_CURRENT_GOAL") == 1
+        assert "existing session" not in prompt and "已有会话" not in prompt
         # B9：只定位关键产物，不逐项读取全部 Artifact
         assert "Shared Workspace Partition" in prompt, (
             "review prompt 应保留共享分区根"
@@ -609,6 +613,71 @@ class TestManagerReviewPhase:
         assert not hasattr(Manager, "_resolve_review_artifact_path"), (
             "Review 不再解析/展示子节点产物路径，_resolve_review_artifact_path 应已删除"
         )
+
+    def test_review_runs_in_fresh_incremental_session(self, monkeypatch):
+        """Review 首次调用必须开新会话 + incremental（不带规划协议，不继承 Expand 对话）。"""
+        node = _make_manager_node(manager_phase="review")
+        self.runtime.add_node(node)
+        self.runtime.add_children(node.id, [
+            Node(id="c1", exec_type="worker", role="dev", task="t1",
+                 config={}, status=NodeStatus.COMPLETED),
+        ])
+        ctx = ExecutableContext(node=node, runtime=self.runtime)
+        mgr = self._make_manager(ctx, review_passed=True)
+
+        calls = []
+        original = Manager._call_aiCU_with_retry
+
+        def spy(self_, ctx_, prompt, *args, **kwargs):
+            calls.append(kwargs)
+            return original(self_, ctx_, prompt, *args, **kwargs)
+
+        monkeypatch.setattr(Manager, "_call_aiCU_with_retry", spy)
+
+        assert mgr.run(ctx) == NodeStatus.COMPLETED
+        assert calls[0].get("fresh_session") is True
+        assert calls[0].get("incremental") is True
+
+    def test_fresh_session_call_drops_cached_aicu(self, monkeypatch):
+        """fresh_session=True 弹出节点缓存的 AICU 再重建；默认调用沿用缓存。"""
+        import executables.worker as worker_mod
+        from executables.worker import Worker
+
+        node = _make_manager_node(manager_phase="review")
+        self.runtime.add_node(node)
+        ctx = ExecutableContext(node=node, runtime=self.runtime)
+
+        class Fake:
+            def __init__(self, tag):
+                self.tag = tag
+                self.ccs = []
+
+            def ask(self, prompt):
+                return {"tag": self.tag}
+
+            def ask_incremental(self, prompt):
+                return {"tag": self.tag}
+
+        old, new = Fake("old"), Fake("new")
+        with Worker._aicu_cache_lock:
+            Worker._aicu_cache[node.id] = old
+
+        def fake_create(ctx_):
+            with Worker._aicu_cache_lock:
+                cached = Worker._aicu_cache.get(ctx_.node.id)
+                if cached is not None:
+                    return cached
+                Worker._aicu_cache[ctx_.node.id] = new
+            return new
+
+        monkeypatch.setattr(worker_mod, "_create_real_aicu", fake_create)
+        mgr = Manager(context=ctx)
+        try:
+            assert mgr._call_aiCU_with_retry(ctx, "p")["tag"] == "old"
+            assert mgr._call_aiCU_with_retry(ctx, "p", fresh_session=True)["tag"] == "new"
+        finally:
+            with Worker._aicu_cache_lock:
+                Worker._aicu_cache.pop(node.id, None)
 
     def test_review_prompt_has_key_deliverable_flow(self):
         """review prompt 含 4 步关键产物流程及「无法确认」边界处理。"""

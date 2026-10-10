@@ -25,6 +25,7 @@ from executables.registry import ExecutableRegistry
 from runtime.event_bus import EventBus, SSEEvent
 from runtime.file_transfer import RevealUnsupported
 from runtime.graph import Graph
+from runtime.handoff import fresh_session_fields
 from runtime.models import (
     MAX_TASK_LENGTH,
     NUM_CCS_TIERS,
@@ -1176,7 +1177,7 @@ class Runtime(RuntimeGateway, SchedulerDelegate):
             plan, parent_node_id, reuse_map
         )
 
-        # 复用节点：保留工作区/产物/Agent 会话，原地重新激活执行增量
+        # 复用节点：保留工作区/产物，以新会话原地重新激活执行增量
         for node in reused_nodes:
             step = step_by_node[node.id]
             prepared = self._prepare_node_config(
@@ -1222,8 +1223,15 @@ class Runtime(RuntimeGateway, SchedulerDelegate):
     ) -> None:
         """把被复用的子节点重置为可执行状态，注入增量上下文。
 
-        默认复用 CC Session（Worker._aicu_cache 保留 → --resume 续接原 Agent 认知）。
-        仅确定性硬条件不满足才清缓存新建会话（Runtime 确定性判断，非 LLM 语义判断）：
+        Revise / Manager 增量复用（reason != ``retry``）一律以**新会话**重新执行：
+        弹出 Worker._aicu_cache，保留工作区与产物，历史对话不再带入 —— 长会话的
+        上下文随轮次累积，每次增量都要重放一遍，代价远大于把「上一轮做了什么」
+        以检查点（original_task + 上一版产物位置）的形式重新交代一次。
+        检查点写进 pending_context，由 Worker 的首轮 prompt 渲染。
+
+        自动重试（reason == ``retry``）仍续接原会话（--resume）：失败后紧接着的
+        修复需要刚刚发生的上下文，且链路很短。仅确定性硬条件不满足才清缓存
+        （Runtime 确定性判断，非 LLM 语义判断）：
           1) role 变更（原会话上下文属于旧角色）；
           2) AICU 相关 config 变更（cli_name/model/api_base_url/api_key_env/skills）；
           3) 节点工作区目录不存在（workspace 失效，resume 无地基）。
@@ -1248,8 +1256,10 @@ class Runtime(RuntimeGateway, SchedulerDelegate):
                 node.id, _cfg, node.parent_id
             )["_workspace_relpath"]
         ws_missing = not os.path.isdir(os.path.join(os.path.abspath(_ws_root), _ws_rel))
+        fresh_session = reason != "retry"
         if (
-            new_step.role != node.role
+            fresh_session
+            or new_step.role != node.role
             or ws_missing
             or any(
                 (node.config or {}).get(k) != prepared_config.get(k) for k in aicu_keys
@@ -1258,8 +1268,8 @@ class Runtime(RuntimeGateway, SchedulerDelegate):
             with Worker._aicu_cache_lock:
                 Worker._aicu_cache.pop(node.id, None)
             logger.info(
-                "Reused worker '%s' fresh session (role/AICU-config/workspace changed)",
-                node.id,
+                "Reused node '%s' starts a fresh session (reason=%s)",
+                node.id, reason,
             )
 
         pending_context = {
@@ -1269,6 +1279,9 @@ class Runtime(RuntimeGateway, SchedulerDelegate):
             "incremental_task": new_step.task,
             "prior_artifacts": [node.artifact_path] if node.artifact_path else [],
         }
+        if fresh_session:
+            # 检查点：新会话没有历史对话，上一轮的任务要在这里显式带过去。
+            pending_context.update(fresh_session_fields(node))
         common = {
             "task": new_step.task,
             "config": prepared_config,
@@ -1302,8 +1315,8 @@ class Runtime(RuntimeGateway, SchedulerDelegate):
             emit_notification=True,
         )
         logger.info(
-            "Reused child '%s' reactivated for incremental task (session resumed: %s)",
-            node.id, new_step.role == node.role and not ws_missing,
+            "Reused child '%s' reactivated for incremental task (fresh session: %s)",
+            node.id, fresh_session,
         )
 
     # ========================================================================
@@ -1389,7 +1402,7 @@ class Runtime(RuntimeGateway, SchedulerDelegate):
         """继续执行 FAILED/STOPPED 节点，保留已有产出，不从头重跑。
 
         适用于任意节点类型（Manager/Worker）。已完成节点需要增量优化时
-        使用 revise_manager_node（Revise，保留子节点/产物/Agent 会话）。
+        使用 revise_manager_node（Revise，保留子节点/产物，以新会话重新规划）。
 
         Args:
             node_id: 目标节点 ID。
@@ -1507,7 +1520,7 @@ class Runtime(RuntimeGateway, SchedulerDelegate):
     def revise_manager_node(
         self, node_id: str, task: str, config: Optional[dict] = None
     ) -> str:
-        """增量续跑已完成 Manager 节点（Revise，保留子节点/产物/Agent 会话）。
+        """增量续跑已完成 Manager 节点（Revise，保留子节点/产物，以新会话重新规划）。
 
         Manager 从终态转为 WAITING + manager_phase="expand" + pending_revise=True，
         等待人工 Resume 后重新调度；expand 时 Manager 会看到「可复用候选节点」块，
@@ -1575,13 +1588,12 @@ class Runtime(RuntimeGateway, SchedulerDelegate):
         self, node_id: str, task: str, config: Optional[dict] = None,
         *, reason: str = "revise",
     ) -> str:
-        """增量续跑已完成 Worker 节点（Revise，保留产物/原 CC Agent 会话）。
+        """增量续跑已完成 Worker 节点（Revise，保留产物，以新会话重新执行）。
 
         与 revise_manager_node 对应：已完成 Worker 从终态转为 WAITING +
         pending_revise=True，复用既有增量机制 _reactivate_reused_worker，
-        Worker.run 通过 --resume 续接原 CC 会话，在 prior_artifacts 基础上
-        按新增量任务继续产出（role/AICU-config/workspace 变更时自动降级为
-        新建会话）。同时回退父 Manager 链，使 revise 后的 Worker 再次完成时
+        Worker.run 以新会话启动，凭检查点（原任务 + prior_artifacts）在上一版产出
+        基础上按新增量任务继续产出。同时回退父 Manager 链，使 revise 后的 Worker 再次完成时
         能重新触发父 Manager 评审。
 
         Args:
@@ -1627,7 +1639,7 @@ class Runtime(RuntimeGateway, SchedulerDelegate):
             self.scheduler.start()
         logger.info(
             "Worker '%s' revised: COMPLETED/terminal → WAITING with "
-            "incremental task (pending_revise=True, session resumed)",
+            "incremental task (pending_revise=True, fresh session)",
             node_id,
         )
         return node_id
@@ -2347,7 +2359,7 @@ class Runtime(RuntimeGateway, SchedulerDelegate):
                 entry.name in FRAMEWORK_DIR_NAMES or entry.name.startswith("cc_")
             ):
                 # 顶层框架目录整体不显示：FRAMEWORK_DIR_NAMES 显式项
-                # （.artifacts/.codegraph/.git/cc_0/cc_1/cc_2 等）+ cc_* 前缀兜底
+                # （.artifacts/.git/cc_0/cc_1/cc_2 等）+ cc_* 前缀兜底
                 continue
             stat = entry.stat(follow_symlinks=False)
             is_dir = entry.is_dir(follow_symlinks=False)

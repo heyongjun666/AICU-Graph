@@ -11,7 +11,6 @@ runtime_sessions/
 /event_inbox/
 *.log
 router_traces.jsonl
-/codegraph_metrics.jsonl
 review_v*.md
 test_report.md
 
@@ -37,5 +36,4 @@ frontend/node_modules/
 frontend/dist/
 
 # Local tooling and OS files
-.codegraph/
 .DS_Store

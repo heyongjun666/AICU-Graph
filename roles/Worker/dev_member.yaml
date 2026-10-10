@@ -25,7 +25,7 @@ audit_rounds: 2
 
 # ---- skills ----
 # 注意：不要挂 tdd —— 本角色 not_for 明确不负责测试编写，挂 tdd 与角色边界自相矛盾。
-skills: [diagnosing-bugs, codegraph]
+skills: [diagnosing-bugs]
 
 # ---- 产出文件 ----
 output_file: null

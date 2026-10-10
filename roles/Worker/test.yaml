@@ -23,7 +23,7 @@ num_ccs: 2
 audit_rounds: 2
 
 # ---- skills ----
-skills: [diagnosing-bugs, codegraph]
+skills: [diagnosing-bugs]
 
 
 # ---- 产出文件 ----
@@ -42,7 +42,7 @@ generate_instruction: |-
   - **主文档（必写）**：{main_doc} — 完整测试报告
   - **附件（按需）**：测试脚本、覆盖率报告、缺陷明细等，写入同目录其他文件
   - **索引（必写）**：{index_file} — 列出所有产物文件及其作用
-  下游会先读 {index_file}，再按需读取相关文件。
+  {index_rules}
 
   ## 测试步骤（按变更范围与风险选择测试类型——规模判断见「任务适配协议」）
   1. **读取代码与契约**：用 Read 工具读取本次变更相关的源代码文件及上游接口契约/需求文档，提取需要验证的行为和边界条件，不凭想象写测试

@@ -65,7 +65,7 @@ skills_dir: skills
 #   - 尚未接入 project-level skill 的 CLI（grok、opencode）会**照常运行**，
 #     但在建 CC 时打印一行警告说明本次声明的 skill 不生效（MCP 那边是直接报错，
 #     两者刻意不同：MCP 缺失会让工具根本不存在，skill 缺失只是少了份参考资料）
-#   - 例如: skills: [tdd, diagnosing-bugs, codegraph]
+#   - 例如: skills: [tdd, diagnosing-bugs]
 #   - 具体角色应按任务需要声明领域 Skill
 skills: []
 

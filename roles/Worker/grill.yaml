@@ -24,7 +24,7 @@ audit_rounds: 2
 
 # ---- skills ----
 # 注意：不要挂 grilling skill —— 它要求"一次一问、等用户反馈再继续"，与本角色 batch 无人在环冲突。
-skills: [domain-modeling, codegraph]
+skills: [domain-modeling]
 
 # ---- 产出文件 ----
 output_file: output

@@ -990,7 +990,7 @@ class AICU:
         # 代价是「CC 处理的项目里恰好有同名目录时不收」—— 这几个本来就是各家 CLI
         # 自己的配置目录，排除掉更符合预期。（.claude 早就在这份名单里，同一条理由。）
         '.qwen', '.pi', '.gemini', '.cursor', '.opencode', '.codebuddy', '.agents',
-        '.codegraph', '.venv', 'venv', 'env', '.env', 'dist', 'build', '.next', '.nuxt',
+        '.venv', 'venv', 'env', '.env', 'dist', 'build', '.next', '.nuxt',
         'target', 'bin', 'obj', '.idea', '.vscode', '.cache', 'coverage',
         '.tox', '.mypy_cache', '.ruff_cache', '__pypackages__',
     }
@@ -1062,6 +1062,25 @@ class AICU:
             return "", instruction.strip()
         return instruction[:match.start()].rstrip(), instruction[match.start():].strip()
 
+    def _index_rules(self) -> str:
+        """角色模板里 ``{index_rules}`` 的展开文本：_INDEX.md 只做导航的写法约束。
+
+        单一来源：下游（依赖提示词、评审）只读索引的清单部分，各角色不各写一份。
+        没有配置索引文件的角色展开为空串。
+        """
+        if not self.index_file:
+            return ""
+        idx = str(self.index_file)
+        return (
+            f"下游会先读 {idx}，再按需读取相关文件，避免无差别全读。{idx} 只做导航，"
+            f"且下游只读它的清单部分，因此：\n"
+            f"- 只写文件清单（每个文件一行：路径 — 一句话用途），主文档标明必读、附件标明按需；\n"
+            f"- 版本沿革、变更记录、覆盖自检、验证读数等过程性叙述不要写进 {idx}，"
+            f"也不要塞进主文档（下游会全读主文档）；确需留存就写进单独文件（如 CHANGELOG.md），清单里用一行指向它；\n"
+            f"- 对下游有影响的决策、限制、未核实事项只在主文档里写一次，{idx} 里不重复；\n"
+            f"- {idx} 随产出更新：文件有增删时改清单，只保留现状，不累积历史。"
+        )
+
     def _format_output_instruction(self) -> str:
         """Return the formatted per-request output contract."""
         result = self._output_format_instruction
@@ -1069,6 +1088,7 @@ class AICU:
             "{output_file}": "" if self.shared_target else (
                 str(self.output_file) if self.output_file is not None else ""
             ),
+            "{index_rules}": self._index_rules(),
             "{main_doc}": str(self.main_doc) if self.main_doc else "",
             "{index_file}": str(self.index_file) if self.index_file else "",
             "{final_file}": str(self.final_file) if self.final_file else "",
@@ -1117,6 +1137,7 @@ class AICU:
                 "" if self.shared_target
                 else (str(self.output_file) if self.output_file is not None else "")
             ),
+            "{index_rules}": self._index_rules(),
             "{main_doc}": str(self.main_doc) if self.main_doc else "",
             "{index_file}": str(self.index_file) if self.index_file else "",
             "{final_file}": str(self.final_file) if self.final_file else "",

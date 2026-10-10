@@ -4,7 +4,7 @@
 - 空树：无 shared 目录 / 有 shared 但为空 → {"path": ".", "entries": [], "truncated": false}；
   响应不含 shared_root（前端视共享根为抽象资源）
 - 顶层分区：目录行 type=="directory"；普通文件行 type=="file"
-- 框架目录隐藏：FRAMEWORK_DIR_NAMES 显式项（.artifacts/.codegraph/.git/cc_0 等）+ 任意 cc_* 前缀
+- 框架目录隐藏：FRAMEWORK_DIR_NAMES 显式项（.artifacts/.git/cc_0 等）+ 任意 cc_* 前缀
 - 子目录下钻：path="backend/src" → 普通清单，规范化相对路径
 - 路径规范化：根→"."，forward slash，无 "./" 前缀
 - read_session_shared_file：文本预览 / 二进制不可预览（content=null）/ 目录当文件读 →
@@ -90,7 +90,7 @@ def test_empty_shared_dir_empty_tree(tmp_path):
 def test_framework_dirs_hidden(tmp_path):
     rt = _mk_runtime(tmp_path)
     shared = _shared(rt)
-    for d in (".artifacts", ".codegraph", ".git", "node_modules", "cc_0", "cc_7"):
+    for d in (".artifacts", ".git", "node_modules", "cc_0", "cc_7"):
         os.makedirs(os.path.join(shared, d), exist_ok=True)
     os.makedirs(os.path.join(shared, "backend"), exist_ok=True)
     names = {e["name"] for e in rt.list_session_shared()["entries"]}

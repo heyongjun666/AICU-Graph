@@ -25,7 +25,7 @@ describe('toRoleHoverDetail', () => {
       not_for: ['需求分析与需求文档编写'],
       num_ccs: 2,
       audit_rounds: 2,
-      skills: ['diagnosing-bugs', 'codegraph'],
+      skills: ['diagnosing-bugs', 'to-issues'],
       role_md: '你是高级软件工程师……',
     }));
 
@@ -38,7 +38,7 @@ describe('toRoleHoverDetail', () => {
     expect(detail.groups?.every((group) => group.label.length > 0)).toBe(true);
 
     // skills 是数组，展示时要拼成一行而不是原样甩个数组进 React
-    expect(detail.facts?.map((fact) => fact.value)).toEqual(['2', '2', 'diagnosing-bugs, codegraph']);
+    expect(detail.facts?.map((fact) => fact.value)).toEqual(['2', '2', 'diagnosing-bugs, to-issues']);
 
     expect(detail.body).toBe('你是高级软件工程师……');
     expect(detail.bodyLabel).toBeTruthy();

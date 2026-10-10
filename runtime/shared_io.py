@@ -13,7 +13,7 @@ FRAMEWORK_DIR_NAMES = frozenset({
     "events", "event_inbox", "events_inbox",
     "cc_0", "cc_1", "cc_2", "deliverables",
     "__pycache__", "node_modules", ".tox", "venv", ".venv",
-    ".codegraph", ".artifacts", ".git",
+    ".artifacts", ".git",
 })
 
 

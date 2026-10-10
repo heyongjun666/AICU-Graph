@@ -17,12 +17,9 @@ from datetime import datetime
 from typing import Any, Optional
 
 from executables.base import Executable, ExecutableContext
+from executables.handoff_prompts import render_checkpoint, render_notes_instructions
 from runtime.agent_events import event_queue_dirs
-from runtime.context import (
-    build_codegraph_context,
-    build_codegraph_guidance,
-    notify_artifact_updated,
-)
+from runtime.handoff import SESSION_FRESH, notes_path, read_notes
 from runtime.models import NodeStatus, ErrorObject, LogEntry, LogLevel
 from runtime.workspace_resolver import resolve_partition
 
@@ -82,9 +79,15 @@ def _normalize_worker_artifact(ctx: ExecutableContext, artifact_path: str) -> st
 def _resolve_dep_artifact_path(ctx: ExecutableContext, dep) -> str:
     """依赖节点产出路径：node.artifact_path 直传，缺失时 workspace 兜底。"""
     artifact = getattr(dep, "artifact_path", "") or ""
-    if artifact:
-        return artifact
     did = getattr(dep, "id", "") or "unknown"
+    if artifact:
+        # artifact_path 存的是相对「依赖节点自己工作区」的路径，消费者的 cwd 不同，必须还原成绝对路径。
+        if not os.path.isabs(artifact):
+            try:
+                return os.path.join(ctx.runtime.get_node_workspace(did), artifact)
+            except Exception:
+                return artifact
+        return artifact
     return f"workspaces/{did}/output/"
 
 
@@ -371,14 +374,15 @@ def _fail_startup(ctx: ExecutableContext, exc: Exception) -> NodeStatus:
 # 文案刻意使用通用措辞，不绑定任何具体领域。
 _PRODUCER_ACCEPTANCE_PRINCIPLES = (
     "## 验收原则（产出必读）\n"
-    "1. **对着真实结果验收**：凡是能运行、能演示、能观察的产出，必须实际运行/演示/观察它的真实表现"
-    "后再判定是否完成；不能只凭「代码看起来对」「应该没问题」就交付。\n"
-    "2. **异常信号先当产物缺陷追**：运行、自检或测试中出现的任何异常（报错、结果不符、数据异常、"
-    "表现不对），一律先当作产物本身的缺陷追查清楚并修复后再继续；不要把它解释成"
-    "「测试写错了」「环境问题」「无关紧要」而放过。\n"
-    "3. **区分「结论」与「现状读数」**：只有结论/判据/契约这类被下游消费的内容变了才算缺陷；"
-    "文档里对「当前状态」的描述过时了（会自然过期的读数/快照）但结论没变，**不视为缺陷**，"
-    "不要为此重跑、也不要因此发事件。"
+    "1. **对着真实结果验收**：能运行、能演示、能观察的产出，必须实际跑过、看到真实表现后再判定完成；"
+    "不能只凭「代码看起来对」「应该没问题」就交付。\n"
+    "2. **异常信号先当产物缺陷追**：运行、自检或测试中的任何异常（报错、结果不符、数据异常），"
+    "先当作产物本身的缺陷查清并修复再继续；不要解释成「测试写错了」「环境问题」「无关紧要」而放过。\n"
+    "3. **区分「结论」与「现状读数」**：只有被下游消费的结论/判据/契约变了才算缺陷；"
+    "文档里对「当前状态」的读数/快照过期但结论没变，**不视为缺陷**，不为此重跑、也不发事件。\n"
+    "4. **检查要省轮次**：每次工具调用都会带上完整对话上下文，轮次越多越贵。"
+    "把几个小检查合并成**一条命令**（`cmd1 && cmd2`，或写一个脚本一次跑完）；"
+    "彼此独立的读取/检查在同一轮里**并行调用**多个工具，不要串行来回。"
 )
 
 
@@ -415,7 +419,7 @@ class Worker(Executable):
     _SUT_AWARE_ROLES = frozenset({"acceptance", "test", "grill"})
 
     @staticmethod
-    def _build_worker_context(ctx: ExecutableContext, codegraph_block: str = "") -> str:
+    def _build_worker_context(ctx: ExecutableContext) -> str:
         """构建 Worker 执行上下文前缀。
 
         帮助 Worker 的 CC agent 理解：
@@ -477,35 +481,7 @@ class Worker(Executable):
             and getattr(d.status, 'value', str(d.status)) == 'Completed'
         ]
         if completed_deps:
-            if len(completed_deps) >= 4:
-                # 依赖较多时用分级阅读，避免通读所有文件导致上下文溢出。
-                # 注: 此阈值是临时启发式，后续演进为按 Context/Token Budget 动态决定。
-                parts.append(Worker._build_tiered_reading_instructions(
-                    completed_deps[:12],
-                ))
-            else:
-                # 普通节点：通读所有上游依赖产出
-                lines = ["## 🔴 强制前置步骤：完整读取所有上游依赖产出", ""]
-                lines.append("> 你的工作需要严格基于上游节点的产出，**禁止自行编造或猜测**上游的设计决策、")
-                lines.append("> 接口契约、数据模型或约束条件。不确定时必须回到上游文档查原文。")
-                lines.append("")
-                lines.append("**在开始任何实质工作之前，你必须逐一完成以下操作：**")
-                lines.append("")
-                dep_index = 0
-                for d in completed_deps[:12]:
-                    dep_index += 1
-                    role = getattr(d, 'role', '?') or '?'
-                    task = (getattr(d, 'task', '') or '')[:120].replace('\n', ' ')
-
-                    # node.artifact_path 直传，缺失时 workspace 兜底。
-                    dep_path = _resolve_dep_artifact_path(ctx, d)
-
-                    lines.append(f"**依赖 {dep_index} — [{role}]** {task}")
-                    lines.append(f"📂 产出路径: `{dep_path}`")
-                    lines.append("🔍 操作: 使用 Glob 探索该目录下所有文件 → 使用 Read 读取**每一个** .md/.json/.py 文件")
-                    lines.append("⛔ 未完成上述读取前，**不得**开始执行本节点的任务。")
-                    lines.append("")
-                parts.append("\n".join(lines))
+            parts.append(Worker._build_dependency_reading_instructions(ctx, completed_deps))
 
         # ----- 共享工作区（Session Shared Workspace，所有节点自动挂载） -----
         shared_block = Worker._build_shared_workspace_instructions(node)
@@ -522,11 +498,7 @@ class Worker(Executable):
         event_inbox_block = Worker._build_event_inbox_instructions(node)
         if event_inbox_block:
             parts.append(event_inbox_block)
-
-        # ----- 代码图谱上下文（CodeGraph 动态块；未启用时退回静态引导） -----
-        cg = codegraph_block or build_codegraph_guidance()
-        if cg:
-            parts.append(cg)
+        parts.append(render_notes_instructions(notes_path(node)))
 
         # ----- SUT 定位（只有验收/测试角色需要） -----
         role = (node.role or '').lower()
@@ -590,25 +562,12 @@ class Worker(Executable):
             )
         lines += [
             "",
-            "⛔ **外层边界（硬性）**: 共享区虽是会话内完全共享，但你**不得自行**访问共享根与"
-            "本节点工作区**之外**的任何路径（宿主仓库源码、父级目录、其他会话的目录、"
-            "用户主目录、系统目录）。唯一例外是**用户自己的输入**明确点名了某个外部"
-            "地址/路径 —— 此时只可访问那一个被点名的目标，不得扩大。"
-            "本边界**优先于**下文所有「完全共享」表述。",
-            "",
-            "### 写入规则（完全共享）",
-            "- **共享区文件完全共享**：会话内所有节点默认都能读写共享根下任意文件，"
-            "包括兄弟分区，可互相修改兄弟节点的产出（例如修订兄弟的契约/接口文件）。",
-            "- **不设锁机制**。为避免并发覆盖，遵守以下最佳实践：",
-            "  - 修改共享区任意文件前，先用 Read 读取当前内容，确认不会盲目覆盖兄弟节点的最新修改；",
-            "  - 写文件用「临时文件 + os.replace」原子替换，避免兄弟节点读到你写到一半的半成品；",
-            "  - 以任务分工为主（各节点主要写自己的分区），同一文件尽量只由一个节点负责，减少并发写冲突。",
-            "- 中间的 scratch/草稿可保留在私有 cc_0 运行目录，无需写入共享区。",
-            "",
-            "### 读取兄弟产物",
-            f"- 用绝对路径 `{shared_root}/...` 通过 OS 工具（Read/Glob）读取兄弟节点写入共享区的产物。",
-            "- 产物可能尚未写入，先 Glob 容忍缺失，必要时稍后轮询重试。",
-            "- 你写入共享区的最终产物会被框架登记为 artifact（绝对路径），Manager/下游可直接读取。",
+            "- **共享区文件完全共享**：共享根下任意文件默认可读可写，含兄弟分区，可互相修改兄弟的产出"
+            "（如修订契约/接口文件）；但访问范围仍以上方「工作区边界」为准，**优先于**此处的「完全共享」。",
+            "- **不设锁**，避免并发覆盖：改共享区任意文件前先 Read 当前内容；写文件用「临时文件 + os.replace」原子替换；"
+            "以任务分工为主，同一文件尽量只由一个节点负责。",
+            f"- 读兄弟产物：用绝对路径 `{shared_root}/...` 通过 Read/Glob 读取；产物可能尚未写入，先 Glob 容忍缺失，必要时稍后重试。",
+            "- 你写入共享区的最终产物会被框架登记为 artifact；草稿放私有 cc_0 目录，无需写入共享区。",
         ]
         return "\n".join(lines)
 
@@ -634,31 +593,35 @@ class Worker(Executable):
         lines = [
             "## 📣 事件发布（Event Publish）",
             "",
-            "你可以发布事件，让其他节点知道你的产出或发现。",
-            "**事件只用来表达依赖关系覆盖不到的协作**：正常的上下游衔接不需要发事件——框架会按任务依赖自动推进并唤醒相关节点（含产物就绪后自动让下游继续）。",
-            "**每条事件都有成本**：它会让接收节点被唤醒、重跑一轮（消耗算力），所以发之前先过自检，能不发就不发、能合并就合并。",
+            "事件只用来表达依赖关系覆盖不到的协作：正常的上下游衔接不用发事件，依赖图会自动推进并唤醒下游。",
+            "每条事件都会让接收节点被唤醒、重跑一轮，有成本：能不发就不发，能合并就合并。",
+            "",
             "**发布自检（命中任一才发，都不命中就不发）**：",
-            "1) **跨链影响**：你的产出/发现会改变**不在你上下游依赖链上**的节点的工作——它不知道就会做错、白做或错过时机。",
-            "2) **需要对方行动**：其他节点需要为此**提供信息、做决定、复核确认、或调整自己的任务**（依赖链给不了你这些）。",
-            "**判断尺度（通用）**：问一句——「对方收到后，会不会多出一个它现在没有、且只有收到这条事件才知道要做的动作？」有才发，没有就不发。",
-            "**先汇总再发**：非关键的小发现、小改动不要逐条发，攒到本环节检查/复核收尾时合并成一条发出；只有「对方不立刻知道就会做错/白做/卡住」的关键项才立刻单独发。",
-            "**不要重复发**：发之前确认这件事你有没有已经发过；同一件事换个说法再发、或只是读数/快照变了而结论与请求没变，都不发。",
+            "1) 跨链影响：你的产出/发现会改变**不在你上下游依赖链上**的节点的工作，它不知道就会做错、白做或错过时机；",
+            "2) 需要对方行动：其他节点需要为此提供信息、做决定、复核确认或调整任务（依赖链给不了这些）。",
+            "判断尺度：对方收到后，会不会多出一个它现在没有、且只有收到这条事件才知道要做的动作？没有就不发。",
             "",
-            "**一律不发布**：任务开始、任务完成、验证**通过**（无缺陷、无需任何人行动）、产物已生成但只是下游依赖（依赖图会自动推进）、普通进度汇报，以及「现状描述过时但结论没变」——这类**不视为问题**，不发事件、也不重跑一轮去刷新。",
+            "**时机与去重**：",
+            "- 小发现攒到收尾时合并成一条；只有「对方不立刻知道就会做错/白做/卡住」的关键项才立刻单独发。",
+            "- 同一件事不重复发；换个说法，或只是读数/快照变了而结论与请求没变，都不发。",
+            "- 自己的问题自己修，不发事件：缺陷在你自己的产出里就直接改；问题在别的节点的产出上、你无法自己处理时才发。",
+            "- 你因收到事件被唤醒：改完就收工，不要连环发「已修好/已更新」。例外：复核/测试类节点复测发现缺陷仍未修复或出现新缺陷，按「必须发布」处理。",
             "",
-            "**发现缺陷/不通过项必须发布**：复核/验收/质量门/测试类节点复跑出**失败、缺陷、不通过项**"
-            "（含「测试套件缺失」「产物为空」这类『没能跑到判定』的异常），即命中『需要对方行动』——"
-            "上游产出方必须据此修复。**不得**只把缺陷写进留证文件就收工，必须发一条事件："
+            "**一律不发布**：任务开始/完成、验证通过、产物已生成但只是下游依赖、普通进度汇报，以及「现状描述过时但结论没变」（不视为问题，也不重跑一轮去刷新）。",
+            "",
+            "**必须发布**：复核/验收/质量门/测试类节点发现**别的节点产出**的失败、缺陷、不通过项"
+            "（含「测试套件缺失」「产物为空」这类没能跑到判定的异常），且该缺陷还没报告过（或报告后复测仍未修复）。"
+            "不得只把缺陷写进留证文件就收工；一次复核的多个缺陷合并成一条，"
             "`intent` 用 `collaboration`（需协作修复）或 `escalation`（需上级协调），"
-            "`objective` 写明「发现什么缺陷 + 影响谁 + 需要谁修复」。"
-            "「验证通过」仍不发；只有「发现缺陷」这一情形强制发。",
+            "`objective` 写明「发现什么缺陷 + 影响谁 + 需要谁修复」。「验证通过」仍不发。",
             "",
-            f"发布方式：在 `{events_dir}` 目录写入一个 JSON 文件（文件名任意且唯一，如 `evt_xxx.json`），格式：",
+            f"发布方式：在 `{events_dir}` 目录写入一个 JSON 文件（文件名唯一，如 `evt_xxx.json`），"
+            "用「临时文件 + os.replace」原子写入；每发一条写一个新文件；发布后不要删除（框架摄取后自动清理）。格式：",
             "",
             "```json",
             "{",
             '  "objective": "就几句话：发生了什么 + 需要谁做什么（≤3 句、≤80 字）",',
-            '  "intent": "notification | collaboration | escalation",',
+            '  "intent": "collaboration | escalation",',
             '  "affected_roles": [{"role": "受影响的岗位", "duty": "该岗位职责"}],',
             '  "scope": "current | subtree | related | global",',
             '  "action": "接收节点要完成的动作（自由简短文本）"',
@@ -667,34 +630,19 @@ class Worker(Executable):
             "",
         ]
         lines += [
-            "规则（**objective 必须满足**，否则事件会被框架判定为格式非法而打回）：",
-            "- `objective` 的**值必须是非空字符串**，且**最多 3 句话**（每句以句号或分号结束），**总共 ≤80 字**。",
-            "- `objective` 是**几句话的通知**，用最少的句子说清三件事：**发生了什么 → 影响谁 → 期望对方注意什么**。",
-            "- `objective` 的**唯一用途是「敲门通知」**：告诉接收方「有新产出/新状态 + 一句结论 + 去哪看详情」；"
-            "它**不是**展示工作成果的地方，你的详细成果已经写在产物文件里了。",
-            "- 你主任务要求你产出的详细报告/清单——**写进产物文件**；`objective` 只是「产物就绪 + 一句结论」的通知，"
-            "**不是报告的第二个副本**，在 objective 里重复一遍只会被打回。",
-            "- `objective` **禁止**写：执行步骤、缺陷/验收清单、逐项罗列、复制整篇报告、贴日志/大段原文（超过 80 字或超过 3 句会被框架打回重写）。",
-            "- **详细内容写进共享产物文件**（如 `shared/` 分区下的报告/文档），接收方按需读取；**不要**把详细内容复制进 `objective`。",
-            "",
-            "`objective` 正例（跨链协作，可以发）：`本环节发现一项变更会影响另一条任务链路的产出，请相关节点知悉并复核是否需要调整。`",
-            "`objective` 正例（需要对方行动，可以发）：`本环节推进需要一项依赖链外节点才有的信息，请相关节点提供或告知状态。`",
-            "`objective` 正例（发现缺陷，必须发）：`本环节复跑质量门发现后端测试套件缺失（tests/ 为空），需上游产出方补齐后再回归。`",
-            "`objective` 反例1（纯完成汇报，不要发）：`本环节任务已完成，全部验证通过。`",
-            "`objective` 反例2（下游依赖，不要发——框架按依赖自动唤醒下游）：`本环节产出已写入共享产物文件，需要后续环节节点读取后继续推进。`",
-            "`objective` 反例3（不要这样写）：`已完成本阶段，共 N 项检查 M 项通过 K 项未通过，逐项说明第1项…第2项…第3项…（整段报告）`",
-            "",
-            "- `intent` 三选一：`notification`（仅同步状态）/ `collaboration`（需要协作）/ `escalation`（需要上级协调）。",
-            "- `affected_roles` 是受影响的**岗位/角色**列表（参考信号，**不是节点**）；每项含 `role`（岗位）与 `duty`（该岗位需注意的事项），可为空数组 `[]`。",
-            "- `affected_roles[].role` 填**岗位名**（按你当前任务领域自行填写），**禁止**填节点名 / 模块名 / 节点 ID。",
-            "- `affected_roles` 例：`[{\"role\": \"<岗位名>\", \"duty\": \"<该岗位需注意的事项>\"}]`。",
+            "字段规则（**objective 不满足会被框架判定为格式非法而打回**）：",
+            "- `objective` 必须是非空字符串，最多 3 句、总共 ≤80 字，只做「敲门通知」："
+            "发生了什么 → 影响谁 → 期望对方注意什么。详细成果写进共享产物文件（如 `shared/` 分区下的报告），"
+            "接收方按需读取；**禁止**在 objective 里写执行步骤、缺陷/验收清单、逐项罗列、日志或整篇报告。",
+            "- `intent` 二选一：`collaboration`（需要协作）/ `escalation`（需要上级协调）。只是同步状态、不需要对方动作的信息不要发。",
+            "- `affected_roles` 是受影响的**岗位**列表（参考信号，不是节点）；每项含 `role`（岗位名，**禁止**填节点名/模块名/节点 ID）与 `duty`，可为 `[]`。",
             "- `scope` 四选一：`current`（仅自身）/ `subtree`（本子树）/ `related`（相关节点）/ `global`（全局）。",
-            "- `action` 是建议接收方做的动作（自由简短文本，可为空字符串 `\"\"`）。",
-            "- **不要指定目标**：以上字段都是参考信号，不指定收件人；事件由系统统一路由，你无需也不能指定目标。",
-            "- **禁止**空字符串或缺失 objective：`\"objective\": \"\"` 或没有 objective 字段都会被判定为非法。",
-            "- 用「临时文件 + os.replace」原子写入，避免读到半成品。",
-            "- 发布后**不要**删除该文件（框架扫描摄取后会自动清理）。",
-            "- 可重复发布：每发一条写一个新文件；同一条事件如需更新，用新的唯一文件名。",
+            "- `action` 是建议接收方做的动作（简短文本，可为 `\"\"`）。",
+            "- **不要指定目标**：事件由系统统一路由，你无需也不能指定收件人。",
+            "",
+            "`objective` 正例（跨链协作）：`本环节发现一项变更会影响另一条任务链路的产出，请相关节点知悉并复核是否需要调整。`",
+            "`objective` 正例（发现缺陷，必须发）：`本环节复跑质量门发现后端测试套件缺失（tests/ 为空），需上游产出方补齐后再回归。`",
+            "`objective` 反例（整段报告，会被打回）：`已完成本阶段，共 N 项检查 M 项通过 K 项未通过，逐项说明第1项…第2项…第3项…`",
         ]
         return "\n".join(lines)
 
@@ -792,6 +740,12 @@ class Worker(Executable):
         if not pending:
             return ""
 
+        checkpoint = ""
+        if pending.get('session_mode') == SESSION_FRESH:
+            checkpoint = render_checkpoint(pending, read_notes(node))
+            if pending.get('collaboration_type') == 'revise':
+                return checkpoint
+
         activated_by = pending.get('activated_by', 'unknown')
         reason = pending.get('activation_reason', '')
         activated_at = pending.get('activated_at', '')
@@ -810,7 +764,10 @@ class Worker(Executable):
         lines.append("")
 
         # 排除元信息字段，展示实际上下文
-        meta_keys = {'activated_by', 'activation_reason', 'activated_at'}
+        meta_keys = {
+            'activated_by', 'activation_reason', 'activated_at',
+            'session_mode', 'original_task', 'prior_artifacts',
+        }
         for key, value in pending.items():
             if key in meta_keys:
                 continue
@@ -831,9 +788,14 @@ class Worker(Executable):
                 lines.append(f"**{key}**: {value}")
             lines.append("")
 
-        lines.append("> 请基于以上反馈修订你的产出，并重新交付。")
+        if pending.get('collaboration_type') != 'repair':
+            lines.append("> 先判断这些反馈是否属于你的职责、是否真的需要改动；与你无关就不要动。")
+        lines.append(
+            "> 需要改的话：**只改受影响的部分，不要重跑全套验证**——只复核被改动的部分。"
+        )
         lines.append("")
-        return "\n".join(lines)
+        feedback = "\n".join(lines)
+        return f"{checkpoint}\n{feedback}" if checkpoint else feedback
 
     @staticmethod
     def _compose_task_body(task_parts: list[str], task: str) -> str:
@@ -854,11 +816,10 @@ class Worker(Executable):
         node: Any,
         task: str,
         routing_prefix: str,
-        codegraph_block: str,
         event_inbox_block: str,
         event_publish_block: str,
     ) -> str:
-        """构建续接轮任务体：激活反馈 + 代码图谱 + 事件收件箱 + 事件发布契约。
+        """构建续接轮任务体：激活反馈 + 事件收件箱 + 事件发布契约。
 
         续接模式（CC 已通过 --resume 保留完整对话历史）下不需要重建项目
         目标/依赖等上下文，只注入本次的增量信息。events.publish 非空时
@@ -868,7 +829,6 @@ class Worker(Executable):
             node: 当前 Node。
             task: 原始任务文本。
             routing_prefix: 激活反馈前缀（_build_routing_context 输出）。
-            codegraph_block: 代码图谱上下文块（可能为空串）。
             event_inbox_block: 事件收件箱指令块（可能为空串）。
             event_publish_block: 事件发布指令块（可能为空串）。
 
@@ -882,7 +842,8 @@ class Worker(Executable):
         ]
         resume_parts = [
             p for p in incremental_parts + [
-                codegraph_block, event_inbox_block, event_publish_block,
+                event_inbox_block, event_publish_block,
+                render_notes_instructions(notes_path(node)),
                 _PRODUCER_ACCEPTANCE_PRINCIPLES,
             ]
             if p
@@ -897,99 +858,76 @@ class Worker(Executable):
         )
 
     @staticmethod
-    def _build_tiered_reading_instructions(deps: list) -> str:
-        """构建多依赖节点的分级阅读指令。
+    def _build_dependency_reading_instructions(ctx: ExecutableContext, deps: list) -> str:
+        """上游依赖的按需读取指令：先建索引，再读与本任务相关的部分，并留下可核对的痕迹。
 
-        当节点依赖众多上游 Worker 时，通读所有文件会造成上下文溢出。
-        改为三级策略：全景扫描 → 精读接口层 → 按需深入。
-        同时包含文件大小截断保护。
+        不再要求通读每个依赖的全部文件（依赖一多上下文就被上游细节占满），也不再
+        按依赖个数切换两套规则。取而代之的是同一套流程，并用三道防线避免「按需读取」
+        退化成「漏读关键信息」：
 
-        注: 触发阈值（completed_deps >= 4）是临时启发式，后续演进为
-        按 Context/Token Budget 动态决定（少量依赖全量读、大量依赖分层读）。
+        1. 入口与契约类文件（README/INDEX、接口、规格、schema、模型）命中即必读全文；
+        2. 先从本节点任务列出「需要从上游获得什么」，再逐项找依据 —— 以需求驱动读取，
+           而不是凭文件名猜哪个相关；找不到再 grep 整个依赖目录，不允许直接跳过；
+        3. 产出里写「上游依赖核对」小节，逐项给出来源、未读文件及理由，让遗漏可见、可复核。
 
-        Args:
-            deps: 已完成的上游依赖节点列表。
-
-        Returns:
-            分级阅读指令文本块。
+        所有依赖都列出，不截断个数：漏掉一个依赖等于漏掉它的全部约束。
         """
         lines = [
-            "## 🔴 强制前置步骤：分级读取上游依赖产出（多依赖模式）",
+            "## 🔴 上游依赖：按需读取（先建索引，再读取任务需要的部分，不得遗漏）",
             "",
-            "> ⚠️ 你的依赖节点较多，**禁止**通读所有文件，必须按以下三级策略操作。",
-            "> 目标是理解各模块的**接口契约和对外暴露的 API**，而非阅读所有实现细节。",
+            "> 你的工作必须严格基于上游节点的产出，**禁止编造或猜测**上游的设计决策、接口契约、",
+            "> 数据模型或约束。不必通读上游全部文件，但「你的任务需要的信息」必须有上游原文作依据。",
             "",
-            "---",
-            "",
-            "### 第一级：全景扫描（每个依赖必做）",
-            "",
-            "对每个上游依赖的产出目录，**仅执行一次** Glob 列出所有文件名。",
-            "这一步只建立「有哪些文件」的心智模型，**不要**在这个阶段读取任何文件内容。",
-            "",
-            "---",
-            "",
-            "### 第二级：精读接口层（每个依赖选做 2~5 个文件）",
-            "",
-            "从 Glob 结果中筛选以下优先级文件，**每个依赖最多读取 5 个**：",
-            "",
-            "**必须读（如果存在）：**",
-            "- `README.md` / `INDEX.md` — 模块概览",
-            "- `__init__.py` / `index.js` — 对外暴露的公共接口",
-            "- `*_interface*` / `*_api*` / `*_types*` — 接口定义和类型",
-            "- `*_contract*` / `*_spec*` / `*.proto` — 契约/规格文档",
-            "",
-            "**可以读（与本节点任务直接相关时）：**",
-            "- 数据模型定义文件（`models.py`, `schema.*`, `types.*`）",
-            "- 配置文件（路由配置、API endpoint 定义）",
-            "",
-            "**不要读（除非本节点需要且无接口文件能说明）：**",
-            "- 测试文件（`test_*`, `*_test.*`, `*.spec.*`）",
-            "- 实现细节文件（内部逻辑、工具函数、helper）",
-            "- 静态资源、HTML template、CSS",
-            "",
-            "---",
-            "",
-            "### 第三级：按需深入（仅在必要时）",
-            "",
-            "**仅在以下情况**才读取额外的实现文件：",
-            "1. 接口文件中引用了某个模块但未说明其行为",
-            "2. 需要验证两个模块的数据格式是否真正兼容",
-            "3. 发现接口定义与实际行为不一致的矛盾",
-            "",
-            "---",
-            "",
-            "### 文件大小截断保护",
-            "",
-            "对于任何**超过 800 行**的文件：",
-            "- 先 Read 前 100 行（了解模块结构和导入）",
-            "- 再用 Bash `grep -n \"^def \\|^class \\|^export \\|^interface \" <file>` 提取类/函数/接口签名",
-            "- 只对本节点相关的具体函数/类做 Read 指定行范围",
-            "- **禁止**一次性读取超长文件的全部内容",
-            "",
-            "---",
-            "",
-            "### 依赖清单",
+            "### 依赖清单（产出路径若是文件，其所在目录即该依赖的产出目录）",
             "",
         ]
-        dep_index = 0
-        for d in deps:
-            dep_index += 1
+        for index, d in enumerate(deps, 1):
             role = getattr(d, 'role', '?') or '?'
-            task = (getattr(d, 'task', '') or '')[:120].replace('\n', ' ')
-            artifact = getattr(d, 'artifact_path', '') or ''
-            did = getattr(d, 'id', '') or 'unknown'
-
-            if artifact:
-                dep_path = artifact
-            else:
-                dep_path = f"workspaces/{did}/output/"
-
-            lines.append(f"**依赖 {dep_index} — [{role}]** {task}")
-            lines.append(f"  📂 产出路径: `{dep_path}`")
-            lines.append("  🔍 先 Glob → 精读 ≤5 个接口文件 → 按需深入")
+            summary = (getattr(d, 'task_summary', '') or '').strip()
+            task = ' '.join((getattr(d, 'task', '') or '').split())
+            if len(task) > 300:
+                task = task[:300] + "…"
+            lines.append(f"**依赖 {index} — [{role}]**")
+            if summary:
+                lines.append(f"- 职责摘要: {summary}")
+            if task:
+                lines.append(f"- 任务: {task}")
+            lines.append(f"- 📂 产出路径: `{_resolve_dep_artifact_path(ctx, d)}`")
             lines.append("")
 
-        lines.append("> ⛔ 在完成所有依赖的第一级扫描 + 接口文件精读之前，**不得**开始执行本节点的任务。")
+        lines.extend([
+            "### 读取流程（每个依赖都要执行）",
+            "",
+            "1. **建索引**：对每个依赖的产出目录做一次目录列表（Glob 或 `ls -l`，可看到文件大小），"
+            "只建立「有哪些文件、多大」的认识，此时不读内容。",
+            "2. **入口与契约必读全文**（存在即读）：`README*` / `SUMMARY*`、"
+            "该依赖的主产出文档（如 `cc_output.md`、`best_solution_summary.txt`）、"
+            "`*interface*` / `*api*` / `*contract*` / `*spec*` / `*schema*` / `*types*` / `models.*`、"
+            "`*.proto` / OpenAPI / 路由与配置定义。\n"
+            "   `_INDEX.md` / `INDEX*` 是导航索引，**只读它的清单部分**（从开头读到文件清单结束为止），"
+            "用清单判断哪些文件与任务相关；清单之后的版本沿革、自检等叙述不必读（对下游有影响的决策与限制以主文档为准）。",
+            "3. **以需求驱动读取**：通读你自己的任务后，先列出「我需要从上游获得什么」"
+            "（接口签名、数据结构与字段名、错误码、配置项、命名与目录约定、验收标准、依赖版本……），"
+            "再逐项在上游找原文依据：先看入口/契约文档；没找到就对依赖目录 "
+            "`grep -rn \"<关键词>\"`，再读命中文件的相关部分。",
+            "4. **读取粒度**：命中的文件在 800 行以内读全文；超过 800 行先 Read 前 100 行，"
+            "再用 `grep -n \"^def \\|^class \\|^export \\|^interface \"` 提取签名，只读与任务相关的行范围。"
+            "不确定是否相关时，读开头约 50 行再判断，不要仅凭文件名跳过；测试文件、静态资源、无关的内部实现可以不读。",
+            "5. **找不到依据时不得编造**：按最保守的假设推进，并在「上游依赖核对」里写明"
+            "「上游未定义」或「上游互相矛盾」及你的处理方式。",
+            "",
+            "### 上游依赖核对（必做）",
+            "",
+            "开工前自查：任务里提到的每个上游对象、接口、字段，是否都已找到上游原文依据。"
+            "完成后在主产出文档末尾增加「上游依赖核对」小节"
+            "（主产出是 JSON 等机器解析格式时，写入工作区根目录的 `upstream_notes.md`），对每个依赖写明：",
+            "- 已读文件（标注全文还是片段）；",
+            "- 采用的关键事实，一条一行，并标注来源（文件 + 行号或章节）；",
+            "- 与任务可能相关却**没有读**的文件及理由（明显无关的不必列）；",
+            "- 上游未定义 / 互相矛盾之处。",
+            "",
+            "> ⛔ 完成各依赖的「建索引」和「入口与契约必读」之前，**不得**开始执行本节点的任务。",
+        ])
         return "\n".join(lines)
 
     def run(self, ctx: ExecutableContext) -> NodeStatus:
@@ -1001,7 +939,12 @@ class Worker(Executable):
         # 判断是否为会话续接（必须在 _create_real_aicu 之前检查，
         # 因为 _create_real_aicu 会把首次创建的 AICU 写入缓存）。
         # 测试 fake 也可通过 aicu_instance 注入，但不参与节点级真实会话缓存。
+        # 新会话策略的唯一落点：pending_context 标了 fresh（Revise / 事件重激活）
+        # 就丢弃缓存的 CC 会话，不再 --resume；上一轮状态由检查点交代。
+        pending_at_start = getattr(ctx.node, 'pending_context', None) or {}
         with Worker._aicu_cache_lock:
+            if pending_at_start.get('session_mode') == SESSION_FRESH:
+                Worker._aicu_cache.pop(ctx.node.id, None)
             is_continuation = Worker._aicu_cache.get(ctx.node.id) is not None
 
         # 捕获 Revise 复用标记（必须在使用前捕获：下方 _build_routing_context
@@ -1034,9 +977,6 @@ class Worker(Executable):
         if getattr(ctx.node, 'pending_context', None):
             ctx.runtime.update_node_status(ctx.node.id, NodeStatus.RUNNING, pending_context=None)
 
-        # 代码图谱上下文（CodeGraph；默认开，AICU_CODEGRAPH=0 显式关，且 real 模式才注入，禁用/失败返回 ""）
-        codegraph_block = build_codegraph_context(ctx.node, ctx)
-
         # Execute AICU.ask() in thread pool to avoid blocking scheduler
         executor = ThreadPoolExecutor(max_workers=1)
         if is_continuation:
@@ -1048,11 +988,11 @@ class Worker(Executable):
             event_publish_block = Worker._build_event_publish_instructions(ctx.node)
             task_body = Worker._build_resume_task_body(
                 ctx.node, ctx.node.task,
-                routing_prefix, codegraph_block, event_inbox_block, event_publish_block,
+                routing_prefix, event_inbox_block, event_publish_block,
             )
         else:
             # 首次执行：构建完整上下文
-            context_prefix = self._build_worker_context(ctx, codegraph_block=codegraph_block)
+            context_prefix = self._build_worker_context(ctx)
             task_parts = [p for p in [routing_prefix, context_prefix] if p]
             task_body = Worker._compose_task_body(task_parts, ctx.node.task)
 
@@ -1108,12 +1048,6 @@ class Worker(Executable):
             artifact_path = _normalize_worker_artifact(
                 ctx, result.get("final_output_path", "")
             )
-
-            # 上下文失效边界：Worker 只知"有产出写入共享组"，不依赖 CodeGraph。
-            # notify_artifact_updated 内部 dispatch 到 GroupGraphState.mark_stale（Phase 4 可扩展）。
-            shared_root = (ctx.node.config or {}).get("_shared_workspace")
-            if shared_root:
-                notify_artifact_updated(shared_root)
 
             # 兜底摄取节点事件发布入口（防 scheduler 已停、无 tick 扫描导致事件滞留）。
             # 事件文件被摄取后由 Runtime 删除；此处仅触发摄取，不改变任何调度。

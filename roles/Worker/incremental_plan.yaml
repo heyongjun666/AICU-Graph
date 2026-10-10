@@ -25,7 +25,7 @@ num_ccs: 3
 audit_rounds: 2
 
 # ---- skills ----
-skills: [to-issues, codegraph]
+skills: [to-issues]
 
 # ---- 产出文件 ----
 output_file: null
@@ -43,7 +43,7 @@ generate_instruction: |-
   - **主文档（必写）**：{main_doc} — 完整版本计划 JSON（下游 framework 会解析此文件）
   - **附件（按需）**：风险清单、工作量估算、依赖图、issue 拆分明细等，写入同目录其他文件
   - **索引（必写）**：{index_file} — 列出所有产物文件及其作用
-  下游会先读 {index_file}，再按需读取相关文件。
+  {index_rules}
 
   ## 制定步骤（按任务规模裁剪——规模判断见「任务适配协议」）
   - **未被要求分阶段、且不存在版本依赖时**：只输出**单版本计划**（一个 v1，含必要模块）即可，

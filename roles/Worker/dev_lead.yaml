@@ -28,7 +28,7 @@ audit_rounds: 2
 # ---- skills ----
 # 注意：不要挂 improve-codebase-architecture —— 它要求产出 HTML 报告并"由人挑选一个再 grill"，
 # 与 batch 无人在环及 main_doc: task_assignment.md 契约冲突。模块边界复核就地做，写进主文档即可。
-skills: [to-issues, codegraph]
+skills: [to-issues]
 
 # ---- 产出文件 ----
 output_file: null
@@ -46,7 +46,7 @@ generate_instruction: |-
   - **主文档（必写）**：{main_doc} — 完整任务分配文档
   - **附件（按需）**：接口契约、算法规范、依赖图等，写入同目录其他文件
   - **索引（必写）**：{index_file} — 列出所有产物文件及其作用
-  下游会先读 {index_file}，再按需读取相关文件。
+  {index_rules}
 
   ## 拆分步骤（按任务规模裁剪，规模判断见「任务适配协议」）
   - **小而精准的任务**：保持为**一个有界任务**即可，无需拆分成多个子任务，也不产出 issue 附件。

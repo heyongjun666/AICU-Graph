@@ -180,6 +180,8 @@ def test_default_batch_waits_for_three_events(tmp_path):
     graph = Graph()
     target = _make_node("W", str(tmp_path))
     graph.add_node(target)
+    # 图上还有运行中的节点（非空闲），才需要等凑批
+    graph.add_node(_make_node("busy", str(tmp_path), status=NodeStatus.RUNNING))
     scheduler = Scheduler(graph, ExecutableRegistry(), MockDelegate(), MockGateway())
     try:
         for index in range(2):
@@ -595,7 +597,8 @@ def test_manager_run_receives_all_five_routed_events(tmp_path, revise, language)
         assert Manager(aicu_instance=ai).run(ctx) == NodeStatus.WAITING
         assert len(ai.calls) == 1
         incremental, prompt = ai.calls[0]
-        assert incremental == revise
+        # Revise 也是新会话下的完整首轮请求，不再走 ask_incremental。
+        assert incremental is False
         for event in events:
             for key in ("event_id", "producer", "objective", "intent", "action"):
                 assert event[key] in prompt
@@ -784,9 +787,35 @@ class TestBridgeBatching:
     def _inbox_dir(self, h, node_id="B1"):
         return os.path.join(_node_ws(h.root, node_id), "event_inbox")
 
-    def test_below_threshold_not_triggered(self, tmp_path):
-        """< 阈值且未到兜底时限 → 不触发，事件留在 inbox、节点不重激活。"""
+    def test_idle_graph_flushes_below_threshold(self, tmp_path):
+        """图已空闲 → 不会再有新事件，未满阈值也直接放行。"""
         h = self._harness(tmp_path)
+        h.graph.update_node("M1", status=NodeStatus.COMPLETED)
+        for i in range(2):
+            _write_event(h.root, "B1", self._evt(i))
+        h.run_bridge()
+
+        b = h.graph.get_node("B1")
+        assert b.status == NodeStatus.READY
+        assert b.activation_count == 1
+        assert not os.listdir(self._inbox_dir(h))
+
+    def test_other_waiting_node_blocks_idle_flush(self, tmp_path):
+        """还有别的 Waiting 节点（可能马上被放行产生新事件）→ 不算空闲，继续凑批。"""
+        h = self._harness(tmp_path)
+        h.graph.add_node(_make_node("downstream", str(tmp_path), status=NodeStatus.WAITING))
+        for i in range(2):
+            _write_event(h.root, "B1", self._evt(i))
+        h.run_bridge()
+
+        b = h.graph.get_node("B1")
+        assert b.status == NodeStatus.COMPLETED
+        assert len(os.listdir(self._inbox_dir(h))) == 2
+
+    def test_below_threshold_not_triggered(self, tmp_path):
+        """< 阈值且未到兜底时限（图上仍有运行中节点）→ 不触发，事件留在 inbox、节点不重激活。"""
+        h = self._harness(tmp_path)
+        h.graph.add_node(_make_node("busy", str(tmp_path), status=NodeStatus.RUNNING))
         for i in range(2):
             _write_event(h.root, "B1", self._evt(i))
         h.run_bridge()

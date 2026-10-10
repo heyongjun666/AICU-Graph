@@ -30,6 +30,7 @@ from typing import Any, Optional, TYPE_CHECKING
 from executables.base import ExecutableContext, SchedulerDelegate
 from executables.registry import ExecutableRegistry
 from runtime.agent_events import _node_workspace
+from runtime.handoff import fresh_session_fields
 from runtime.concurrency import DEFAULT_MAX_CONCURRENCY, validate_max_concurrency
 
 # 所有未停止的 Scheduler 实例；进程退出时兜底 stop()。
@@ -1193,8 +1194,8 @@ class Scheduler:
     def _process_reactivation_events(self) -> None:
         """消费各节点 inbox 中的事件并复用激活引擎重激活。
 
-        节点累计事件 ≥ ``event_batch_threshold``（默认 3）或最早事件滞留超过
-        ``event_batch_max_age``（默认 1800 秒）时，一次性 drain 全部事件、合并成一条
+        节点累计事件 ≥ ``event_batch_threshold``（默认 3）、最早事件滞留超过
+        ``event_batch_max_age``（默认 1800 秒）、或整张图已空闲时，一次性 drain 全部事件、合并成一条
         ``pending_context`` 重激活一次，减少节点唤醒及模型调用次数。
 
         每条事件先过确定性 scope 预筛：current 只允许 producer 自身，subtree
@@ -1204,6 +1205,8 @@ class Scheduler:
         RUNNING 节点自行消费（CC 有界轮询），此处只扫非运行态（_REACTIVATABLE）。
         """
         now = time.time()
+        # 先做 scope 预筛，收集各节点待处理的相关事件。
+        pending: list[tuple[Any, list[tuple[str, dict, float]]]] = []
         for node in list(self.graph.all_nodes()):
             if node.status not in self._REACTIVATABLE_STATUSES:
                 continue
@@ -1218,13 +1221,34 @@ class Scheduler:
                     relevant.append((path, data, mtime))
                 else:
                     self._decline_inbox_event(node, path, data)
-            if not relevant:
-                continue
+            if relevant:
+                pending.append((node, relevant))
+        if not pending:
+            return
 
+        # 图已空闲：没有 Ready/Running、没有在途执行/待重试，且剩余 Waiting 节点
+        # 都只是在等这些事件本身 —— 不会再有新事件到达，继续凑批只会白白拖延。
+        # 仍有其他 Waiting 节点（如即将被依赖门控放行的下游）时不算空闲，避免提前拆批。
+        stats = self.graph.get_stats()
+        waiting_with_events = sum(
+            1 for node, _ in pending if node.status == NodeStatus.WAITING
+        )
+        graph_idle = (
+            stats.get("Ready", 0) == 0
+            and stats.get("Running", 0) == 0
+            and stats.get("Waiting", 0) - waiting_with_events == 0
+            and self.active_execution_count == 0
+            and not self._scheduled_retries
+        )
+        for node, relevant in pending:
+            # 前面的激活可能经父链回卷改变了本节点状态：以最新状态为准。
+            if node.status not in self._REACTIVATABLE_STATUSES:
+                continue
             # 合并触发：满阈值 或 最早事件滞留超兜底时限。
             oldest_mtime = relevant[0][2]
             trigger = (
-                len(relevant) >= self.event_batch_threshold
+                graph_idle
+                or len(relevant) >= self.event_batch_threshold
                 or (now - oldest_mtime) >= self.event_batch_max_age
             )
             if not trigger:
@@ -1344,6 +1368,10 @@ class Scheduler:
             "event_action": first_batch.get("action", ""),
             "event_affected_roles": first_batch.get("affected_roles", []),
         }
+        # Worker 被事件唤醒 → 新会话 + 检查点（原任务/产出位置/上一轮笔记），
+        # 不再 --resume 累积历史。Manager 走自己的 expand/revise 链路，不在此列。
+        if node.exec_type == "worker":
+            ctx.update(fresh_session_fields(node))
 
         step_id = node.step_ref or node.id
         if len(events) > 1:

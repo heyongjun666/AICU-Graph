@@ -26,7 +26,7 @@ num_ccs: 2
 audit_rounds: 2
 
 # ---- skills ----
-skills: [diagnosing-bugs, codegraph]
+skills: [diagnosing-bugs]
 
 
 # ---- 产出文件 ----

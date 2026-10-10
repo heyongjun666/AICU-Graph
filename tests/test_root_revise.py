@@ -336,16 +336,37 @@ class TestReviseWorkerNode:
         with pytest.raises(ValueError, match="non-whitelisted"):
             rt.revise_worker_node(child.id, "x", config={"bad_key": 1})
 
-    def test_revise_preserves_resumed_session(self, tmp_path):
-        """role/AICU-config/workspace 未变 → 保留 _aicu_cache（--resume 续接原会话）。"""
+    def test_revise_starts_fresh_session_with_checkpoint(self, tmp_path):
+        """Revise 一律新会话：弹 _aicu_cache，并把原任务作为检查点写进 pending_context。"""
         rt, _, child = _completed_worker_under_root(tmp_path)
+        original_task = child.task
         sentinel = object()
         with Worker._aicu_cache_lock:
             Worker._aicu_cache[child.id] = sentinel
         try:
             rt.revise_worker_node(child.id, "incremental")
             with Worker._aicu_cache_lock:
+                assert Worker._aicu_cache.get(child.id) is None
+            pc = rt.graph.get_node(child.id).pending_context
+            assert pc["session_mode"] == "fresh"
+            assert pc["original_task"] == original_task
+            assert pc["incremental_task"] == "incremental"
+        finally:
+            with Worker._aicu_cache_lock:
+                Worker._aicu_cache.pop(child.id, None)
+
+    def test_retry_revise_keeps_resumed_session(self, tmp_path):
+        """自动重试（reason=retry）仍续接原会话：失败后紧接着修复需要刚发生的上下文。"""
+        rt, _, child = _completed_worker_under_root(tmp_path)
+        sentinel = object()
+        with Worker._aicu_cache_lock:
+            Worker._aicu_cache[child.id] = sentinel
+        try:
+            rt.revise_worker_node(child.id, "fix it", reason="retry")
+            with Worker._aicu_cache_lock:
                 assert Worker._aicu_cache.get(child.id) is sentinel
+            pc = rt.graph.get_node(child.id).pending_context
+            assert "session_mode" not in pc
         finally:
             with Worker._aicu_cache_lock:
                 Worker._aicu_cache.pop(child.id, None)
@@ -565,7 +586,7 @@ class TestReactivateReusedWorker:
         # 直接复用避免重复建图。
         return _completed_worker_under_root(tmp_path, relpath=relpath, role=role)
 
-    def test_session_reuse_default_when_unchanged(self, tmp_path):
+    def test_session_fresh_by_default_when_reused(self, tmp_path):
         rt, mgr_id, child = self._harness(tmp_path)
         sentinel = object()
         with Worker._aicu_cache_lock:
@@ -574,7 +595,7 @@ class TestReactivateReusedWorker:
             prepared = rt._prepare_node_config(child.id, {**(child.config or {}), **{}}, mgr_id)
             rt._reactivate_reused_worker(child, _step("s1", role="dev"), prepared)
             with Worker._aicu_cache_lock:
-                assert Worker._aicu_cache.get(child.id) is sentinel  # resume 保留
+                assert Worker._aicu_cache.get(child.id) is None  # 复用 = 新会话
             node = rt.graph.get_node(child.id)
             assert node.status == NodeStatus.WAITING
             assert node.pending_revise is True
@@ -918,7 +939,8 @@ def _manager_node(pending_revise: bool = False, status: NodeStatus = NodeStatus.
 
 class TestExpandDuckTyping:
 
-    def test_revise_uses_incremental_aicu_request_only(self):
+    def test_revise_uses_fresh_full_expand_request(self):
+        """Revise 是新会话：发完整首轮 prompt（含原任务 + 增量 + 候选），走 ask 而非 ask_incremental。"""
         rt = _DuckRuntime(with_revision=True)
         node = _manager_node(pending_revise=True)
         node.task = "CURRENT_TASK_FIELD"
@@ -936,16 +958,15 @@ class TestExpandDuckTyping:
         result = mgr.run(ExecutableContext(node=node, runtime=rt))
 
         assert result == NodeStatus.WAITING
-        assert len(aicu.incremental_prompts) == 1
-        assert aicu.normal_prompts == []
-        prompt = aicu.incremental_prompts[0]
+        assert aicu.incremental_prompts == []
+        assert len(aicu.normal_prompts) == 1
+        prompt = aicu.normal_prompts[0]
         assert "CURRENT_INCREMENTAL_TASK" in prompt
-        assert "HISTORICAL_TASK" not in prompt
+        assert "HISTORICAL_TASK" in prompt  # 检查点：新会话必须显式交代原任务
         assert "Reuse Candidates" in prompt
         assert "step_ref: `dev`" in prompt
         assert "reuse_step_ref" in prompt
-        assert "执行上下文快照" not in prompt
-        assert "CodeGraph" not in prompt
+        assert "执行上下文快照" in prompt
         assert rt.submitted_revisions == ["M1"]
 
     def test_pending_revise_with_revision_runtime(self):
@@ -1065,7 +1086,7 @@ class TestReviseCandidatesBlock:
         assert "## 可复用候选节点 (Reuse Candidates)" in block
         assert "step_ref: `dev`" in block
         assert "role: dev" in block
-        assert "Task A1" in block
+        assert "Task A1" in block  # 无摘要时退回截断后的 task
         assert "reuse_step_ref" in block
         assert "候选角色能够完成" in block
         assert "可由候选覆盖" in block
@@ -1080,6 +1101,7 @@ class TestReviseCandidatesBlock:
         c1 = _worker_node("A1", "M1", role="dev", status=NodeStatus.COMPLETED,
                           step_ref="dev")
         c1.task_summary = "SUMMARY_A1"
+        c1.task = "FULL_TASK_A1"
         c1.artifact_path = str(art_dir)
         rt.add_children("M1", [c1])
 
@@ -1093,7 +1115,7 @@ class TestReviseCandidatesBlock:
         block = mgr._build_revise_candidates_block(ctx)
 
         assert "SUMMARY_A1" in block
-        assert "Task A1" in block
+        assert "FULL_TASK_A1" not in block  # 有摘要时只给摘要
         assert "artifact" not in block
         assert "secret_output.md" not in block
         assert "OUTPUT_BODY" not in block
@@ -1346,3 +1368,36 @@ class TestWorkerResumeFallback:
         finally:
             with Worker._aicu_cache_lock:
                 Worker._aicu_cache.pop(node.id, None)
+
+
+class TestFreshReviseCheckpoint:
+    """Worker 新会话 Revise 的检查点：原任务 + 上一版产物位置，不含历史对话。"""
+
+    def test_checkpoint_renders_original_task_and_artifacts(self):
+        node = Node(id="W1", exec_type="worker", role="dev", task="NEW_INCREMENT",
+                    config={}, status=NodeStatus.WAITING)
+        node.pending_context = {
+            "collaboration_type": "revise",
+            "session_mode": "fresh",
+            "original_task": "ORIGINAL_TASK_TEXT",
+            "incremental_task": "NEW_INCREMENT",
+            "prior_artifacts": ["/ws/W1/cc_output.md"],
+        }
+        text = Worker._build_routing_context(node)
+        assert "新会话检查点" in text
+        assert "ORIGINAL_TASK_TEXT" in text
+        assert "/ws/W1/cc_output.md" in text
+        # 增量任务由「## 你的任务」承载，检查点里不重复
+        assert "NEW_INCREMENT" not in text
+
+    def test_non_fresh_revise_keeps_generic_routing_render(self):
+        node = Node(id="W1", exec_type="worker", role="dev", task="t",
+                    config={}, status=NodeStatus.WAITING)
+        node.pending_context = {
+            "collaboration_type": "revise",
+            "activated_by": "parent-id-123",
+            "incremental_task": "fix it",
+        }
+        text = Worker._build_routing_context(node)
+        assert "路由激活上下文" in text
+        assert "新会话检查点" not in text

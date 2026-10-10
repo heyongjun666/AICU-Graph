@@ -27,15 +27,13 @@
   - [6.7 事件→重激活桥（反馈闭环）](#67-事件重激活桥反馈闭环)
   - [6.8 闭环与交付可靠性（Delivery）](#68-闭环与交付可靠性delivery)
   - [6.9 共享工作区（Shared Workspace）](#69-共享工作区shared-workspace)
-  - [6.10 CodeGraph 上下文（AICU_CODEGRAPH）](#610-codegraph-上下文aicu_codegraph)
-  - [6.11 角色 / 技能 / 持久化 / SSE / HTTP API](#611-角色--技能--持久化--sse--http-api)
+  - [6.10 角色 / 技能 / 持久化 / SSE / HTTP API](#610-角色--技能--持久化--sse--http-api)
 - [七、执行体（executables/）设计详解](#七执行体executables设计详解)
 - [八、AI 执行引擎：AICU 与 ClaudeCodeAgent](#八ai-执行引擎aicu-与-claudecodeagent)
 - [九、功能清单总览](#九功能清单总览)
 - [十、逐文件职责映射（新手定位表）](#十逐文件职责映射新手定位表)
   - [10.1 根目录](#101-根目录)
   - [10.2 runtime/](#102-runtime)
-  - [10.4 runtime/context/](#104-runtimecontext)
   - [10.5 executables/](#105-executables)
   - [10.6 roles/（数据驱动配置）](#106-roles数据驱动配置)
   - [10.7 测试体系（两套后端 + 一套前端）](#107-测试体系两套后端--一套前端)
@@ -97,10 +95,9 @@ AICU-Graph 的核心运行服务由 `main.py` 启动，使用 `runtime/` 提供�
 | `runtime_sessions/` | 多会话持久化索引（`sessions.json`）+ 每个 session 的 `graph.json` | 运行时 |
 | `shared/` | 会话级共享工作区（所有节点都能读的产物根）| 运行时 |
 | `frontend/dist/` `frontend/node_modules/` | 前端构建产物与依赖 | 构建 |
-| `.codegraph/` | CodeGraph 代码图谱索引 | 构建 |
 | `events.json` `review_v*.md` `test_report.md` 等根级文件 | 运行/测试痕迹 | 运行/测试 |
 
-项目源码和配置包括：`runtime/`、`executables/`、`roles/`、`aicu.py`、`claude_code_agent.py`、`main.py`、`frontend/src/`、`docs/`、`tests/`、`conftest.py` 和 `run_tests.py`；`frontend/node_modules/`、`frontend/dist/`、`.codegraph/` 以及运行时目录不属于源码。
+项目源码和配置包括：`runtime/`、`executables/`、`roles/`、`aicu.py`、`claude_code_agent.py`、`main.py`、`frontend/src/`、`docs/`、`tests/`、`conftest.py` 和 `run_tests.py`；`frontend/node_modules/`、`frontend/dist/` 以及运行时目录不属于源码。
 
 ---
 
@@ -183,7 +180,7 @@ AICU-Graph 的核心运行服务由 `main.py` 启动，使用 `runtime/` 提供�
   - `_build_handle`：组装 Runtime 与回调（`_complete_pause` 暂停完成回调、`_reconcile_terminal_state` 终态对账）。
   - 会话持久化：`sessions.json` 原子写 + 崩溃恢复 `_restore_sessions`。
   - `_summary`：根据图中节点状态**推导**会话状态：Running > Paused > Failed > Completed > Stopped > Waiting。
-  - `create_session_app(session_manager)`：多会话 HTTP 应用（见 6.11）。
+  - `create_session_app(session_manager)`：多会话 HTTP 应用（见 6.10）。
 
 ### 6.2 Graph + Planner（图与受控写入入口）
 
@@ -272,6 +269,7 @@ AICU-Graph 的核心运行服务由 `main.py` 启动，使用 `runtime/` 提供�
 - 背景：`routing.json` 文件反馈环与 related_nodes 可达边界均已删除，Event 成为唯一通信载体。Router 路由产生的 event 进入目标节点 inbox；Scheduler 不做第二次路由判断。
 - 桥的行为：Scheduler 每 tick 扫描处于 `WAITING` 或 `COMPLETED` 状态的节点（`_REACTIVATABLE_STATUSES`）的 `event_inbox/`。默认累计 **3 个相关事件**，或最早相关事件滞留达到 **1800 秒（30 分钟）**时触发一次批处理；触发后全量 drain 该节点的相关事件，并只重激活一次。消费后删除 inbox 文件（delete-on-consume，事实仍在 events.json 留痕）。`FAILED`、`PAUSED`、`STOPPED` 不会由事件桥自动恢复，FAILED 需要人工 `continue_node`。
 - 消费语义：读完整 `event_batch`（每条含 `event_id / producer / objective`，并保留 intent/scope/action/affected_roles）→ 构造 activation 上下文写入 pending_context，同时保留旧 scalar 字段兼容 → `_activate_target(...)`（无 collaboration_type，无 target 校验）。RUNNING 节点的消费走 CC 有界轮询 `events_inbox/` 信号路径。
+- 会话策略：**Worker** 被事件唤醒时，`_consume_inbox_batch` 额外写入 `runtime/handoff.fresh_session_fields(node)`（`session_mode=fresh` / `original_task` / `prior_artifacts`），`Worker.run` 据此丢弃 `_aicu_cache`、以**新会话**启动，不再 `--resume` 累积历史；上一轮状态靠检查点 + 工作笔记交接（见 §7.3）。Manager 不在此列（走自己的 expand/revise 链路）。
 - 安全边界：C1 全局协作预算（超限升级 `collaboration_budget_exceeded`）、父 Manager 通知清除 + `rewind_parent_chain_for_retry`、`mark_terminal`。`activation_count` 仅作观测计数，不限制节点重激活；**不再有 related_nodes 能力边界 / A3 Manager 目标拦截 / required_role 校验**，角色与目标判断由 Router LLM 负责。
 - Manager 兜底：`Manager.run()` 阶段完成后 `flush_node_events`（scheduler tick 扫描仅在存在 RUNNING 节点时执行，Manager 无 worker 时需自己 flush）；`_build_event_context_block` 主读 pending_context，fallback 读 inbox 事件（覆盖"目标先于事件 READY/RUNNING"竞态）。
 
@@ -295,19 +293,7 @@ Shared FS（共享分区）是产物单一事实源。
 - `partition_of`：**先 realpath 再 commonpath 防目录穿越**，非法路径回退共享根。
 - 纯函数，无 I/O；被 worker 产物归一、Delivery、前端 API 共用。
 
-### 6.10 CodeGraph 上下文（AICU_CODEGRAPH）
-
-**文件**：`runtime/context/*`
-
-- 门控：默认启用 CodeGraph 上下文；设置 `AICU_CODEGRAPH=0` 显式关闭，关闭时保持字节级回归不变。
-- `build_codegraph_context(node, ctx)` / `build_review_context(ctx, children_info)`：fail-silent，使用模块常量 `DEFAULT_BUDGET`，角色→项目查询映射 `_ROLE_PROJECT_QUERY`，`_SKIP_PROJECT_ROLES`。
-- `codegraph.py`：`_run_cli`（CODEGRAPH_BIN）、`_project_root`（walk-up .codegraph）、`query_group_inventory(shared_root)`（`codegraph files`）、`query_symbol`。
-- `resolver.py`：`DEFAULT_BUDGET`、`extract_candidates`（file/symbol 正则）、`truncate`、`assemble`。
-- `state.py`：`GraphState(NOT_EXIST/READY/STALE/BUILDING/FAILED)`、`GroupGraphState.ensure_ready`（init/sync 带显式 `[path]`，避免对项目根重复建索引）。
-- `metrics.py`：`record` → `{workspace_root}/codegraph_metrics.jsonl`。
-- `notify_artifact_updated(shared_root)` → `GroupGraphState.mark_stale`（产物变更即失效）。
-
-### 6.11 角色 / 技能 / MCP / 持久化 / SSE / HTTP API
+### 6.10 角色 / 技能 / MCP / 持久化 / SSE / HTTP API
 
 | 文件 | 职责 |
 |---|---|
@@ -339,7 +325,7 @@ Shared FS（共享分区）是产物单一事实源。
   - `_review`：收集子节点（含产物内容/目录索引）→ 装配 review prompt → `_parse_review_assessments`（返回 assessments+status）→ 全通过 → COMPLETED + closed_loop；有失败且迭代未超 → `submit_fix_plan` 定向修复。
 - **关键内部方法**：
   - `_parse_plan`：dict/str/final_output_path 三种形态解析，尾部花括号修复 + `_parse_markdown_plan` 兜底。
-  - `_build_expand_prompt`：上下文快照 + event_context_block + event inbox/publish + revise_candidates + codegraph + task。
+  - `_build_expand_prompt`：上下文快照 + event_context_block + event inbox/publish + revise_candidates + task。
   - `_build_review_prompt`：逐子节点 pass/fail + fix JSON 契约；协作走事件（不声明目标，Router 决策）。
   - `_build_event_context_block`：主读 pending_context（桥激活写入的 event_objective/event_producer）+ fallback 读 inbox 事件（覆盖"目标先于事件 READY/RUNNING"竞态）。
   - `_build_execution_context_snapshot`：祖先链 + 兄弟节点（按状态排序）+ 可复用产物。
@@ -353,20 +339,21 @@ Shared FS（共享分区）是产物单一事实源。
   1. 判定 `is_continuation`（`Worker._aicu_cache` 命中）与 `revise_resume` → 清 pending_context；
   2. 选 真实 AICU AICU → `update_node_status(RUNNING)`；
   3. 构建 routing_prefix（来自 pending_context）→ 清 pending_context；
-  4. `build_codegraph_context`；
-  5. 首次运行 → `_build_worker_context`（完整上下文：共享产物清单、事件收件箱/发布块、任务）；续跑 → resume 体（--resume conversation_id + 事件 inbox/publish 块）；
-  6. `aicu.ask` 提交给单线程 executor；
-  7. 成功 → `_normalize_worker_artifact`（共享分区=单一事实源）、`notify_artifact_updated(shared_root)`、`flush_node_events` → COMPLETED + artifact_path + log；
-  8. 异常 → FAILED + `ErrorObject.create_worker_execution_error()`；
-  9. `finally`：executor.shutdown + 缓存清理（paused 保留缓存；`activation_count==0` 则 pop）。
+  4. 首次运行 → `_build_worker_context`（完整上下文：共享产物清单、事件收件箱/发布块、任务）；续跑 → resume 体（--resume conversation_id + 事件 inbox/publish 块）；
+  5. `aicu.ask` 提交给单线程 executor；
+  6. 成功 → `_normalize_worker_artifact`（共享分区=单一事实源）、`flush_node_events` → COMPLETED + artifact_path + log；
+  7. 异常 → FAILED + `ErrorObject.create_worker_execution_error()`；
+  8. `finally`：executor.shutdown + 缓存清理（paused 保留缓存；`activation_count==0` 则 pop）。
 - 生命周期：只有 `run()`；节点级停止/清理不由 Worker 提供（见 §7.1）。
 - **上下文装配辅助方法**：
   - `_build_worker_context`：完整首跑上下文（共享产物清单、事件收件箱/发布块、任务）。
-  - `_build_tiered_reading_instructions(deps)`：**多依赖分级阅读**（依赖 ≥4 触发）——一级全景 Glob 扫描 → 二级精读接口层（≤5 个文件）→ 三级按需深入；含 >800 行文件截断保护，避免通读所有依赖产物导致上下文溢出。
+  - `_build_dependency_reading_instructions(ctx, deps)`：**依赖按需读取**（任意依赖数同一流程，不设个数上限）——列出每个依赖的职责摘要/任务/产出路径 → 建目录索引 → 入口与契约文件必读全文 → 按本节点需求逐项取证（grep 兜底）→ >800 行文件只读签名与相关行段；防遗漏靠「找不到依据不得编造」与主产出中必做的「上游依赖核对」小节。Python 侧不扫描依赖目录。
+  - 新会话交接（数据/路径在 `runtime/handoff.py`，文案在 `executables/handoff_prompts.py`）：`render_checkpoint`（原任务 + 上一版产出位置 + 上一轮工作笔记，只给指针不注入产出内容）、`render_notes_instructions`（要求 Agent 收尾前把六节（已确认的结论〔标 `[已验证]`/`[推测]` 并附依据位置〕/ 已做的决定和理由 / 已试过但不行的做法 / 未决问题 / 必须遵守的约束 / 最近一次验证）**增量更新**到 `{node_ws}/handoff_notes.md`（先读旧笔记，只改变化的条目））；笔记在节点 workspace 根目录，不在 `cc_{i}/` 也不在共享分区，不会被当作交付物。
   - `_build_shared_workspace_instructions` / `_build_event_publish_instructions` / `_build_event_inbox_instructions` / `_build_routing_context` / `_build_resume_task_body`。
   - `_handle_cc_stream_output`：real 模式 CC 流式输出分流——`activity` 流只更新 `cc_activity`（不写 node.log）；stderr 写 ERROR 级 log；stdout 默认不写（`AICU_NODE_LOG_STREAMING=1` 才全量写）。
   - `_validate_model`：模型名校验；`_resolve_dep_artifact_path`：依赖产物路径解析（`artifact_path` 直传，缺失时 workspace 兜底）。
-- **Revise 续跑回退**：pop 缓存 → 不带 --resume 重建 → 重试一次。
+- **事件重激活使用新会话**：Worker 被事件唤醒（`pending_context.session_mode == fresh`）时，`Worker.run` 在判定 `is_continuation` 前弹出 `_aicu_cache`——这是 Worker 侧唯一的会话策略点，Revise 与事件重激活都经过这里。笔记缺失或不完整时检查点退化为无笔记版本（靠原任务 + 工作区产物恢复），渲染时声明「与工作区现状不符以现状为准」。自动重试仍 `--resume`。
+- **Revise / Review 使用新会话**：`_reactivate_reused_worker` 对 reason=revise/reuse 弹出 `Worker._aicu_cache`，保留工作区与产物，不带 --resume 重建，凭检查点（原任务 + 产出位置）接手；Manager 的 Revise-Expand 与 Review 同理（`_call_aiCU_with_retry(fresh_session=True)`，Review 另带「评审目标」块）。自动重试（reason=retry）与 `submit_fix_plan` 修复评审仍续跑原会话（`--resume`），失败时回退为不带 --resume 重建并重试一次。
 
 ### 7.4 注册表（registry.py）
 
@@ -386,7 +373,7 @@ Shared FS（共享分区）是产物单一事实源。
   - `2` = pair（双人协作：实现 + 交叉评审）；
   - `3` = triple；
   - `>=4` = full（并行生成 + 交叉评审 + adversarial 对抗 + audit 审计）。
-- **角色配置数据驱动**：加载 `roles/Manager|Worker/{role}.yaml` 覆盖 `default.yaml`；占位符 `{available_roles}` 展开。
+- **角色配置数据驱动**：加载 `roles/Manager|Worker/{role}.yaml` 覆盖 `default.yaml`；占位符 `{available_roles}` 展开；`{index_rules}` 由 `aicu.py::_index_rules` 展开为 `_INDEX.md` 只做导航的统一写法约束（只写文件清单 + 一句话用途，叙述内容放主文档），下游依赖提示词只读索引的清单部分。
 - **Sentinel 语义**：None 哨兵（num_ccs/model/cli_name/audit_rounds 未配置）vs `_UNSET` 哨兵（output_file/final_file/modular_output/generate_instruction 显式未提供）。
 - **`shared_target`**：canonical abs 路径；所有 CC（含多 CC 编排）直写同一共享分区，产物权威 = 分区本身。
 - **工作区结构**：`cc_0..cc_{N-1}/`，每个包含 `CLAUDE.md`（role_md）、**该 CLI 自己的**项目级
@@ -427,7 +414,6 @@ Shared FS（共享分区）是产物单一事实源。
 | 9 | Revise 增量续跑（选择性复用子节点） | `executables/manager.py` `runtime/planner.py` `translate_revision` | — |
 | 10 | 协作闭环（collaboration_ledger → closed_loop.json + deliverable_manifest.json） | `runtime/closed_loop.py` | — |
 | 12 | 共享工作区（会话级单根 + 每节点写分区 + 防穿越） | `runtime/workspace_resolver.py` | — |
-| 13 | CodeGraph 代码图谱上下文 | `runtime/context/*` | 默认开；`AICU_CODEGRAPH=0` 关闭 |
 | 14 | 角色/技能配置驱动 | `runtime/roles_manager.py` `runtime/skills_manager.py` | — |
 | 15 | 多会话 Runtime（SessionManager） | `runtime/session_manager.py` | 默认开 |
 | 16 | FastAPI REST + SSE（单/多会话两套 app） | `runtime/server.py` `runtime/session_server.py` | — |
@@ -438,7 +424,7 @@ Shared FS（共享分区）是产物单一事实源。
 | 21 | **手动建节点 + 依赖边编辑（link-candidates）** | `runtime/runtime.py` `create_manual_node`/`add_dependency`/`get_link_candidates`、`session_server.py` | — |
 | 22 | **外部输入等待/投递（external-input）** | `runtime/runtime.py` `register_external_input_wait`/`deliver_external_input`、`server.py` `POST /v1/nodes/{node_id}/external-input`（body.wait_token） | — |
 | 23 | **CC 活动视图（cc_activity 追踪 + 多会话 activity 端点）** | `runtime/runtime.py` `update_cc_activity/get_cc_activity`、`executables/worker.py` `_handle_cc_stream_output`、`runtime/session_server.py` `GET /v1/sessions/{session_id}/nodes/{node_id}/activity` | — |
-| 24 | **多依赖分级阅读（tiered reading）** | `executables/worker.py` `_build_tiered_reading_instructions` | 默认开（≥4 依赖触发） |
+| 24 | **依赖按需读取（on-demand dependency reading）** | `executables/worker.py` `_build_dependency_reading_instructions` | 默认开（有依赖即生效） |
 | 25 | **CC 流式日志分流（粗粒度 log + 细粒度开关）** | `executables/worker.py` `_handle_cc_stream_output` | `AICU_NODE_LOG_STREAMING=1` 才全量写 |
 | 26 | **MCP 工具下发（角色 `mcp:` 声明 → 注册表解析 → 连通性预检 → 按各 CLI 的注入口下发）** | `runtime/mcp_manager.py` `runtime/mcp_client.py` `cli_adapters.py` | 角色 yaml `mcp` 字段；server 定义在仓库根 `mcp_servers.json` |
 
@@ -477,6 +463,7 @@ Shared FS（共享分区）是产物单一事实源。
 | `closed_loop.py` | 闭环台账：`build/write_closed_loop_report`（含 verdict/converged/escalation）、`build/write_deliverable_manifest`、VERDICT 块契约 |
 | `event_bus.py` | **SSE 层事件总线**（`SSEEvent` + 通配符订阅，供 SSEManager/Scheduler 用），与 `agent_events.py`（节点间 Agent 通信总线）是两条独立总线：前者管前端 SSE 推送，后者管 Agent 协作事件 |
 | `persistence.py` | `graph.json` 快照 save/load、graph_version 单调恢复 |
+| `handoff.py` | **新会话交接**：`fresh_session_fields`（检查点字段，Scheduler/Runtime 共用）、`notes_path` / `read_notes`（工作笔记落点与读取） |
 | `workspace_resolver.py` | 共享工作区解析：`resolve_shared_workspace` / `resolve_partition` / `partition_of`（realpath+commonpath 防穿越） |
 | `roles_manager.py` | 角色配置：扫描 YAML、`list_roles` / `get_role_schema` / `get_role` / `add_role` / `update_role` |
 | `skills_manager.py` | 技能目录扫描：`list_skills` / `get_skill` / `save_skill` |
@@ -492,23 +479,14 @@ Shared FS（共享分区）是产物单一事实源。
 | `session_manager.py` | 多会话生命周期：create/list/pause/resume/stop/delete、`sessions.json` 原子持久化、`_summary` 状态推导 |
 | `session_server.py` | `create_session_app` 多会话 app（roles/skills/sessions/nodes/workspace/edges/SSE per-session） |
 
-### 10.4 runtime/context/
-
-| 文件 | 职责 |
-|---|---|
-| `__init__.py` | CodeGraph 默认启用（`AICU_CODEGRAPH=0` 关闭）；`build_codegraph_context` / `build_review_context` / `notify_artifact_updated`；预算 4096 |
-| `codegraph.py` | `_run_cli`（CODEGRAPH_BIN）、`_project_root`、`query_group_inventory`、`query_symbol` |
-| `resolver.py` | `extract_candidates` / `truncate` / `assemble`（≤4KB 确定性提取） |
-| `state.py` | `GraphState` 状态机、`GroupGraphState.ensure_ready`（init/sync 显式 [path]） |
-| `metrics.py` | `record` → `codegraph_metrics.jsonl` |
-
 ### 10.5 executables/
 
 | 文件 | 职责 |
 |---|---|
 | `base.py` | `Executable` ABC（抽象方法 run）+ 协议（RuntimeGateway/SchedulerDelegate/ExecutableRegistry）+ `BaseContext` |
-| `manager.py` | **Manager 执行体**：expand/review 状态机、prompt 装配（事件上下文/事件 inbox/revise 候选/codegraph/repair context）、plan 解析、评审输出归一化（`_resolve_review_content`/`_parse_review_assessments`）、评审降级（`_degrade_review`） |
-| `worker.py` | **Worker 执行体**：首跑/续跑/revise-resume、产物归一、事件发布/收件箱、缓存生命周期、**多依赖分级阅读（`_build_tiered_reading_instructions`）**、**CC 流式输出分流（`_handle_cc_stream_output`）**、模型名校验（`_validate_model`）、依赖产物路径解析（`_resolve_dep_artifact_path`） |
+| `manager.py` | **Manager 执行体**：expand/review 状态机、prompt 装配（事件上下文/事件 inbox/revise 候选/repair context）、plan 解析、评审输出归一化（`_resolve_review_content`/`_parse_review_assessments`）、评审降级（`_degrade_review`） |
+| `handoff_prompts.py` | **新会话交接文案**：`render_checkpoint`（检查点）、`render_notes_instructions`（工作笔记写入指令） |
+| `worker.py` | **Worker 执行体**：首跑/续跑/revise-resume、产物归一、事件发布/收件箱、缓存生命周期、**依赖按需读取（`_build_dependency_reading_instructions`）**、**CC 流式输出分流（`_handle_cc_stream_output`）**、模型名校验（`_validate_model`）、依赖产物路径解析（`_resolve_dep_artifact_path`） |
 | `registry.py` | `ExecutableRegistry` 工厂（`register`/`create`） |
 | `tests/ 中的 fake` | `测试 fake`：离线确定性假 AI（测试 fake） |
 | `__init__.py` | 包导出 |
@@ -564,7 +542,7 @@ cd frontend && npx vitest run src/components/__tests__/NodeInspector.test.tsx
 
 提交前把这三条各跑一遍，就等于预跑了一遍 CI。
 
-> CI runner 上 `tests/test_codegraph_context.py` 可能会有 1 个用例 skip（需要 `codegraph` 二进制，runner 没装）；本机工具装齐时，当前项目测试基线为 `2164 passed`。如果 CI 仍显示 skip，差值来自该可选外部工具，不是测试被漏收。
+当前项目测试基线为 `2200 passed`。
 
 **测试不依赖跑测试的机器上装了什么 CLI。** `ClaudeCodeAgent` 在构造期会探测本机 CLI，`tests/conftest.py` 有一条 autouse fixture 把这一步钉死——否则「本地绿」与「CI 绿」会变成两个不同的集合（开发机通常装齐了 CLI，runner 一个都没有）。要验证这一点，把 PATH 里的 AI CLI 摘掉跑一遍即可：`env PATH="/usr/bin:/bin" python3 -m pytest -q`。
 
@@ -577,10 +555,10 @@ cd frontend && npx vitest run src/components/__tests__/NodeInspector.test.tsx
 | `tests/test_event_bus.py` | SSE 层 EventBus 单测（通配符订阅/发布/隔离） |
 | `tests/test_event_queue_unified.py` | Event Queue 三目录契约单测 |
 | `tests/test_event_reactivation_bridge.py` | 事件→重激活桥单测 |
+| `tests/test_handoff.py` | 新会话交接单测（检查点字段 / 笔记落点 / 文案 / Scheduler 标记 / Worker 会话策略） |
 | `tests/test_router_lifecycle.py` | AICU Router 单测（组织图快照 / prompt / 目标解析 / 生命周期） |
 | `tests/test_plan_validator.py` | 结构校验单测 |
 | `tests/test_closed_loop.py` | 闭环台账单测 |
-| `tests/test_codegraph_context.py` | CodeGraph 上下文单测 |
 | `tests/test_runtime.py` `test_scheduler.py` `test_scheduler_retry.py` `test_scheduler_manager.py` `test_manager.py` `test_worker.py` `test_convergence_budget.py` `test_manager_collaboration.py` `test_rootcause_fixes.py` `test_root_revise.py` `test_routing_reactivation.py` `test_concurrency_robustness.py` | 核心运行时单测（含调度重试 `test_scheduler_retry.py`） |
 | `tests/test_session_shared.py` `test_shared_target.py` `test_shared_workspace.py` `test_workspace_resolver.py` `test_session_server.py` `test_server.py` `test_sse_manager.py` `test_registry.py` `test_executable_base.py` | 周边单测 |
 
@@ -636,7 +614,7 @@ cd frontend && npx vitest run src/components/__tests__/NodeInspector.test.tsx
 | 想做什么 | 读这些文件 |
 |---|---|
 | 改 Worker 一次任务的提示词装配 | `executables/worker.py`（`_build_worker_context`） |
-| 改多依赖分级阅读策略 | `executables/worker.py`（`_build_tiered_reading_instructions`） |
+| 改依赖按需读取策略 | `executables/worker.py`（`_build_dependency_reading_instructions`） |
 | 改 CC 流式日志分流/日志粒度 | `executables/worker.py`（`_handle_cc_stream_output`）、环境变量 `AICU_NODE_LOG_STREAMING` |
 | 改 peer 协作模式（num_ccs） | `aicu.py`（策略选择 + 工作区结构） |
 | 改 AI Coding CLI 的调用参数 | `claude_code_agent.py`（`_build_base_command` / `chat`） |
@@ -674,7 +652,7 @@ cd frontend && npx vitest run src/components/__tests__/NodeInspector.test.tsx
 | 改前端图渲染 | `frontend/src/components/GraphCanvas.tsx` `TreeNode.tsx` |
 | 加前端标签页 | `frontend/src/components/NodeInspector.tsx` + 对应新组件 |
 | 改前端状态管理 | `frontend/src/stores/*.ts` |
-| 加/改环境变量功能开关 | `runtime/context/__init__.py`、`runtime/scheduler.py`、`executables/worker.py` |
+| 加/改环境变量功能开关 | `runtime/scheduler.py`、`executables/worker.py` |
 
 ---
 
@@ -682,8 +660,6 @@ cd frontend && npx vitest run src/components/__tests__/NodeInspector.test.tsx
 
 | 环境变量 | 作用 | 默认 |
 |---|---|---|
-| `AICU_CODEGRAPH` | CodeGraph 上下文注入开关 | 开（显式 `0` 关闭） |
-| `CODEGRAPH_BIN` | codegraph CLI 路径 | 默认 |
 | `MAX_COLLABORATION_ROUNDS`（运行时属性） | 全局协作轮数上限（C1） | 10 |
 | `AICU_NODE_LOG_STREAMING` | CC 流式日志全量写入 node.log（`=1` 时；默认只写 stderr/activity 分流） | 关 |
 | `VITE_MOCK_MODE` | 前端离线 mock（仅 api.ts 的 CRUD/settings 有 mock 分支，图数据无来源） | 关 |

@@ -714,7 +714,8 @@ class TestRoutingPromptDomainNeutral:
         assert "2. severity: low；description: 术语表缺 2 个缩写" in text
         assert "**expected_action**: 按评审意见修订文档并重新交付" in text
         assert "- 章节: 3" in text
-        assert "修订你的产出" in text
+        assert "只改受影响的部分，不要重跑全套验证" in text
+        assert "请基于以上反馈修订你的产出" not in text
 
     def test_context_no_pending_empty(self):
         """无 pending_context → 返回空串（回归保护）。"""
@@ -816,7 +817,7 @@ class TestBuildResumeTaskBody:
         from types import SimpleNamespace
         node = SimpleNamespace(config={})
         body = Worker._build_resume_task_body(
-            node, "fix stuff", "## 反馈", "", "## 事件", "## 📣 事件发布（Event Publish）"
+            node, "fix stuff", "## 反馈", "## 事件", "## 📣 事件发布（Event Publish）"
         )
         assert "事件发布" in body
         assert "## 反馈" in body
@@ -826,7 +827,7 @@ class TestBuildResumeTaskBody:
     def test_without_blocks_no_contract(self):
         from types import SimpleNamespace
         node = SimpleNamespace(config={})
-        body = Worker._build_resume_task_body(node, "fix stuff", "## 反馈", "", "", "")
+        body = Worker._build_resume_task_body(node, "fix stuff", "## 反馈", "", "")
         assert "routing.json" not in body
         assert "fix stuff" not in body, "续接轮不得重复注入原始 Main Task"
         assert "## 反馈" in body
@@ -835,7 +836,7 @@ class TestBuildResumeTaskBody:
         """无路由/事件上下文时，续接只注入 Continue 最小指令「开始进行主任务」。"""
         from types import SimpleNamespace
         node = SimpleNamespace(config={})
-        body = Worker._build_resume_task_body(node, "original task", "", "", "", "")
+        body = Worker._build_resume_task_body(node, "original task", "", "", "")
         assert "开始进行主任务" in body
         assert "original task" not in body, "Continue 续接不得重新拼接 Main Task"
 
@@ -843,7 +844,7 @@ class TestBuildResumeTaskBody:
         from types import SimpleNamespace
         node = SimpleNamespace(config={})
         body = Worker._build_resume_task_body(
-            node, "task", "🔄 路由激活上下文\n上游反馈", "", "", ""
+            node, "task", "🔄 路由激活上下文\n上游反馈", "", ""
         )
         assert "路由激活上下文" in body
         assert "上游反馈" in body
@@ -925,3 +926,20 @@ class TestCcStreamOutputFilter:
         runtime = self._run("", "x")
         assert len(runtime.logs) == 1
         assert runtime.logs[0]["level"] == LogLevel.INFO
+
+
+class TestPromptCostGuidance:
+    """省 token 的提示词约束：合并检查、少发事件。"""
+
+    def test_acceptance_principles_ask_to_batch_checks(self):
+        text = worker_module._PRODUCER_ACCEPTANCE_PRINCIPLES
+        assert "一条命令" in text
+        assert "并行调用" in text
+
+    def test_event_publish_discourages_casual_events(self):
+        node = Node(id="n1", exec_type="worker", role="dev", task="t", config={}, status=NodeStatus.READY)
+        text = Worker._build_event_publish_instructions(node)
+        assert "自己的问题自己修，不发事件" in text
+        assert "不要连环发" in text
+        assert "collaboration | escalation" in text
+        assert "notification" not in text

@@ -24,9 +24,6 @@ not_for:
 num_ccs: 2
 audit_rounds: 2
 
-# ---- skills ----
-skills: [codegraph]
-
 # ---- 产出文件 ----
 output_file: output
 final_file: output

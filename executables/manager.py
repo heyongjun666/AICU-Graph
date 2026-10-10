@@ -34,11 +34,6 @@ from runtime.closed_loop import (
     write_closed_loop_report,
     write_deliverable_manifest,
 )
-from runtime.context import (
-    build_codegraph_context,
-    build_codegraph_guidance,
-    build_review_context,
-)
 from runtime.workspace_resolver import partition_of
 
 logger = logging.getLogger(__name__)
@@ -226,15 +221,17 @@ class Manager(Executable):
         # 暴露 node id 给 _parse_plan 日志使用（_parse_plan 不持有 ctx）
         self._current_node_id = ctx.node.id
 
-        # 1. 构造 prompt；Revise 只发送当前增量，历史由 AICU conversation 保留。
-        incremental = bool(getattr(ctx.node, "pending_revise", False))
-        prompt = (
-            self._build_revise_incremental_prompt(ctx)
-            if incremental else self._build_expand_prompt(ctx)
+        # 1. 构造 prompt。已有子节点的重新规划（Revise / 修复 / 路由重激活）一律开新会话：
+        #    历史规划对话不再带入，prompt 自带完整上下文（快照 + 候选子节点 + 增量说明），
+        #    这是一次完整的首轮请求，AICU 会照常附带规划协议。
+        fresh_session = bool(
+            getattr(ctx.node, "pending_revise", False)
+            or ctx.runtime.get_children(ctx.node.id)
         )
+        prompt = self._build_expand_prompt(ctx)
 
-        # 2. 调用 AICU。AICU 会在增量消息后追加本轮输出格式协议。
-        raw_output = self._call_aiCU_with_retry(ctx, prompt, incremental=incremental)
+        # 2. 调用 AICU。
+        raw_output = self._call_aiCU_with_retry(ctx, prompt, fresh_session=fresh_session)
 
         # 3. 解析 ExecutionPlan
         plan = self._parse_plan(raw_output)
@@ -376,8 +373,13 @@ class Manager(Executable):
             })
 
         # 3. 构造 prompt 并调用 AICU
+        #    Review 是独立会话：不继承 Expand 的规划对话。规划协议已在 CLAUDE.md，
+        #    这里只发 Review prompt + 输出格式（incremental），所以 prompt 必须自带
+        #    评审所需的全部上下文（见 _build_review_prompt 的 Review Context 块）。
         prompt = self._build_review_prompt(ctx, children_info)
-        raw_output = self._call_aiCU_with_retry(ctx, prompt)
+        raw_output = self._call_aiCU_with_retry(
+            ctx, prompt, incremental=True, fresh_session=True
+        )
         # 3.1 统一解析 review 内容为单一事实来源（real 模式下 ask() 返回元数据 dict，
         #     真实契约内容在 content/content_parsed 或 final_output_path 文件中）。
         #     同一份 content 喂给 _parse_review_assessments / _write_review_output，
@@ -720,6 +722,7 @@ class Manager(Executable):
         prompt: str,
         retries: int = 2,
         incremental: bool = False,
+        fresh_session: bool = False,
     ) -> Any:
         """统一 AICU 调用 + 重试逻辑。
 
@@ -727,6 +730,9 @@ class Manager(Executable):
             ctx: 执行上下文。
             prompt: 发送给 AICU 的 prompt。
             retries: 重试次数（默认 2）。
+            incremental: 只发送本轮 prompt + 输出格式（不再附带首轮规划协议）。
+            fresh_session: 丢弃节点缓存的 AICU，以全新会话（无 --resume）发起本次调用；
+                工作区与产物保留。仅作用于真实 AICU，注入的测试替身不受影响。
 
         Returns:
             AICU.ask() 的原始返回结果。
@@ -737,7 +743,10 @@ class Manager(Executable):
         # 生产路径始终使用真实 AICU；测试可通过 aicu_instance 显式注入 fake。
         aicu = self._aicu
         if aicu is None:
-            from executables.worker import _create_real_aicu
+            from executables.worker import Worker, _create_real_aicu
+            if fresh_session:
+                with Worker._aicu_cache_lock:
+                    Worker._aicu_cache.pop(ctx.node.id, None)
             aicu = _create_real_aicu(ctx)
 
         cc_ids = _aicu_cc_ids(aicu)
@@ -1076,37 +1085,6 @@ class Manager(Executable):
     # Internal: Prompt 构造
     # ------------------------------------------------------------------
 
-    def _build_revise_incremental_prompt(self, ctx: ExecutableContext) -> str:
-        """Build the only message sent for a Manager Revise generation turn.
-
-        The request stays incremental, while the current child candidates are
-        included explicitly so the Manager can make a deterministic reuse
-        decision instead of treating missing ``reuse_step_ref`` as a new node.
-        """
-        incremental = (
-            (getattr(ctx.node, "pending_context", None) or {}).get("incremental_task")
-            or ctx.node.task
-            or ""
-        ).strip()
-        if not incremental:
-            raise ValueError("Manager Revise requires a non-empty incremental task")
-
-        parts = [
-            "这是当前最高优先级的增量请求。请基于已有会话、已有子节点和已有产物，"
-            "重新生成当前版本的 ExecutionPlan；不要直接沿用历史计划。"
-            "先判断这次增量是否落在你的职责范畴内、是否需要本子树采取任何行动："
-            "无需行动时输出 {\"steps\": [], \"reason\": \"<理由>\"}（见决策 0 ①），"
-            "不要为了凑出一份计划把既有子节点原样重发。",
-            f"当前增量请求:\n{incremental}",
-        ]
-        event_block = self._build_event_context_block(ctx)
-        if event_block:
-            parts.append(event_block)
-        candidates = self._build_revise_candidates_block(ctx)
-        if candidates:
-            parts.append(candidates)
-        return "\n\n".join(parts)
-
     def _build_expand_prompt(self, ctx: ExecutableContext) -> str:
         """构造 Expand 阶段 prompt — 含执行上下文快照 + 原始task。
 
@@ -1127,8 +1105,6 @@ class Manager(Executable):
         sep = "\n" + "-" * 60 + "\n"
         # 共享工作区 / 事件协作 / depends_on 正交等协议均由 roles/Manager/*.yaml 的
         # generate_instruction 注入（aicu 在每次 ask 时统一注入），此处不再重复维护。
-        # 代码图谱上下文：Resolver 动态块（默认开，AICU_CODEGRAPH=0 显式关，且 real 模式）；未启用时退回静态引导。
-        codegraph_block = build_codegraph_context(ctx.node, ctx) or build_codegraph_guidance()
         # B3：被路由重新激活且携带事件上下文时，注入事件上下文供决策。
         # 方案三：协作意图由 Event.objective 承载，Manager 收到事件后自行理解。
         collab_block = self._build_event_context_block(ctx)
@@ -1196,7 +1172,7 @@ class Manager(Executable):
                         "只要某个既有子节点能够承担该增量任务，就必须原地复用它，并在对应 step 中填写该节点的 "
                         "reuse_step_ref（使用候选中的 step_ref 或 node_id）；此时禁止填写 null，也禁止新建同职责 step。"
                         "只有既有子节点都无法覆盖的全新能力才允许新建 step；新建 step 的 task 必须描述当前增量任务中的该新能力，"
-                        "不得照抄候选节点原 task。复用意味着保留原产物和 Agent 会话，重新执行当前增量任务。",
+                        "不得照抄候选节点原 task。复用意味着保留原产物和工作区，该节点以新会话重新执行当前增量任务。",
                         "You MUST follow \"Decision 0 · Incremental Continue\". First decide whether this "
                         "increment/event requires ANY action from your subtree at all: it may fall outside your "
                         "remit (unrelated to what you and your children are responsible for), or your existing "
@@ -1213,11 +1189,10 @@ class Manager(Executable):
                         "same responsibility is forbidden. Create a new step only for a genuinely new capability "
                         "that no existing child can cover; the new step's task must describe that new capability from "
                         "the current incremental task and must not copy a candidate's original task. Reuse preserves "
-                        "the existing artifacts and Agent session while rerunning the current incremental task.",
+                        "the existing artifacts and workspace while the node reruns the current incremental task in a fresh session.",
                     )
                 )
                 parts.append("\n".join(revise_lines))
-        parts.append(codegraph_block)
         parts.append(
             # 标题从「(本节点原始 Task 描述)」改成「(个人当前目标)」: node.task 是
             # **可变**的「现在该执行什么」槽位, 经一次 Revise 后它就是增量任务, 而真正的
@@ -1230,8 +1205,9 @@ class Manager(Executable):
     def _build_revise_candidates_block(self, ctx: ExecutableContext) -> str:
         """Revise（增量续跑）：列出既有子节点作为可复用候选，供 Manager 决策 0 选择复用。
 
-        每个候选只给出 step_ref / node_id / role / status / task_summary / task，
-        不读取子节点产物或目录；Manager 仅凭任务与摘要判断能力是否覆盖增量需求。
+        每个候选只给出 step_ref / node_id / role / status / task_summary，
+        不读取子节点产物或目录；Manager 仅凭任务摘要判断能力是否覆盖增量需求。
+        节点没有摘要时才退回到截断后的 task。
         Manager 按角色匹配增量需求 → 填 reuse_step_ref，无候选覆盖的新能力才新建 step。
         未复用的已完成兄弟保持不动。
         """
@@ -1250,9 +1226,9 @@ class Manager(Executable):
             "",
             _L(
                 ctx,
-                "上级要求在本节点既有子节点之上做增量续跑。以下是本节点现有的全部子节点（仅含任务与任务摘要）：",
+                "上级要求在本节点既有子节点之上做增量续跑。以下是本节点现有的全部子节点（仅含任务摘要）：",
                 "The parent requires incremental continuation on top of this node's existing "
-                "child nodes. Below are all current child nodes (task and task summary only):",
+                "child nodes. Below are all current child nodes (task summary only):",
             ),
             "",
         ]
@@ -1265,10 +1241,9 @@ class Manager(Executable):
                 f"- step_ref: `{step_ref}` | node_id: `{child.id}` | "
                 f"role: {child.role} | status: {status}"
             )
-            summary = (child.task_summary or "").strip()
+            summary = (child.task_summary or "").strip() or self._truncate(child.task or "", 100)
             if summary:
                 lines.append(f"  task_summary: {summary}")
-            lines.append(f"  task: {child.task or ''}")
         lines.append("")
         lines.append(
             _L(
@@ -1672,6 +1647,45 @@ class Manager(Executable):
         return "\n".join(lines)
 
     @staticmethod
+    def _build_review_goal_block(ctx: ExecutableContext) -> str:
+        """Review 新会话的目标上下文：团队目标（根任务全文）+ 本节点当前目标。
+
+        Review 不再继承 Expand 的会话，评审「子节点产出是否满足目标」所需的目标
+        必须由 prompt 自己带上。两级目标均给全文，与 Expand 的快照口径一致。
+        """
+        runtime = ctx.runtime
+        me = ctx.node
+        root_task = ""
+        cur = me
+        seen = {me.id}
+        while cur.parent_id and cur.parent_id not in seen:
+            parent = runtime.get_node(cur.parent_id)
+            if parent is None:
+                break
+            seen.add(parent.id)
+            root_task = parent.task or ""
+            cur = parent
+
+        lines = [_L(ctx, "## Review Context（评审目标）", "## Review Context")]
+        if root_task.strip():
+            lines.extend([
+                "",
+                _L(ctx, "### 团队目标（根节点任务全文）", "### Team goal (root task, full text)"),
+                root_task.strip(),
+            ])
+        if (me.task or "").strip():
+            lines.extend([
+                "",
+                _L(
+                    ctx,
+                    "### 本节点当前目标（子节点产出须共同满足它）",
+                    "### This node's current goal (the children's outputs must jointly satisfy it)",
+                ),
+                me.task.strip(),
+            ])
+        return "\n".join(lines) if len(lines) > 1 else ""
+
+    @staticmethod
     def _build_review_prompt(
         ctx: ExecutableContext,
         children_info: list[dict],
@@ -1692,12 +1706,17 @@ class Manager(Executable):
             ),
             _L(
                 ctx,
-                "基于已有会话和当前子节点元数据进行增量评审；不要重新展开主任务。",
-                "Perform incremental review based on the existing session and current "
-                "child-node metadata; do not re-expand the main task.",
+                "这是一个全新的评审会话，之前的规划对话不会带入：请仅依据下方的目标、"
+                "子节点任务与状态进行评审；不要重新展开主任务。",
+                "This is a fresh review session; the earlier planning conversation is not "
+                "carried over. Review using only the goals and the children's tasks and "
+                "statuses below; do not re-expand the main task.",
             ),
             "",
         ]
+        goal_block = Manager._build_review_goal_block(ctx)
+        if goal_block:
+            parts.extend([goal_block, ""])
         event_block = Manager._build_event_context_block(ctx)
         if event_block:
             parts.extend([event_block, ""])
@@ -1732,12 +1751,6 @@ class Manager(Executable):
                 )
             )
             parts.append("")
-
-        # 子节点代码影响面摘要（CodeGraph 组图，real 模式 + flag 开才注入；未启用时退回静态引导）。
-        # 当前 review 完全缺失此信息，纯增量，不影响 `## Review Task` 首行承重契约。
-        codegraph_block = build_review_context(ctx, children_info) or build_codegraph_guidance()
-        if codegraph_block:
-            parts.append(codegraph_block)
 
         # 方案三：Manager 在 review 阶段也可能发起跨 Manager 协作，协作意图由
         # Event.objective 承载，从事件发布目录写入。注入与 expand prompt 同源的事件发布

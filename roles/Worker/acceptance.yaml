@@ -24,7 +24,7 @@ num_ccs: 2
 audit_rounds: 2
 
 # ---- skills ----
-skills: [diagnosing-bugs, codegraph]
+skills: [diagnosing-bugs]
 
 
 # ---- 产出文件 ----
@@ -43,7 +43,7 @@ generate_instruction: |-
   - **主文档（必写）**：{main_doc} — 完整验收报告
   - **附件（按需）**：验收脚本、缺陷明细、需求覆盖矩阵等，写入同目录其他文件
   - **索引（必写）**：{index_file} — 列出所有产物文件及其作用
-  下游会先读 {index_file}，再按需读取相关文件。
+  {index_rules}
 
   ## 验收步骤（针对请求范围——规模判断见「任务适配协议」）
   1. **读取项目结构**：读取代码地图了解项目结构，读取需求文档和架构设计确认**本次请求涉及的**功能范围

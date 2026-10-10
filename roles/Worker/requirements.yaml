@@ -38,6 +38,8 @@ index_file: _INDEX.md
 generate_instruction: |-
   分析用户需求，将主文档 {main_doc} 写入 {deliverable_dir}/，索引写入 {index_file}。
 
+  {index_rules}
+
   ## 组织全文的第一原则：普通用户视角
   产出物只回答一个问题：**用户需要什么、在什么条件下才算完成。**
   以普通用户的目标、任务、可感知结果与完成条件为中心组织全文；用词面向用户可感知的行为与结果，

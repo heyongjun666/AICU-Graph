@@ -23,9 +23,6 @@ not_for:
 num_ccs: 2
 audit_rounds: 2
 
-# ---- skills ----
-skills: [codegraph]
-
 # ---- 产出文件 ----
 output_file: null
 final_file: output
@@ -42,7 +39,7 @@ generate_instruction: |-
   - **主文档（必写）**：{main_doc} — 完整部署指南
   - **附件（按需）**：配置文件示例、监控脚本、回滚清单等，写入同目录其他文件
   - **索引（必写）**：{index_file} — 列出所有产物文件及其作用
-  下游会先读 {index_file}，再按需读取相关文件。
+  {index_rules}
 
   ## 编写步骤（按任务规模与风险裁剪，规模判断见「任务适配协议」）
   只产出本次被请求或风险确实需要的部分：

@@ -12,7 +12,7 @@ tests/test_shared_workspace.py — Session 级单根共享工作区（Shared Wor
   6. _normalize_worker_artifact 共享并入（幂等主路径 + 兜底拷贝）
   7. get_artifact 共享根读 + 越界拒绝
   8. _build_worker_context 共享块（会话级完全共享：互读互写，不加锁；空分区=全局写高权限）
-  9. _build_tiered_reading_instructions（多依赖分级阅读）
+  9. _build_dependency_reading_instructions（上游依赖按需读取）
   10. Manager snapshot 含兄弟 _shared_workspace 与协作区提示
   11. 跨层可见性 + 实时共享 + Runtime 不变量 + 兄弟真实协作 e2e
 """
@@ -538,48 +538,69 @@ class TestWorkerContextSharedBlock:
 
 
 # ============================================================================
-# 9. _build_tiered_reading_instructions
+# 9. _build_dependency_reading_instructions
 # ============================================================================
 
-class TestTieredReading:
-    def _deps(self, runtime, n: int):
-        """构造 n 个已完成依赖节点。"""
+class TestDependencyReading:
+    def _consumer(self, runtime, n: int):
+        """n 个已完成依赖 + 1 个依赖它们的 consumer，返回 (consumer, deps)。"""
         root = runtime.submit_root_manager("app")
         nodes = runtime.inject_plan(root, ExecutionPlan(steps=[
-            _step(f"dep{i}", {}) for i in range(n)
+            *[_step(f"dep{i}", {}) for i in range(n)],
+            _step("consumer", {}, depends_on=[f"dep{i}" for i in range(n)]),
         ]))
-        for nd in nodes:
+        deps = [nd for nd in nodes if nd.step_ref.startswith("dep")]
+        for nd in deps:
             runtime.update_node_status(
                 nd.id, NodeStatus.COMPLETED,
                 artifact_path=os.path.join(runtime.get_node_workspace(nd.id), "out.txt"),
             )
-        return root, nodes
+        consumer = next(nd for nd in nodes if nd.step_ref == "consumer")
+        return consumer, deps
 
-    def test_tiered_when_many_deps(self, runtime):
-        root, deps = self._deps(runtime, 5)
-        text = Worker._build_tiered_reading_instructions(deps[:12])
-        assert "分级读取" in text
-        assert "第一级" in text and "第三级" in text
-
-    def test_full_read_when_few_deps(self, runtime):
-        # 三个 step 在同一 plan 内：dep0/dep1 与 consumer 由 depends_on 建立 DAG 边。
-        root = runtime.submit_root_manager("app")
-        nodes = runtime.inject_plan(root, ExecutionPlan(steps=[
-            _step("dep0", {}),
-            _step("dep1", {}),
-            _step("consumer", {}, depends_on=["dep0", "dep1"]),
-        ]))
-        dep0 = next(n for n in nodes if n.step_ref == "dep0")
-        dep1 = next(n for n in nodes if n.step_ref == "dep1")
-        for nd in (dep0, dep1):
-            runtime.update_node_status(
-                nd.id, NodeStatus.COMPLETED,
-                artifact_path=os.path.join(runtime.get_node_workspace(nd.id), "out.txt"),
-            )
-        consumer = next(n for n in nodes if n.step_ref == "consumer")
+    @pytest.mark.parametrize("n", [1, 3, 5])
+    def test_same_on_demand_flow_for_any_dependency_count(self, runtime, n):
+        consumer, deps = self._consumer(runtime, n)
         ctx = ExecutableContext(node=consumer, runtime=runtime, config=consumer.config)
         text = Worker._build_worker_context(ctx)
-        assert "完整读取所有上游依赖产出" in text
+        assert "按需读取" in text
+        assert "上游依赖核对" in text
+        # 不再要求「读取每一个文件」，也不再有按个数切换的分级规则
+        assert "读取**每一个**" not in text
+        assert "第一级" not in text
+        for nd in deps:
+            assert os.path.join(runtime.get_node_workspace(nd.id), "out.txt") in text
+
+    def test_all_dependencies_listed_without_cap(self, runtime):
+        """依赖多于 12 个也不丢：漏掉一个依赖等于漏掉它的全部约束。"""
+        from types import SimpleNamespace
+        consumer, _ = self._consumer(runtime, 1)
+        ctx = ExecutableContext(node=consumer, runtime=runtime, config=consumer.config)
+        fake = [SimpleNamespace(id=f"d{i}", step_ref=f"dep{i}", role="Coder", task="t",
+                                task_summary="s", artifact_path="/abs/out.txt")
+                for i in range(14)]
+        text = Worker._build_dependency_reading_instructions(ctx, fake)
+        assert text.count("📂 产出路径") == 14
+
+    def test_index_read_limited_to_listing(self, runtime):
+        """_INDEX.md 只读清单部分；INDEX* 不再出现在「必读全文」的模式列表里。"""
+        consumer, deps = self._consumer(runtime, 1)
+        ctx = ExecutableContext(node=consumer, runtime=runtime, config=consumer.config)
+        text = Worker._build_dependency_reading_instructions(ctx, deps)
+        assert "`README*` / `SUMMARY*`" in text
+        assert "`README*` / `INDEX*`" not in text
+        assert "只读它的清单部分" in text
+
+    def test_summary_and_full_task_shown(self, runtime):
+        consumer, deps = self._consumer(runtime, 1)
+        dep = deps[0]
+        runtime.graph.update_node(
+            dep.id, task_summary="SUMMARY_OF_DEP", task="DEP_TASK_" + "x" * 200,
+        )
+        ctx = ExecutableContext(node=consumer, runtime=runtime, config=consumer.config)
+        text = Worker._build_worker_context(ctx)
+        assert "职责摘要: SUMMARY_OF_DEP" in text
+        assert "DEP_TASK_" + "x" * 200 in text  # 旧实现砍在 120 字
 
 
 # ============================================================================

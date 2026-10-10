@@ -620,7 +620,9 @@ const NodeInspector: React.FC = () => {
                     <Copy size={13} />
                   </button>
                 </div>
-                <pre>{workspaceFile.content}</pre>
+                {workspaceFile.content === null
+                  ? <div className="detail-empty">{t('outputs.binaryFile')}</div>
+                  : <pre>{workspaceFile.content}</pre>}
               </div>
             )}
             {!workspaceBusy && !workspaceFile && workspace && (

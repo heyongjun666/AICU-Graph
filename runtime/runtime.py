@@ -2313,7 +2313,11 @@ class Runtime(RuntimeGateway, SchedulerDelegate):
         size = os.path.getsize(target)
         with open(target, "rb") as file:
             data = file.read(max_bytes)
-        return {"path": path or os.path.basename(target), "content": data.decode("utf-8", errors="replace"), "truncated": size > len(data), "size": size}
+        display_path = path or os.path.basename(target)
+        # 头部含 NUL 字节 = 二进制（docx/xlsx/图片等）：不返回解码后的乱码，由前端提示不可预览
+        if b"\0" in data[:4096]:
+            return {"path": display_path, "content": None, "truncated": False, "size": size, "previewable": False}
+        return {"path": display_path, "content": data.decode("utf-8", errors="replace"), "truncated": size > len(data), "size": size, "previewable": True}
 
     # ---- Session Outputs：会话级「查看产出」（V3-2.2） ----
     # 架构约束：所有 Session Outputs filesystem 操作只经 resolve_shared_workspace()

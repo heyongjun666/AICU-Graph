@@ -1455,6 +1455,30 @@ def test_node_results_are_scoped_to_declared_artifact(tmp_path):
         runtime.shutdown()
 
 
+def test_read_node_result_file_reports_binary_as_not_previewable(tmp_path):
+    runtime = Runtime(
+        persistence=Persistence(file_path=str(tmp_path / "state.json")),
+        workspace_root=str(tmp_path / "workspace"),
+    )
+    try:
+        node = _make_manager_node("result_node", NodeStatus.COMPLETED)
+        runtime.graph.add_node(node)
+        result_dir = Path(runtime.get_node_workspace(node.id)) / "results"
+        result_dir.mkdir(parents=True)
+        (result_dir / "report.docx").write_bytes(b"PK\x03\x04\x14\x00\x06\x00binary")
+        (result_dir / "notes.md").write_text("# 说明", encoding="utf-8")
+        runtime.update_node_status(
+            node.id, NodeStatus.COMPLETED, artifact_path=str(result_dir)
+        )
+        binary = runtime.read_node_result_file(node.id, "report.docx")
+        assert binary["content"] is None and binary["previewable"] is False
+        assert binary["size"] == len(b"PK\x03\x04\x14\x00\x06\x00binary")
+        text = runtime.read_node_result_file(node.id, "notes.md")
+        assert text["content"] == "# 说明" and text["previewable"] is True
+    finally:
+        runtime.shutdown()
+
+
 def test_cc_activity_and_log_metadata_are_observable(tmp_path):
     runtime = Runtime(
         persistence=Persistence(file_path=str(tmp_path / "state.json")),

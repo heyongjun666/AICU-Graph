@@ -410,7 +410,9 @@ export type ResultListing = WorkspaceListing;
 export interface WorkspaceFile {
   path: string;
   size: number;
-  content: string;
+  /** 二进制文件为 null（previewable=false）。 */
+  content: string | null;
+  previewable?: boolean;
 }
 
 // ============================================================================

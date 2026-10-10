@@ -943,3 +943,102 @@ class TestPromptCostGuidance:
         assert "不要连环发" in text
         assert "collaboration | escalation" in text
         assert "notification" not in text
+
+
+class _RejectingAICU:
+    """前 fail_times 次 ask 抛 API 400，之后成功；记录每次收到的任务体。"""
+
+    ERROR = "internal 执行失败 (returncode=1; stdout_tail=API Error: 400 Model do not support image input. Request id: abc)"
+
+    def __init__(self, fail_times: int = 1, error: Optional[str] = None):
+        self.fail_times = fail_times
+        self.error = error or self.ERROR
+        self.questions: list[str] = []
+
+    def ask(self, question: str, max_rounds: int = 3) -> dict:
+        self.questions.append(question)
+        if len(self.questions) <= self.fail_times:
+            raise RuntimeError(self.error)
+        return {"final_output_path": "/tmp/real_output.py"}
+
+
+class TestRetryWithPreviousError:
+    """API 400 拒绝后，把报错原文交给模型让它自行调整，而不是写死某一种报错的规则。"""
+
+    HEADER = "上一次执行失败"
+    RAW = "API Error: 400 Model do not support image input."
+
+    def test_first_attempt_has_no_error_note(self):
+        aicu = _RejectingAICU(fail_times=0)
+        ctx = _make_context()
+        assert Worker(ctx, aicu_instance=aicu).run(ctx) == NodeStatus.COMPLETED
+        assert self.HEADER not in aicu.questions[0]
+
+    def test_api_400_retries_once_with_raw_error(self):
+        runtime = MockRuntimeGateway()
+        aicu = _RejectingAICU(fail_times=1)
+        ctx = _make_context(runtime=runtime)
+        assert Worker(ctx, aicu_instance=aicu).run(ctx) == NodeStatus.COMPLETED
+        assert len(aicu.questions) == 2
+        assert self.HEADER not in aicu.questions[0]
+        assert self.HEADER in aicu.questions[1]
+        assert self.RAW in aicu.questions[1]
+        assert ctx.node.task in aicu.questions[1]
+        warns = [
+            u["log"][0].message for _, _, u in runtime.status_updates
+            if u.get("log") and u["log"][0].level == LogLevel.WARN
+        ]
+        assert any("API 拒绝" in m for m in warns)
+
+    def test_retry_failure_is_reported_and_not_looped(self):
+        aicu = _RejectingAICU(fail_times=5)
+        ctx = _make_context()
+        assert Worker(ctx, aicu_instance=aicu).run(ctx) == NodeStatus.FAILED
+        assert len(aicu.questions) == 2
+
+    @pytest.mark.parametrize("error", [
+        "internal 执行失败 (returncode=1; stdout_tail=API Error: 401 unauthorized)",
+        "internal 执行失败 (returncode=1; stdout_tail=API Error: 529 overloaded)",
+        "timeout after 600s",
+    ])
+    def test_non_400_errors_do_not_trigger_retry(self, error):
+        aicu = _RejectingAICU(fail_times=5, error=error)
+        ctx = _make_context()
+        assert Worker(ctx, aicu_instance=aicu).run(ctx) == NodeStatus.FAILED
+        assert len(aicu.questions) == 1
+
+    def test_rerun_after_failure_carries_logged_error(self):
+        node = _make_node()
+        node.log.append(LogEntry(
+            ts=datetime.now(), level=LogLevel.ERROR,
+            message=f"Worker execution failed: {_RejectingAICU.ERROR}",
+        ))
+        aicu = _RejectingAICU(fail_times=0)
+        ctx = _make_context(node=node)
+        assert Worker(ctx, aicu_instance=aicu).run(ctx) == NodeStatus.COMPLETED
+        assert len(aicu.questions) == 1
+        assert self.HEADER in aicu.questions[0]
+        assert self.RAW in aicu.questions[0]
+
+    def test_rerun_after_later_success_carries_no_stale_error(self):
+        node = _make_node()
+        node.log.append(LogEntry(
+            ts=datetime.now(), level=LogLevel.ERROR,
+            message=f"Worker execution failed: {_RejectingAICU.ERROR}",
+        ))
+        node.log.append(LogEntry(
+            ts=datetime.now(), level=LogLevel.INFO,
+            message="Worker execution completed, artifact: /tmp/x",
+        ))
+        aicu = _RejectingAICU(fail_times=0)
+        ctx = _make_context(node=node)
+        Worker(ctx, aicu_instance=aicu).run(ctx)
+        assert self.HEADER not in aicu.questions[0]
+
+    def test_error_text_is_extracted_and_bounded(self):
+        long_tail = "x" * 5000
+        text = worker_module._extract_error_text(
+            f"Worker execution failed: internal 执行失败 (stdout_tail=...API Error: 400 bad {long_tail}"
+        )
+        assert text.startswith("API Error: 400 bad")
+        assert len(text) <= 800

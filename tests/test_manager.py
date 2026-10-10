@@ -1096,3 +1096,68 @@ class TestManagerEdgeCases:
 
         result = mgr.run(ctx)
         assert result == NodeStatus.FAILED
+
+
+class _RejectingManagerAICU:
+    """前 fail_times 次调用抛 API 400，之后成功；记录每次收到的 prompt。"""
+
+    ERROR = "internal 执行失败 (stdout_tail=API Error: 400 Model do not support image input. Request id: abc)"
+
+    def __init__(self, fail_times: int = 1, error: Optional[str] = None):
+        self.fail_times = fail_times
+        self.error = error or self.ERROR
+        self.prompts: list[str] = []
+
+    def _call(self, prompt: str) -> dict:
+        self.prompts.append(prompt)
+        if len(self.prompts) <= self.fail_times:
+            raise RuntimeError(self.error)
+        return {"content": "ok"}
+
+    def ask(self, prompt: str, max_rounds: int = 3) -> dict:
+        return self._call(prompt)
+
+    def ask_incremental(self, prompt: str, max_rounds: int = 3) -> dict:
+        return self._call(prompt)
+
+
+class TestManagerRetryWithApiError:
+    """Manager 的 AICU 调用被 API 400 拒绝时，把报错原文交给模型重试（与 Worker 对齐）。"""
+
+    def _call(self, aicu, **kwargs):
+        node = _make_manager_node(manager_phase="review")
+        runtime = _MockRuntimeGateway()
+        runtime.add_node(node)
+        ctx = ExecutableContext(node=node, runtime=runtime, config={})
+        mgr = Manager(context=ctx, aicu_instance=aicu)
+        return mgr._call_aiCU_with_retry(ctx, "原始评审任务", **kwargs)
+
+    def test_first_attempt_has_no_error_note(self):
+        aicu = _RejectingManagerAICU(fail_times=0)
+        self._call(aicu)
+        assert aicu.prompts == ["原始评审任务"]
+
+    def test_api_400_retries_with_raw_error_and_original_prompt(self):
+        aicu = _RejectingManagerAICU(fail_times=1)
+        assert self._call(aicu) == {"content": "ok"}
+        assert len(aicu.prompts) == 2
+        retry = aicu.prompts[1]
+        assert "API Error: 400 Model do not support image input" in retry
+        assert "原始评审任务" in retry
+
+    def test_incremental_review_path_also_carries_error(self):
+        aicu = _RejectingManagerAICU(fail_times=1)
+        self._call(aicu, incremental=True, fresh_session=True)
+        assert "API Error: 400" in aicu.prompts[1]
+        assert "原始评审任务" in aicu.prompts[1]
+
+    def test_non_400_failure_retries_without_error_note(self):
+        aicu = _RejectingManagerAICU(fail_times=1, error="internal timeout after 600s")
+        self._call(aicu)
+        assert aicu.prompts == ["原始评审任务", "原始评审任务"]
+
+    def test_persistent_400_still_raises_after_retries(self):
+        aicu = _RejectingManagerAICU(fail_times=99)
+        with pytest.raises(RuntimeError, match="API Error: 400"):
+            self._call(aicu)
+        assert len(aicu.prompts) == 3

@@ -10,6 +10,7 @@ import glob
 import json
 import logging
 import os
+import re
 import shutil
 import threading
 from concurrent.futures import ThreadPoolExecutor
@@ -346,6 +347,53 @@ def _backfill_failed(ctx: ExecutableContext, exc: Exception, *, stage: str) -> N
         ],
     )
     return NodeStatus.FAILED
+
+
+# 失败重试：把上一次的报错原文交给模型，让它自己判断怎么调整（例如得知模型不支持
+# 图片输入后就不再看图），而不是在框架里为某一种报错写死规则。
+_API_REJECTION_RE = re.compile(r"API Error:\s*400", re.IGNORECASE)
+_FAILURE_PREFIX = "Worker execution failed:"
+_COMPLETED_PREFIX = "Worker execution completed"
+_MAX_ERROR_CHARS = 800
+
+
+def _is_retryable_api_rejection(exc: BaseException) -> bool:
+    """请求被 API 以 400 拒绝（内容层面的错误，换个做法可能就能过）；超时/鉴权/5xx 不在此列。"""
+    return bool(_API_REJECTION_RE.search(str(exc)))
+
+
+def _extract_error_text(message: str) -> str:
+    """从失败日志里截取报错核心：有 API Error 就从它开始，否则取尾部，限长。"""
+    message = (message or "").strip()
+    if message.startswith(_FAILURE_PREFIX):
+        message = message[len(_FAILURE_PREFIX):].strip()
+    idx = message.find("API Error:")
+    if idx >= 0:
+        return message[idx:idx + _MAX_ERROR_CHARS]
+    return message[-_MAX_ERROR_CHARS:]
+
+
+def _last_failure_text(node: Any) -> str:
+    """节点最近一次执行若以失败告终，返回其报错文本；之后已成功或没有失败记录则返回空串。"""
+    for entry in reversed(getattr(node, "log", None) or []):
+        message = getattr(entry, "message", "") or ""
+        if message.startswith(_COMPLETED_PREFIX):
+            return ""
+        if message.startswith(_FAILURE_PREFIX):
+            return _extract_error_text(message)
+    return ""
+
+
+def _render_previous_failure(error_text: str) -> str:
+    return (
+        "## ⚠️ 上一次执行失败\n\n"
+        "上一次执行报错如下：\n\n"
+        f"```\n{error_text}\n```\n\n"
+        "请先判断报错原因，并调整方案避免再次报错"
+        "（例如报错表明模型不支持图片输入，就不要再读取或查看任何图片、不做需要看图的验证，"
+        "只做不依赖视觉的验证，并如实写明哪些内容未做视觉验证）。\n"
+        "上一次可能已在交付目录和工作目录留下部分产出：先检查已有文件，在其基础上继续，不必从头重做。"
+    )
 
 
 def _fail_startup(ctx: ExecutableContext, exc: Exception) -> NodeStatus:
@@ -931,6 +979,12 @@ class Worker(Executable):
         ])
         return "\n".join(lines)
 
+    def _full_task_body(self, ctx: ExecutableContext, routing_prefix: str) -> str:
+        """首次执行形态的完整任务体（新建会话重试时用，不依赖旧 CC 会话历史）。"""
+        context_prefix = self._build_worker_context(ctx)
+        task_parts = [p for p in [routing_prefix, context_prefix] if p]
+        return Worker._compose_task_body(task_parts, ctx.node.task)
+
     def run(self, ctx: ExecutableContext) -> NodeStatus:
         """在线程池中执行 AICU.ask() 并回填结果。
 
@@ -943,8 +997,11 @@ class Worker(Executable):
         # 新会话策略的唯一落点：pending_context 标了 fresh（Revise / 事件重激活）
         # 就丢弃缓存的 CC 会话，不再 --resume；上一轮状态由检查点交代。
         pending_at_start = getattr(ctx.node, 'pending_context', None) or {}
+        # 节点上一次执行失败：旧 CC 会话的历史可能已被报错内容污染（如图片），--resume 会继续
+        # 失败，所以新建会话重跑，并把报错原文交给模型自行调整。
+        previous_failure = _last_failure_text(ctx.node)
         with Worker._aicu_cache_lock:
-            if pending_at_start.get('session_mode') == SESSION_FRESH:
+            if pending_at_start.get('session_mode') == SESSION_FRESH or previous_failure:
                 Worker._aicu_cache.pop(ctx.node.id, None)
             is_continuation = Worker._aicu_cache.get(ctx.node.id) is not None
 
@@ -993,9 +1050,9 @@ class Worker(Executable):
             )
         else:
             # 首次执行：构建完整上下文
-            context_prefix = self._build_worker_context(ctx)
-            task_parts = [p for p in [routing_prefix, context_prefix] if p]
-            task_body = Worker._compose_task_body(task_parts, ctx.node.task)
+            task_body = self._full_task_body(ctx, routing_prefix)
+        if previous_failure:
+            task_body = f"{_render_previous_failure(previous_failure)}\n\n---\n\n{task_body}"
 
         # The AICU owns individual CC start/finish/failure events. Worker owns
         # the outer task handoff so the timeline also explains what entered the
@@ -1019,16 +1076,39 @@ class Worker(Executable):
             try:
                 result = future.result()
             except Exception as exc:  # noqa: BLE001
-                if not revise_resume:
+                api_rejected = not previous_failure and _is_retryable_api_rejection(exc)
+                if not revise_resume and not api_rejected:
                     raise
-                logger.warning(
-                    "Revise-resume ask failed for node '%s' (first attempt): %s. "
-                    "Rebuilding session without --resume and retrying once.",
-                    ctx.node.id, exc,
-                )
+                if api_rejected:
+                    # 请求被 API 以 400 拒绝：新建会话重试一次，并把报错原文交给模型自行调整。
+                    logger.warning(
+                        "Node '%s' request rejected by API: %s. "
+                        "Retrying once in a fresh session with the error attached.",
+                        ctx.node.id, exc,
+                    )
+                    error_text = _extract_error_text(str(exc))
+                    ctx.runtime.update_node_status(
+                        ctx.node.id,
+                        NodeStatus.RUNNING,
+                        log=[LogEntry(
+                            ts=datetime.now(),
+                            level=LogLevel.WARN,
+                            message=f"执行被 API 拒绝，已带上报错信息新建会话重试一次: {error_text}",
+                        )],
+                    )
+                    task_body = (
+                        f"{_render_previous_failure(error_text)}\n\n---\n\n"
+                        f"{self._full_task_body(ctx, routing_prefix)}"
+                    )
+                else:
+                    logger.warning(
+                        "Revise-resume ask failed for node '%s' (first attempt): %s. "
+                        "Rebuilding session without --resume and retrying once.",
+                        ctx.node.id, exc,
+                    )
                 with Worker._aicu_cache_lock:
                     Worker._aicu_cache.pop(ctx.node.id, None)
-                aicu = _create_real_aicu(ctx)
+                aicu = (self._aicu if api_rejected else None) or _create_real_aicu(ctx)
                 result = aicu.ask(task_body)
 
             for cc_id in cc_ids:

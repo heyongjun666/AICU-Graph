@@ -657,6 +657,41 @@ class TestCCChatWithRetryImageRecovery:
         assert "[具体报错]" in cc.calls[1][1]
         assert "Model do not support image input" in cc.calls[1][1]
 
+    def test_resume_poisoned_by_image_resets_session_and_resends_original_task(self, monkeypatch):
+        """--resume 续接仍因历史里的图片 400 → 下一次重试重置会话，并重发『原任务』+禁读图说明。
+
+        实测（DeepSeek-V4-Flash）：图片进入会话历史后，resume 重试会在 1 秒内再次 400。
+        """
+
+        class _PoisonedCC:
+            def __init__(self):
+                self.conversation_id = None
+                self.calls = []
+                self.reset_count = 0
+
+            def chat(self, prompt: str, max_turns=None, timeout=7200) -> str:
+                self.calls.append((self.conversation_id, prompt))
+                if self.conversation_id is not None or len(self.calls) == 1:
+                    self.conversation_id = "abc-123"
+                    raise ModelImageInputError("API Error: 400 Model do not support image input.")
+                return "recovered"
+
+            def reset_conversation(self):
+                self.reset_count += 1
+                self.conversation_id = None
+
+        aicu = _make_aicu(monkeypatch)
+        aicu.CC_MAX_RETRIES = 2
+        cc = _PoisonedCC()
+
+        assert aicu._cc_chat_with_retry(cc, "原始任务") == "recovered"
+        assert len(cc.calls) == 3
+        assert cc.calls[1][1].startswith(aicu._IMAGE_INPUT_RECOVERY_PROMPT)  # 第 1 次重试 resume
+        assert cc.reset_count == 1
+        assert cc.calls[2][0] is None
+        assert "原始任务" in cc.calls[2][1]
+        assert "不支持图片输入" in cc.calls[2][1]
+
     def test_raises_after_retries_exhausted(self, monkeypatch):
         """重试耗尽仍失败 → 如实抛出 ModelImageInputError（不再静默跳过）。"""
 

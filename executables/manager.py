@@ -741,9 +741,16 @@ class Manager(Executable):
             重试耗尽时抛出最后一次异常。
         """
         # 生产路径始终使用真实 AICU；测试可通过 aicu_instance 显式注入 fake。
+        from executables.worker import (
+            Worker,
+            _create_real_aicu,
+            _extract_error_text,
+            _is_retryable_api_rejection,
+            _render_previous_failure,
+        )
+
         aicu = self._aicu
         if aicu is None:
-            from executables.worker import Worker, _create_real_aicu
             if fresh_session:
                 with Worker._aicu_cache_lock:
                     Worker._aicu_cache.pop(ctx.node.id, None)
@@ -762,17 +769,21 @@ class Manager(Executable):
             )
 
         last_exception: Optional[Exception] = None
+        # API 以 400 拒绝（如模型不支持图片输入）时，把报错原文交给模型自行调整，
+        # 并改用全新会话：原会话历史里可能已带着被拒的内容，续接只会再次 400。
+        error_note = ""
         for attempt in range(retries + 1):
+            send_prompt = f"{error_note}\n\n---\n\n{prompt}" if error_note else prompt
             try:
                 if incremental:
                     ask_incremental = getattr(aicu, "ask_incremental", None)
                     result = (
-                        ask_incremental(prompt)
+                        ask_incremental(send_prompt)
                         if callable(ask_incremental)
-                        else aicu.ask(prompt)
+                        else aicu.ask(send_prompt)
                     )
                 else:
-                    result = aicu.ask(prompt)
+                    result = aicu.ask(send_prompt)
                 for cc_id in cc_ids:
                     _log_cc_lifecycle(
                         ctx.runtime,
@@ -789,6 +800,22 @@ class Manager(Executable):
                     "AICU call attempt %d/%d failed for node '%s': %s",
                     attempt + 1, retries + 1, ctx.node.id, exc,
                 )
+                if not error_note and attempt < retries and _is_retryable_api_rejection(exc):
+                    error_text = _extract_error_text(str(exc))
+                    error_note = _render_previous_failure(error_text)
+                    ctx.runtime.update_node_status(
+                        ctx.node.id,
+                        NodeStatus.RUNNING,
+                        log=[LogEntry(
+                            ts=datetime.now(),
+                            level=LogLevel.WARN,
+                            message=f"执行被 API 拒绝，已带上报错信息新建会话重试: {error_text}",
+                        )],
+                    )
+                    if self._aicu is None:
+                        with Worker._aicu_cache_lock:
+                            Worker._aicu_cache.pop(ctx.node.id, None)
+                        aicu = _create_real_aicu(ctx)
                 continue
 
         raise last_exception  # type: ignore[misc]

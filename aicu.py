@@ -799,6 +799,7 @@ class AICU:
         # 都携带【禁止读图】硬约束前缀，防止任何后续轮次再次读图。
         if getattr(cc, "_image_input_blocked", False):
             prompt = self._IMAGE_INPUT_BLOCKED_CONSTRAINT + "\n\n" + prompt
+        original_prompt = prompt
         for attempt in range(1, self.CC_MAX_RETRIES + 2):  # 最多 CC_MAX_RETRIES+1 次（1次原始 + N次重试）
             try:
                 # 工作区域边界：在发送点附加，而不是在函数顶部加一次 —— 下面的重试分支
@@ -834,9 +835,11 @@ class AICU:
                         f" (共 {self.CC_MAX_RETRIES} 次): {e}"
                     )
                     time.sleep(5 * attempt)  # 递增等待: 5s, 10s, ...
-                    if cc.conversation_id:
+                    if cc.conversation_id and attempt == 1:
                         # 同会话 --resume 续接，恢复指令携带具体报错文本，
                         # 让 CC 明确"为什么失败"，避免再次读图。
+                        # 仅第 1 次重试走 resume：实测图片已写入会话历史时，resume 会立刻
+                        # 再次 400；第 2 次起改为重置会话 + 原任务 + 禁读图说明。
                         prompt = (
                             self._IMAGE_INPUT_RECOVERY_PROMPT
                             + "\n\n[具体报错]\n"
@@ -845,7 +848,7 @@ class AICU:
                     else:
                         cc.reset_conversation()
                         prompt = (
-                            prompt
+                            original_prompt
                             + "\n\n---\n\n[注意] 上一步你尝试读取图片导致 API 报错："
                             "[具体报错]\n"
                             + str(e)

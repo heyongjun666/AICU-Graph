@@ -6,8 +6,6 @@
 - _format_instruction：{deliverable_dir}→分区、{output_file}→""。
 - _finalize_result：final_output_path==分区，且不再产生 workspace/final_file
   （即 nodes/{id}/output）副本。
-- 多 CC 传 shared_target → 同样直写同一分区（peer 编排：产生方落分区，
-  审查方在自己 CC 工作区出 review；_copy_best_to_cc0 对同分区自动跳过复制）。
 - 默认 shared_target=None → 既有行为不变（私有 deliverable_dir 保留）。
 """
 
@@ -27,7 +25,7 @@ def _make_shared_layout(tmp_path, output_path="backend"):
     return ws, partition
 
 
-def _make_aicu(tmp_path, *, shared_target=None, num_ccs=1, modular=True,
+def _make_aicu(tmp_path, *, shared_target=None, modular=True,
                output_file=None, role="code", output_path="backend"):
     """构造 AICU。shared_target 为 None → 不传（Legacy）；非 None → 透传给构造。"""
     ws, partition = _make_shared_layout(tmp_path, output_path)
@@ -35,7 +33,6 @@ def _make_aicu(tmp_path, *, shared_target=None, num_ccs=1, modular=True,
         role_type="worker",
         role=role,
         parent_workspace=ws,
-        num_ccs=num_ccs,
         skills=[],          # 跳过 skills_dir 校验，测试不需要真实 skill
         modular_output=modular,
         output_file=output_file,
@@ -61,15 +58,6 @@ def test_shared_target_canonicalized(tmp_path):
     assert aicu.shared_target == os.path.realpath(aicu.shared_target)
 
 
-def test_multi_cc_shared_target_ok(tmp_path):
-    """多 CC 传 shared_target → 不 raise，所有 CC 直写同一分区。"""
-    _, partition = _make_shared_layout(tmp_path)
-    aicu, _, _ = _make_aicu(tmp_path, shared_target=partition, num_ccs=2)
-    assert aicu.shared_target == partition
-    # 所有 CC 的交付目录都指向同一分区（peer 编排同分区直写）
-    assert aicu._cc_deliverable_dir(0) == aicu._cc_deliverable_dir(1) == Path(partition)
-
-
 def test_no_shared_target_keeps_private_deliverable_dir(tmp_path):
     """默认 shared_target=None：私有 deliverable_dir 保留（字节级不变）。"""
     aicu, ws, _ = _make_aicu(tmp_path, role="code")  # code.yaml deliverable_dir=deliverables
@@ -91,7 +79,6 @@ def test_manager_initialization_separates_stable_rules_and_output_contract(tmp_p
         role_type="manager",
         role="default",
         parent_workspace=ws,
-        num_ccs=1,
         skills=[],
     )
 
@@ -207,9 +194,7 @@ def test_read_cc_file_directory_mode_on_partition(tmp_path):
 
 
 def _finalize(aicu):
-    return aicu._finalize_result(
-        question="q", scores={}, best_id=0, consensus_reached=True,
-        vote_rounds=1, audit_defects=[])
+    return aicu._finalize_result(question="q")
 
 
 def test_finalize_result_modular_no_workspace_copy(tmp_path):

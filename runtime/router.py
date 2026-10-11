@@ -216,11 +216,10 @@ class AICURouter:
         return self._aicu
 
     def _create_real_aicu(self) -> Any:
-        """real 模式：solo AICU（num_ccs=1），工作区 ``{workspace_root}/router_cc/``。
+        """real 模式：AICU，工作区 ``{workspace_root}/router_cc/``。
 
         路由角色收敛到 roles/system_role/router.yaml（独立于 Manager/Worker）。
-        num_ccs=1 已硬删自审：路由决策由单次生成直接返回，不再进入自审轮；
-        角色配置里的「路由专用审查清单/审查位/审计位」因此不会在 solo 下渲染。
+        路由决策由单次生成直接返回。
         """
         from aicu import AICU
 
@@ -229,7 +228,6 @@ class AICURouter:
             role_type="system_role",
             parent_workspace=workspace_dir,
             role="router",
-            num_ccs=1,
             model=self._config.get("model"),
             cli_name=self._config.get("cli_name"),
             api_base_url=self._config.get("api_base_url"),

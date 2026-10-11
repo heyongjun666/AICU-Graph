@@ -43,7 +43,7 @@ def _make_skill_source(tmp_path, names=(SKILL_NAME,)):
     return src
 
 
-def _make_aicu(tmp_path, *, cli_name, skills, skills_dir, role="code", num_ccs=1):
+def _make_aicu(tmp_path, *, cli_name, skills, skills_dir, role="code"):
     """离线构造一个 AICU（不 chat，只走构造期）。
 
     与 ``test_mcp_capability_note._make_aicu`` 同形 —— 两个文件都在构造同一套
@@ -56,7 +56,6 @@ def _make_aicu(tmp_path, *, cli_name, skills, skills_dir, role="code", num_ccs=1
         role_type="worker",
         role=role,
         parent_workspace=str(node_ws),
-        num_ccs=num_ccs,
         cli_name=cli_name,
         skills=list(skills),
         skills_dir=str(skills_dir),
@@ -159,13 +158,11 @@ class TestSkillsLandInTheRightDirectory:
         assert (workspace / ".agents" / "skills" / SKILL_NAME).is_symlink()
         assert not (workspace / ".claude").exists()
 
-    def test_multiple_skills_and_multiple_ccs(self, tmp_path):
+    def test_multiple_skills(self, tmp_path):
         names = ("alpha-skill", "beta-skill")
         src = _make_skill_source(tmp_path, names)
-        aicu = _make_aicu(
-            tmp_path, cli_name="pi", skills=list(names), skills_dir=src, num_ccs=3
-        )
-        assert len(aicu.ccs) == 3
+        aicu = _make_aicu(tmp_path, cli_name="pi", skills=list(names), skills_dir=src)
+        assert len(aicu.ccs) == 1
         for cc in aicu.ccs:
             for name in names:
                 assert (cc.workspace / ".pi" / "skills" / name).is_symlink()
@@ -189,16 +186,14 @@ class TestUnwiredCliWarnsButRuns:
     def test_warns_once_and_still_constructs(self, tmp_path, capsys):
         """接不上就只告警 —— 与 MCP 的硬门禁刻意不同（那边的失败是「工具根本不存在」）。"""
         src = _make_skill_source(tmp_path)
-        aicu = _make_aicu(
-            tmp_path, cli_name="grok", skills=[SKILL_NAME], skills_dir=src, num_ccs=3
-        )
+        aicu = _make_aicu(tmp_path, cli_name="grok", skills=[SKILL_NAME], skills_dir=src)
         assert aicu.ccs, "接不上 skills 不该阻止构造"
 
         out = capsys.readouterr().out
         assert "警告" in out
         assert "grok" in out
         assert SKILL_NAME in out
-        # 三个 CC，但只该说一次
+        # 只该说一次
         assert out.count("警告") == 1
 
     def test_nothing_is_written_for_an_unwired_cli(self, tmp_path, capsys):
@@ -342,14 +337,12 @@ class TestProjectTrustRecords:
 
     def test_every_cc_workspace_gets_a_record(self, tmp_path):
         src = _make_skill_source(tmp_path)
-        aicu = _make_aicu(
-            tmp_path, cli_name="pi", skills=[SKILL_NAME], skills_dir=src, num_ccs=2
-        )
+        aicu = _make_aicu(tmp_path, cli_name="pi", skills=[SKILL_NAME], skills_dir=src)
         data = self._read(tmp_path)
         for cc in aicu.ccs:
             key = os.path.realpath(str(cc.workspace))
             assert data.get(key) is True, f"{key} 不在信任记录里 —— pi 不会加载它的 skill"
-        assert len(data) == 2
+        assert len(data) == 1
 
     def test_the_record_is_a_realpath_not_the_raw_string(self, tmp_path):
         """键必须是 realpath —— pi 的 ``canonicalizePath`` 就是 ``realpathSync``。

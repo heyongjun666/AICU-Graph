@@ -39,20 +39,25 @@ _ROLE_SUBDIRS = ("Manager", "Worker")
 # 表单字段按用户配置流程排序；未列出的扩展字段追加在末尾。
 _ROLE_FIELD_ORDER = (
     "summary", "description", "suitable_for", "not_for",
-    "num_ccs", "model", "cli_name", "audit_rounds",
+    "model", "cli_name",
     "skills_dir", "skills", "mcp",
     "output_file", "final_file", "modular_output", "main_doc",
-    "generate_instruction", "revise_instruction", "review_checklist",
-    "adversarial_role", "audit_role", "audit_angles", "role_md",
+    "generate_instruction", "role_md",
 )
+
+# 已移除的角色 YAML 字段（节点内多 CC 协作模式已删）。旧角色 yaml / 导入的角色包里仍可能带着：
+# 校验时静默忽略，不当作未知字段拒绝。
+_LEGACY_ROLE_FIELDS = frozenset({
+    "num_ccs", "audit_rounds", "revise_instruction", "review_checklist",
+    "adversarial_role", "audit_role", "audit_angles",
+})
 
 # 高级配置字段：普通用户不需要理解、也不常改动的字段，前端默认收进「高级配置」折叠区。
 # 基础字段（其余）= summary/description/suitable_for/not_for/skills/role_md 等。
 _ROLE_ADVANCED_FIELDS = {
-    "model", "num_ccs", "cli_name", "audit_rounds", "skills_dir",
+    "model", "cli_name", "skills_dir",
     "output_file", "final_file", "modular_output", "main_doc",
-    "generate_instruction", "revise_instruction", "review_checklist",
-    "adversarial_role", "audit_role", "audit_angles",
+    "generate_instruction",
     "deliverable_dir",
 }
 
@@ -62,13 +67,12 @@ _ROLE_ADVANCED_FIELDS = {
 _HIDDEN_SCHEMA_FIELDS = frozenset({"index_file"})
 
 # Manager 角色创建表单额外隐藏的「协议/样板」字段：这些字段（Decision Policy 生成指令、
-# 审查/审计/产出/交付协议）由 default.yaml 统一定义并在所有 Manager 间复用，属于运行时
+# 产出/交付协议）由 default.yaml 统一定义并在所有 Manager 间复用，属于运行时
 # 协议而非「该 Manager 在实际领域中扮演的角色」。表单只保留 summary/description/
-# suitable_for/not_for/role_md 等身份字段 + num_ccs/model/cli_name/audit_rounds/skills
+# suitable_for/not_for/role_md 等身份字段 + model/cli_name/skills
 # 等简单执行配置。字段仍可出现在角色 yaml 中（校验照常放行），只是 schema 不返回。
 _MANAGER_HIDDEN_SCHEMA_FIELDS = frozenset({
-    "generate_instruction", "revise_instruction",
-    "review_checklist", "adversarial_role", "audit_role", "audit_angles",
+    "generate_instruction",
     "output_file", "final_file", "modular_output", "main_doc",
     "deliverable_dir",
 })
@@ -451,7 +455,10 @@ class RolesManager:
         self, role_type: str
     ) -> tuple[dict[str, Any], dict[str, Any]]:
         """Return defaults and every field already used by this role type."""
-        defaults = self._load_default_config(role_type)
+        defaults = {
+            k: v for k, v in self._load_default_config(role_type).items()
+            if k not in _LEGACY_ROLE_FIELDS
+        }
         samples = dict(defaults)
         subdir_path = os.path.join(self._roles_dir, role_type.capitalize())
         if os.path.isdir(subdir_path):
@@ -462,7 +469,7 @@ class RolesManager:
                 if not isinstance(data, dict):
                     continue
                 for name, value in data.items():
-                    if name.startswith("_"):
+                    if name.startswith("_") or name in _LEGACY_ROLE_FIELDS:
                         continue
                     if name not in samples or samples[name] is None:
                         samples[name] = value
@@ -473,27 +480,23 @@ class RolesManager:
         labels_en = {
             "summary": "Summary", "description": "Description",
             "suitable_for": "Suitable for", "not_for": "Not for",
-            "num_ccs": "Collaboration mode", "model": "Model", "cli_name": "CLI",
-            "audit_rounds": "Audit rounds", "skills_dir": "Skills directory", "skills": "Skills",
+            "model": "Model", "cli_name": "CLI",
+            "skills_dir": "Skills directory", "skills": "Skills",
             "mcp": "MCP servers",
             "output_file": "Intermediate output", "final_file": "Final output",
             "modular_output": "Modular output", "main_doc": "Main document",
-            "generate_instruction": "Generate instruction", "revise_instruction": "Revise instruction",
-            "review_checklist": "Review checklist", "adversarial_role": "Adversarial role",
-            "audit_role": "Audit role", "audit_angles": "Audit angles", "role_md": "Role instructions",
+            "generate_instruction": "Generate instruction", "role_md": "Role instructions",
             "deliverable_dir": "Deliverable directory",
         }
         labels_zh = {
             "summary": "摘要", "description": "描述",
             "suitable_for": "适用场景", "not_for": "不适用场景",
-            "num_ccs": "协作模式", "model": "模型", "cli_name": "CLI",
-            "audit_rounds": "审计轮数", "skills_dir": "Skills 目录", "skills": "Skills",
+            "model": "模型", "cli_name": "CLI",
+            "skills_dir": "Skills 目录", "skills": "Skills",
             "mcp": "MCP Server",
             "output_file": "中间产出", "final_file": "最终产出",
             "modular_output": "模块化产出", "main_doc": "主文档",
-            "generate_instruction": "生成指令", "revise_instruction": "修订指令",
-            "review_checklist": "审查清单", "adversarial_role": "对抗角色",
-            "audit_role": "审计角色", "audit_angles": "审计角度", "role_md": "角色指令",
+            "generate_instruction": "生成指令", "role_md": "角色指令",
             "deliverable_dir": "交付目录",
         }
         descriptions_zh = {
@@ -501,23 +504,16 @@ class RolesManager:
             "description": "详细说明角色的能力边界、适用场景和限制。",
             "suitable_for": "本角色适合承接的任务类型关键词清单，Manager 据此匹配子节点角色。",
             "not_for": "本角色不应被分配的任务类型关键词清单，用于反向排除。",
-            "num_ccs": "协作模式（1-4，也对应任务重要性）：1=简单任务，单 Agent 独立完成（生成）（默认）；2=普通任务，生成+审查；3=重要/关键路径任务，双 Agent 独立产出+评审融合；4=极高风险任务，双产出+评审+审计的完整闭环。",
             "model": "所有环节：Agent 调用的模型名。解析优先级：本处显式 > 角色 yaml 显式 > 系统设置 > CLI 自身默认（无代码兜底默认模型），留空表示跟随系统设置。",
             "cli_name": "所有环节：Agent 使用的 CLI 命令，留空表示用系统默认。",
-            "audit_rounds": "审计阶段：对抗审查的最大轮数。每轮深度审计并自动修订，0 表示跳过审计。",
             "skills_dir": "所有环节：Skill 源目录。Agent 从中加载 skill，按所选 CLI 落到它自己的项目级 skill 目录（claude 是 .claude/skills，codebuddy 是 .codebuddy/skills，kimi 是 .agents/skills，qwen 是 .qwen/skills，pi 是 .pi/skills，依此类推）。",
             "skills": "所有环节：启用的 skill 名称列表，执行时作为 project-level skill 加载。尚未接入该机制的 CLI（grok/opencode）会照常运行但打印一行警告，本次声明的 skill 不生效。",
             "mcp": "所有环节：启用的 MCP server 名称列表，名字定义在仓库根 mcp_servers.json 中。执行前会逐个预检连通性，连不上则该节点失败。",
             "output_file": "生成阶段：单文件模式下 Agent 写入结果的文件名（如 output）。modular_output=true 时通常设为 null。",
-            "final_file": "交付阶段：AICU 从最优 Agent 复制来的最终产出文件名/目录名（如 plan_result）。",
+            "final_file": "交付阶段：AICU 从 Agent 产出复制来的最终产出文件名/目录名（如 plan_result）。",
             "modular_output": "生成阶段：是否启用模块化多文件产出。true 时 Agent 可生成多个独立文件；false 时写单个 output_file。",
             "main_doc": "交付阶段：下游节点优先读取的主文档名（如 design.md、test_report.md）。缺失时回退到索引文件 _INDEX.md。",
             "generate_instruction": "生成阶段：Agent 生成产出时的 prompt 模板，支持 {output_file}、{deliverable_dir} 等占位符。设为空字符串表示不追加生成指令。",
-            "revise_instruction": "修订阶段：Agent 按审查意见修订产出时的 prompt 模板，{output_path} 会被替换为产出文件路径。",
-            "review_checklist": "审查阶段：审查 Agent 逐项打分的检查清单，每项格式为 [检查点名称, 检查描述]。",
-            "adversarial_role": "审查阶段：审查 Agent 的人格补充，以质疑视角找出方案缺陷。",
-            "audit_role": "审计阶段：审计 Agent 的人格定义，专注发现隐性风险、技术债与安全漏洞。",
-            "audit_angles": "审计阶段：审计 Agent 逐一排查的风险维度列表。",
             "role_md": "所有环节：Agent 的角色人格定义，描述身份、使命、工作流程与产出要求。",
             "deliverable_dir": "交付阶段：交付物在 workspace 内的子目录，技能内部产物隔离在根目录。默认 deliverables。",
         }
@@ -526,23 +522,16 @@ class RolesManager:
             "description": "Detailed explanation of the role's capabilities, applicable scenarios, and limitations.",
             "suitable_for": "Keywords for task types this role is suited for; the Manager matches child-node roles against these.",
             "not_for": "Keywords for task types this role should NOT be assigned, used for reverse exclusion.",
-            "num_ccs": "Collaboration mode (1-4, also the task-importance tier): 1=simple task, single agent (generate+self-review) (default); 2=normal task, generate+review; 3=important/critical-path task, two agents produce + merge review; 4=extreme-risk task, full loop of produce+review+audit.",
             "model": "All phases: model name the agent calls. Resolution: explicit here > role YAML explicit > system settings > CLI default (no hardcoded fallback); leave empty to follow system settings.",
             "cli_name": "All phases: CLI command the agent uses; leave empty for the system default.",
-            "audit_rounds": "Audit phase: max adversarial audit rounds. Each round deep-audits output and auto-revises; 0 skips auditing.",
             "skills_dir": "All phases: skill source directory. The agent loads skills from it into the selected CLI's own project-level skill directory (claude: .claude/skills, codebuddy: .codebuddy/skills, kimi: .agents/skills, qwen: .qwen/skills, pi: .pi/skills, and so on).",
             "skills": "All phases: list of enabled skill names, loaded as project-level skills during execution. CLIs not yet wired for this (grok/opencode) still run, but print a warning that the declared skills have no effect.",
             "mcp": "All phases: list of enabled MCP server names, defined in mcp_servers.json at the repo root. Connectivity is pre-checked before execution; an unreachable server fails the node.",
             "output_file": "Generation phase: filename the agent writes its result to in single-file mode (e.g. output). Usually null when modular_output=true.",
-            "final_file": "Delivery phase: final output filename/dir name copied from the best agent (e.g. plan_result).",
+            "final_file": "Delivery phase: final output filename/dir name copied from the agent output (e.g. plan_result).",
             "modular_output": "Generation phase: enable modular multi-file output. When true the agent can create multiple independent files; when false it writes a single output_file.",
             "main_doc": "Delivery phase: main document name downstream nodes read first (e.g. design.md, test_report.md), falling back to the _INDEX.md index file.",
             "generate_instruction": "Generation phase: prompt template for the agent's generation step. Supports {output_file}, {deliverable_dir} placeholders; empty string disables the appended instruction.",
-            "revise_instruction": "Revision phase: prompt template used when the agent revises output per review; {output_path} is replaced with the output path.",
-            "review_checklist": "Review phase: checklist the review agent scores against; each item is [checkpoint name, description].",
-            "adversarial_role": "Review phase: persona added to the review agent, finding defects from a skeptical view.",
-            "audit_role": "Audit phase: persona definition of the audit agent, focused on hidden risks, tech debt, and security holes.",
-            "audit_angles": "Audit phase: list of risk dimensions the audit agent checks one by one.",
             "role_md": "All phases: role persona definition describing identity, mission, workflow, and output requirements.",
             "deliverable_dir": "Delivery phase: subdirectory for deliverables within the workspace; skill-internal outputs are isolated at the root. Default deliverables.",
         }
@@ -589,7 +578,6 @@ class RolesManager:
             elif isinstance(value, str) and (
                 "instruction" in name
                 or name.endswith("_md")
-                or name in {"review_checklist", "adversarial_role", "audit_role"}
             ):
                 field_type = "multiline"
             else:
@@ -659,6 +647,7 @@ class RolesManager:
     ) -> dict[str, Any]:
         if not isinstance(config, dict):
             raise ValueError("Role config must be a YAML mapping")
+        config = {k: v for k, v in config.items() if k not in _LEGACY_ROLE_FIELDS}
         defaults, samples = self._get_field_catalog(role_type)
         unknown = sorted(set(config) - set(samples))
         if unknown:

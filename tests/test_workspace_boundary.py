@@ -9,20 +9,14 @@
 
 诚实说明本文件的边界：提示词级改动**无法被单测证明改变了模型行为**。
 这里只能证明块被正确构造、并且在**每一条**发送路径上都被投递 ——
-后者才是本次最容易做漏的地方（生成阶段覆盖了、审查/审计/重试分支漏了）。
+后者才是本次最容易做漏的地方（生成阶段覆盖了、重试分支漏了）。
 """
 
 import os
 
-import pytest
-
-import yaml
-
 from aicu import AICU
 from claude_code_agent import ModelImageInputError
-from runtime.roles_manager import RolesManager
 
-REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
 # ============================================================================
@@ -30,7 +24,7 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 # ============================================================================
 
 
-def _make_aicu(tmp_path, role="code", num_ccs=1, shared_root=None,
+def _make_aicu(tmp_path, role="code", shared_root=None,
                shared_target=None, role_type="worker"):
     """离线构造带真实 Session Shared Workspace 布局的 AICU。
 
@@ -46,7 +40,6 @@ def _make_aicu(tmp_path, role="code", num_ccs=1, shared_root=None,
         role_type=role_type,
         role=role,
         parent_workspace=str(node_ws),
-        num_ccs=num_ccs,
         skills=[],          # 跳过 skills_dir 校验
         modular_output=True,
         output_file=None,
@@ -109,19 +102,8 @@ class TestBoundaryBlockContent:
                     "先摸清背景"):
             assert bad not in block
 
-    def test_hardcoded_paths_do_not_leak_into_other_cc(self, tmp_path):
-        """每个 CC 的块必须只含自己的私有目录 —— 共用模板会漏掉这条。"""
-        sh = tmp_path / "workspace" / "shared"
-        aicu = _make_aicu(tmp_path, num_ccs=2, shared_root=sh, shared_target=sh / "impl")
-
-        b0, b1 = aicu.ccs[0]._workspace_boundary, aicu.ccs[1]._workspace_boundary
-        assert b0 != b1
-        assert str(aicu.ccs[0].workspace) in b0
-        assert str(aicu.ccs[1].workspace) not in b0
-        assert str(aicu.ccs[1].workspace) in b1
-
     def test_no_halfwidth_brace_residue(self, tmp_path):
-        """审查/审计 prompt 末尾要求"只输出 JSON"，块里混入 { } 会污染输出契约。"""
+        """prompt 末尾要求"只输出 JSON"，块里混入 { } 会污染输出契约。"""
         sh = tmp_path / "workspace" / "shared"
         for kwargs in (
             dict(shared_root=sh, shared_target=sh / "impl"),
@@ -154,7 +136,7 @@ class TestBoundaryBlockContent:
         """
         sh = tmp_path / "workspace" / "shared"
         aicu = _make_aicu(tmp_path, role_type="manager", role="default",
-                          num_ccs=2, shared_root=sh)
+                          shared_root=sh)
         block = aicu.ccs[0]._workspace_boundary
 
         assert os.path.realpath(str(sh)) in block
@@ -194,32 +176,6 @@ class TestBoundaryIsDelivered:
 
         assert sends[aicu.ccs[0]][0].startswith(aicu.ccs[0]._workspace_boundary)
         assert "增量需求" in sends[aicu.ccs[0]][0]
-
-    def test_review_path_carries_block(self, tmp_path):
-        """审查位（_pair_review）走自己的 prompt 构造，不走 `_build_generation_prompt`。
-
-        这是本次最容易做漏的点：只覆盖生成阶段的实现会在这里漏掉块。
-        """
-        sh = tmp_path / "workspace" / "shared"
-        aicu = _make_aicu(tmp_path, num_ccs=2, shared_root=sh, shared_target=sh / "impl")
-        sends = _capture_sends(aicu)
-
-        aicu._pair_review("原始问题", aicu.ccs[1])
-
-        sent = sends[aicu.ccs[1]][0]
-        assert sent.startswith(aicu.ccs[1]._workspace_boundary)
-        assert "审查" in sent          # 确实是审查 prompt，不是别的
-
-    def test_audit_path_carries_block(self, tmp_path):
-        """审计位（_full_audit）用 self.ccs[3]，同样必须带块。"""
-        sh = tmp_path / "workspace" / "shared"
-        aicu = _make_aicu(tmp_path, num_ccs=4, shared_root=sh, shared_target=sh / "impl")
-        sends = _capture_sends(aicu)
-
-        aicu._full_audit("原始问题")
-
-        sent = sends[aicu.ccs[3]][0]
-        assert sent.startswith(aicu.ccs[3]._workspace_boundary)
 
     def test_retry_branch_keeps_block(self, tmp_path, monkeypatch):
         """读图恢复重试会**整体替换** prompt ⇒ 块必须挂在 cc.chat() 调用点。
@@ -300,53 +256,3 @@ class TestBackwardCompatibility:
 
         sig = inspect.signature(_A.__init__)
         assert sig.parameters["shared_root"].default is None
-
-
-# ============================================================================
-# 4. Manager 侧 YAML：路径边界审查项的形状
-# ============================================================================
-
-
-class TestManagerRoleBoundaryWording:
-    """review_checklist 的**描述行必须用全角冒号「：」**。
-
-    半角 ": " 会让 YAML 把该项解析成映射，`for name, desc in ...` 拿到的 desc 是
-    dict，渲染进审查提示词的就成了 {'能力完整性': '...'} 这样的 Python 字面量。
-    """
-
-    @pytest.mark.parametrize("role_id", ["default", "engineering_coord", "release_planner"])
-    def test_path_boundary_item_is_a_string(self, role_id):
-        rm = RolesManager(os.path.join(REPO_ROOT, "roles"))
-        cfg = rm._effective_role_config(role_id, "manager")
-
-        items = dict(cfg["review_checklist"])
-        assert "path_boundary" in items, f"{role_id} 缺 path_boundary 审查项"
-        assert isinstance(items["path_boundary"], str), \
-            f"{role_id} 的 path_boundary 描述被 YAML 解析成了 {type(items['path_boundary'])}"
-        assert "禁止访问范围之外的路径" in items["path_boundary"]
-
-    @pytest.mark.parametrize("role_id", ["default", "engineering_coord", "release_planner"])
-    def test_all_descriptions_are_strings(self, role_id):
-        """整份清单都不能出映射形态 —— 不只 path_boundary 一条。"""
-        rm = RolesManager(os.path.join(REPO_ROOT, "roles"))
-        cfg = rm._effective_role_config(role_id, "manager")
-
-        for name, desc in cfg["review_checklist"]:
-            assert isinstance(desc, str), f"{role_id}/{name} 描述是 {type(desc)}"
-
-    def test_review_config_surfaces_boundary(self):
-        """审查 CC 看到的内容(adversarial_role + review_checklist)必须覆盖路径边界。
-
-        改动 5 把路径边界收敛到 review_checklist 一处权威, adversarial_role 不再重复
-        (审查 CC 同时看到两者, 重复只会稀释注意力、让规则形同虚设)。本测试断言的是
-        "审查视角下边界规则仍被覆盖"(无论落在哪一处), 而非强制在 adversarial_role 里重复。
-        """
-        for role_id in ("default", "engineering_coord", "release_planner"):
-            rm = RolesManager(os.path.join(REPO_ROOT, "roles"))
-            cfg = rm._effective_role_config(role_id, "manager")
-            adv = cfg.get("adversarial_role") or ""
-            checklist_text = "\n".join(
-                str(desc) for _, desc in cfg["review_checklist"]
-            )
-            combined = adv + "\n" + checklist_text
-            assert "路径边界" in combined, f"{role_id} 审查配置未覆盖路径边界"

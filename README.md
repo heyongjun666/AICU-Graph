@@ -99,16 +99,9 @@ Roles and skills are reusable capability configurations used by nodes during exe
 - **Artifact**: a concrete result produced by a node, such as code, a report, or test output.
 - **Shared Workspace**: a shared working directory used by related nodes to exchange actual work results instead of repeatedly copying full conversation histories.
 
-## AICU Internal Work Modes
+## How an AICU Node Executes
 
-Each AICU node can configure `num_ccs` to select an internal peer collaboration strategy. These are **execution strategies inside one AICU node**. They are not four node types and are not four Runtime states.
-
-| Mode | Configuration | Collaboration pattern | Typical use |
-| --- | ---: | --- | --- |
-| **Solo** | `1` | One agent generates the result once; no self-review or revision loop | Simple, low-risk, mechanical tasks |
-| **Pair** | `2` | One agent produces, another reviews, and the producer revises | General development; default quality/cost balance |
-| **Triple** | `3` | Two agents produce independently; a third compares, selects, and merges | Requirements, architecture, important decisions |
-| **Full** | `4` | Two proposals, merge review, independent deep audit, and repair iterations | Core features, high-risk work, release audits |
+Each AICU node uses a single agent and a single call to produce its result (Solo). There is no in-node review, revision, merge, or audit, which keeps token cost predictable. Quality control lives outside the node: the Manager reviews Worker output, a failed review leads to a repair plan from the Manager, and users can trigger Revise on any node.
 
 ## Current Implementation
 

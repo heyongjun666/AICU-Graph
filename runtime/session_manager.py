@@ -18,7 +18,6 @@ from runtime.concurrency import DEFAULT_MAX_CONCURRENCY, validate_max_concurrenc
 from runtime.credentials import CredentialStore, set_credential_store
 from runtime.event_bus import SSEEvent
 from runtime.jsonio import atomic_write_json as _atomic_write_json
-from runtime.models import NUM_CCS_TIERS
 from runtime.persistence import Persistence
 from runtime.runtime import Runtime
 from runtime.sse_manager import SSEManager
@@ -36,8 +35,6 @@ _SESSION_CONFIG_KEYS = {
     "skip_permissions",
     "skills",
     "candidate_roles",
-    "num_ccs",
-    "audit_rounds",
     "max_iterations",
     "language",
 }
@@ -51,10 +48,12 @@ _GLOBAL_CONFIG_KEYS = {
     "api_key_env",
     "provider_id",
     "language",
-    "dynamic_num_ccs",
-    "default_num_ccs",
     "max_concurrency",
 }
+
+# 已移除的全局配置键（节点内多 CC 模式已删）。旧前端回传或旧 config.json 里仍可能带着：
+# 更新时静默忽略，加载时不再读取（下次保存即落盘清除）。
+_LEGACY_GLOBAL_CONFIG_KEYS = frozenset({"dynamic_num_ccs", "default_num_ccs"})
 
 _GLOBAL_CONFIG_DEFAULTS = {
     "workspace_root": None,
@@ -64,21 +63,10 @@ _GLOBAL_CONFIG_DEFAULTS = {
     "api_key_env": None,
     "provider_id": None,
     "language": "zh",
-    # 单节点 agent（CC）数量策略：开 = 由 Manager 规划决定（现状）；
-    # 关 = 全部节点统一钉死为 default_num_ccs。
-    "dynamic_num_ccs": True,
-    "default_num_ccs": 1,
     # 会话调度并发上限（系统级，跨会话生效）。新会话继承；改动即时推送到
     # 所有已存在会话的 Runtime（set_max_concurrency 不打断 in-flight）。
     "max_concurrency": DEFAULT_MAX_CONCURRENCY,
 }
-
-# 单节点 agent（CC）数量的合法区间 = plan_validator 校验用的同一份业务档位
-# （models.NUM_CCS_TIERS）。原先这里另写一遍 1/4，靠注释说明「与 plan_validator 对齐」——
-# 改档位时注释不会报错，两边会静默分叉。
-_MIN_NUM_CCS = min(NUM_CCS_TIERS)
-_MAX_NUM_CCS = max(NUM_CCS_TIERS)
-
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -372,6 +360,10 @@ class SessionManager:
 
     def update_global_config(self, config: dict[str, Any]) -> dict[str, Any]:
         """更新全局配置，原子持久化后再向现有 Runtime 推送。"""
+        config = {
+            key: value for key, value in config.items()
+            if key not in _LEGACY_GLOBAL_CONFIG_KEYS
+        }
         unknown = {key for key in config if key not in _GLOBAL_CONFIG_KEYS}
         if unknown:
             raise ValueError(f"Unknown global config fields: {sorted(unknown)}")
@@ -395,22 +387,6 @@ class SessionManager:
                         proposed[key] = None
                 elif key == "language":
                     proposed[key] = value if value in ("zh", "en") else "zh"
-                elif key == "dynamic_num_ccs":
-                    proposed[key] = True if value is None else bool(value)
-                elif key == "default_num_ccs":
-                    try:
-                        parsed = int(value)
-                    except (TypeError, ValueError) as exc:
-                        raise ValueError(
-                            f"default_num_ccs must be an integer in "
-                            f"{_MIN_NUM_CCS}..{_MAX_NUM_CCS}"
-                        ) from exc
-                    if not _MIN_NUM_CCS <= parsed <= _MAX_NUM_CCS:
-                        raise ValueError(
-                            f"default_num_ccs must be in "
-                            f"{_MIN_NUM_CCS}..{_MAX_NUM_CCS}"
-                        )
-                    proposed[key] = parsed
                 elif key == "max_concurrency":
                     proposed[key] = validate_max_concurrency(value)
                 else:
@@ -439,7 +415,6 @@ class SessionManager:
 
             # The dedicated config lock serializes this propagation with every
             # other global patch, while runtime setters stay outside _lock.
-            self._push_num_ccs_policy(handles, proposed)
             new_concurrency = proposed.get("max_concurrency")
             if "max_concurrency" in config:
                 for handle in handles:
@@ -449,25 +424,6 @@ class SessionManager:
 
             with self._lock:
                 return dict(self.global_config)
-
-    def _push_num_ccs_policy(
-        self,
-        handles: Optional[list[SessionHandle]] = None,
-        config: Optional[dict[str, Any]] = None,
-    ) -> None:
-        """Push the CC-count policy without holding ``self._lock``."""
-        if handles is None:
-            with self._lock:
-                handles = list(self._sessions.values())
-        source = config if config is not None else self.global_config
-        dynamic = bool(source.get("dynamic_num_ccs", True))
-        default = int(source.get("default_num_ccs", 1))
-        for handle in handles:
-            runtime = getattr(handle, "runtime", None)
-            if runtime is None:
-                continue
-            runtime.dynamic_num_ccs = dynamic
-            runtime.default_num_ccs = default
 
     # ---- 凭据（按模型厂商保存的 API Key）—— 委托 CredentialStore ----
 
@@ -781,6 +737,9 @@ class SessionManager:
         # 并发上限是**系统级**配置，从 global_config 读；会话 metadata.config 不再持有它。
         # 清理旧会话级实现可能残留的字段，免得 _summary/get_settings 把脏值带回前端。
         metadata.config.pop("max_concurrency", None)
+        # 旧会话 metadata.config 里已移除的节点内多 CC 配置键：静默丢弃
+        metadata.config.pop("num_ccs", None)
+        metadata.config.pop("audit_rounds", None)
         max_concurrency = validate_max_concurrency(
             self.global_config.get("max_concurrency", self.max_concurrency)
         )
@@ -797,8 +756,6 @@ class SessionManager:
                 metadata.config.get("candidate_roles")
             ),
             router_config=self.global_config,
-            dynamic_num_ccs=self.global_config.get("dynamic_num_ccs", True),
-            default_num_ccs=self.global_config.get("default_num_ccs", 1),
         )
         runtime.set_pause_completion_callback(
             lambda interrupted, session_id=metadata.id: self._complete_pause(

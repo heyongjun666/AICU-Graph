@@ -17,7 +17,6 @@
   8. grill 专项（自行裁决 + 不修订需求文档）
   9. grill → requirements 成对性
  10. requirements 专项（普通用户视角 + 主动具体化 + 来源三分）
- 11. 审查位 N/A 适用性条款（且不改运行时协议）
 """
 
 import hashlib
@@ -30,7 +29,7 @@ from types import SimpleNamespace
 import pytest
 import yaml
 
-from aicu import AICU, _CHECKLIST_APPLICABILITY_NOTE
+from aicu import AICU
 
 ROOT = Path(__file__).resolve().parents[1]
 WORKER_DIR = ROOT / "roles" / "Worker"
@@ -72,7 +71,6 @@ class TestParseAndProtocol:
         assert cfg.get("summary"), f"{role}.yaml 缺 summary"
         assert cfg.get("generate_instruction"), f"{role}.yaml 缺 generate_instruction"
         assert cfg.get("role_md"), f"{role}.yaml 缺 role_md"
-        assert cfg.get("review_checklist"), f"{role}.yaml 缺 review_checklist"
 
     @pytest.mark.parametrize("role", ALL_ROLES)
     def test_role_md_contains_protocol(self, role):
@@ -101,8 +99,7 @@ class TestParseAndProtocol:
 # ============================================================================
 
 # _format_instruction 用 str.replace 处理固定占位符；未知占位符不报错、会原样
-# 泄漏进提示词，因此必须静态拦截。{available_roles} 在 init 期一次性替换，
-# {output_path} 仅用于 revise_instruction。
+# 泄漏进提示词，因此必须静态拦截。{available_roles} 在 init 期一次性替换。
 _KNOWN_PLACEHOLDERS = {
     "output_file", "main_doc", "index_file", "index_rules", "final_file",
     "deliverable_dir", "output_path", "available_roles",
@@ -111,7 +108,7 @@ _KNOWN_PLACEHOLDERS = {
 
 class TestPlaceholderHygiene:
     @pytest.mark.parametrize("role", ALL_ROLES)
-    @pytest.mark.parametrize("field", ["generate_instruction", "revise_instruction", "role_md"])
+    @pytest.mark.parametrize("field", ["generate_instruction", "role_md"])
     def test_no_unknown_placeholders(self, role, field):
         txt = str(_cfg(role).get(field) or "")
         unknown = {
@@ -155,14 +152,6 @@ _BASELINE_CONTRACT = {
     "visual_designer": ("design.md", "design.md", None, True, "_INDEX.md"),
 }
 
-# num_ccs 本次「完全不改分配」（决策 2），基线即当前值。
-_BASELINE_NUM_CCS = {
-    "acceptance": 2, "architecture": 4, "backend_dev": 2, "code": 2, "data_analysis": 2,
-    "default": 2, "deploy": 2, "dev_lead": 3, "dev_member": 2,
-    "document": 2, "frontend_dev": 2, "grill": 3, "incremental_plan": 3, "prototype": 3,
-    "requirements": 2, "test": 2, "visual_designer": 4,
-}
-
 
 class TestContractCompatibility:
     @pytest.mark.parametrize("role", sorted(_BASELINE_CONTRACT))
@@ -172,10 +161,6 @@ class TestContractCompatibility:
                cfg.get("modular_output"), cfg.get("index_file"))
         assert got == _BASELINE_CONTRACT[role], f"{role}.yaml 文件协议发生漂移"
         assert cfg.get("deliverable_dir") == "deliverables"
-
-    @pytest.mark.parametrize("role", sorted(_BASELINE_NUM_CCS))
-    def test_num_ccs_unchanged(self, role):
-        assert _cfg(role).get("num_ccs") == _BASELINE_NUM_CCS[role]
 
     @pytest.mark.parametrize("role", ["test", "acceptance"])
     def test_verdict_block_protocol_preserved(self, role):
@@ -219,7 +204,7 @@ class TestContractCompatibility:
 
 class TestRoleBoundaries:
     def test_requirements_has_no_implementation_or_test_script_contract(self):
-        txt = _text("requirements", "generate_instruction", "revise_instruction", "role_md")
+        txt = _text("requirements", "generate_instruction", "role_md")
         assert "不定义\"系统如何实现\"" in txt or "绝不定义" in txt
         assert "验收标准描述" in txt
         assert "不描述\"用什么工具测量\"" in txt
@@ -244,7 +229,7 @@ class TestRoleBoundaries:
 
     @pytest.mark.parametrize("role", ["test", "acceptance"])
     def test_verification_roles_report_only(self, role):
-        txt = _text(role, "generate_instruction", "revise_instruction", "role_md")
+        txt = _text(role, "generate_instruction", "role_md")
         assert "不修复" in txt
 
     def test_frontend_backend_roles_split_and_route_each_other(self):
@@ -389,12 +374,12 @@ class TestDecisionProtocol:
     def test_no_role_asks_user_to_decide(self):
         """不得出现「等待/请示用户裁决」类表述（无人在环）。"""
         for role in ALL_ROLES:
-            txt = _text(role, "generate_instruction", "revise_instruction", "role_md")
+            txt = _text(role, "generate_instruction", "role_md")
             for bad in ("请用户", "等待用户", "用户裁决", "请示", "交回上游裁决"):
                 assert bad not in txt, f"{role} 含人在环表述：{bad}"
 
     def test_dev_lead_no_longer_marks_arch_ambiguity_pending(self):
-        txt = _text("dev_lead", "generate_instruction", "revise_instruction", "role_md")
+        txt = _text("dev_lead", "generate_instruction", "role_md")
         assert "架构存在歧义时标注为待确认" not in txt
         assert "架构歧义是否已当场拍板" in txt or "当场拍板" in txt
 
@@ -410,27 +395,6 @@ class TestDecisionProtocol:
 
 
 class TestGrillRulings:
-    def test_revise_instruction_is_self_ruled(self):
-        txt = _text("grill", "revise_instruction")
-        assert "自行裁决" in txt
-        for bad in ("用户裁决", "用户给出的文本", "rulings", "请根据用户"):
-            assert bad not in txt, f"grill.revise_instruction 残留人工裁决措辞：{bad}"
-
-    def test_revise_instruction_outputs_ruling_list_shape(self):
-        txt = _text("grill", "revise_instruction")
-        assert "accept | reject" in txt
-        assert "**finding**" in txt
-        assert "**ruling**" in txt
-        assert "**reason**" in txt
-        assert "accept 时写明需求文档应如何改" in txt
-
-    def test_revise_instruction_does_not_rewrite_requirements_doc(self):
-        txt = _text("grill", "revise_instruction")
-        assert "**不要修改上游需求文档**" in txt
-        assert "修订由 requirements" in txt
-        assert "将修订后的完整需求文档写入" not in txt
-        assert "受控最小修订" not in txt
-
     def test_not_for_forbids_rewriting_requirements_doc(self):
         nf = _flat("grill", "not_for")
         assert "不直接修订需求文档" in nf
@@ -442,10 +406,19 @@ class TestGrillRulings:
         for field in ("severity", "impact", "question", "recommendation", "rationale"):
             assert f"**{field}**" in txt, f"grill finding 缺字段 {field}"
 
-    def test_checklist_covers_ruling_list_and_boundary(self):
-        names = [item[0] for item in _cfg("grill")["review_checklist"]]
-        assert "ruling_list" in names
-        assert "no_doc_rewrite" in names
+    def test_role_md_is_self_ruled(self):
+        """无人在环：grill 自行 accept/reject 裁决，不向人请示。"""
+        md = _text("grill", "role_md")
+        assert "自行裁决" in md
+        assert "accept / reject" in md
+        for bad in ("用户裁决", "请根据用户"):
+            assert bad not in md, f"grill.role_md 残留人工裁决措辞：{bad}"
+
+    def test_role_md_does_not_rewrite_requirements_doc(self):
+        md = _text("grill", "role_md")
+        assert "**不直接修订需求文档**" in md
+        assert "**不直接修订上游需求文档**" in md
+        assert "修订由 requirements" in md
 
 
 # ============================================================================
@@ -462,15 +435,11 @@ class TestGrillRequirementsPairing:
         assert "accept" in txt and "reject" in txt
         assert "reject 的 finding" in txt
 
-    def test_requirements_checklist_has_intake_rulings(self):
-        names = [item[0] for item in _cfg("requirements")["review_checklist"]]
-        assert "intake_rulings" in names
-
     def test_pairing_is_two_sided(self):
         """两侧必须同时成立，防止只改一侧造成裁决悬空。"""
-        grill_txt = _text("grill", "revise_instruction")
+        grill_txt = _text("grill", "role_md")
         req_txt = _text("requirements", "generate_instruction")
-        assert "**不要修改上游需求文档**" in grill_txt
+        assert "**不直接修订上游需求文档**" in grill_txt
         assert "裁决清单" in req_txt and "已拒绝质询" in req_txt
 
 
@@ -530,12 +499,6 @@ class TestRequirementsSpecial:
         assert "不得出现" in txt and "待确认" in txt
         assert "具体化不产生未决项" in txt
 
-    def test_checklist_covers_concretization_and_scope(self):
-        names = [item[0] for item in _cfg("requirements")["review_checklist"]]
-        for expected in ("provenance", "concretization", "scope_discipline",
-                         "decisions_made", "intake_rulings"):
-            assert expected in names, f"requirements 审查清单缺 {expected}"
-
 
 # ============================================================================
 # 10b. _INDEX.md 只做导航（{index_rules} 单一来源）
@@ -569,11 +532,11 @@ class TestIndexRules:
 
 
 # ============================================================================
-# 11. 审查位 N/A 适用性条款
+# 11. 离线构造 AICU 的 helper（供 {index_rules} 渲染等用例复用）
 # ============================================================================
 
 
-def _make_aicu(tmp_path, role="code", num_ccs=1):
+def _make_aicu(tmp_path, role="code"):
     """离线构造 AICU（照搬 tests/test_shared_target.py 的做法）。"""
     ws = str(tmp_path / "ws")
     os.makedirs(ws, exist_ok=True)
@@ -581,195 +544,10 @@ def _make_aicu(tmp_path, role="code", num_ccs=1):
         role_type="worker",
         role=role,
         parent_workspace=ws,
-        num_ccs=num_ccs,
         skills=[],          # 跳过 skills_dir 校验
         modular_output=True,
         output_file=None,
     )
-
-
-def _capture_prompts(monkeypatch, aicu):
-    """monkeypatch 掉模型调用，返回收集到的 prompt 列表。"""
-    captured = []
-
-    def _fake(cc, prompt, timeout=7200, **kwargs):
-        captured.append(prompt)
-        return '{"approved": true, "defects": [], "summary": "ok"}'
-
-    monkeypatch.setattr(aicu, "_cc_chat_with_retry", _fake)
-    return captured
-
-
-class TestReviewApplicabilityNote:
-    def test_constant_text_is_what_plan_specified(self):
-        assert "先判断每条检查项/审查角度是否适用于本次任务" in _CHECKLIST_APPLICABILITY_NOTE
-        assert "N/A" in _CHECKLIST_APPLICABILITY_NOTE
-        assert "approved=true" in _CHECKLIST_APPLICABILITY_NOTE
-        assert "N/A 不得用于规避真实缺陷" in _CHECKLIST_APPLICABILITY_NOTE
-
-    def test_pair_review_prompt_has_note(self, tmp_path, monkeypatch):
-        aicu = _make_aicu(tmp_path, num_ccs=2)
-        captured = _capture_prompts(monkeypatch, aicu)
-        aicu._pair_review("问题", aicu.ccs[1])
-        assert captured and _CHECKLIST_APPLICABILITY_NOTE in captured[0]
-        assert "只有所有检查项都通过" not in captured[0]
-
-    def test_triple_review_prompt_has_note(self, tmp_path, monkeypatch):
-        aicu = _make_aicu(tmp_path, num_ccs=3)
-        captured = _capture_prompts(monkeypatch, aicu)
-        aicu._triple_review_only("问题")
-        assert captured and _CHECKLIST_APPLICABILITY_NOTE in captured[0]
-
-    def test_full_audit_prompt_has_note(self, tmp_path, monkeypatch):
-        aicu = _make_aicu(tmp_path, num_ccs=4)
-        captured = _capture_prompts(monkeypatch, aicu)
-        aicu._full_audit("问题")
-        assert captured and _CHECKLIST_APPLICABILITY_NOTE in captured[0]
-        # 审计位 JSON 形状未变
-        assert '"defects_found"' in captured[0]
-        assert '"overall_assessment"' in captured[0]
-
-    def test_source_no_longer_has_old_rule(self):
-        src = (ROOT / "aicu.py").read_text(encoding="utf-8")
-        assert "只有所有检查项都通过" not in src
-        assert src.count("_CHECKLIST_APPLICABILITY_NOTE") >= 5  # 1 定义 + 4 渲染点(solo 已硬删自审)
-
-    def test_runtime_protocol_unchanged(self, tmp_path, monkeypatch):
-        """N/A 理由落在既有 summary 自由文本中：不新增 JSON 字段。"""
-        aicu = _make_aicu(tmp_path, num_ccs=2)
-        captured = _capture_prompts(monkeypatch, aicu)
-        aicu._pair_review("问题", aicu.ccs[1])
-        prompt = captured[0]
-        assert '"approved": true/false' in prompt
-        assert '"defects": [' in prompt
-        assert '"check"' in prompt and '"description"' in prompt and '"severity"' in prompt
-        assert '"summary": "总体评价"' in prompt
-        # 未出现任何新增字段
-        for forbidden in ('"applicable"', '"na_items"', '"skipped"'):
-            assert forbidden not in prompt
-
-    def test_severity_filtering_unchanged(self, tmp_path, monkeypatch):
-        """high/medium 过滤逻辑不变：low 缺陷不进 defects。"""
-        aicu = _make_aicu(tmp_path, num_ccs=2)
-
-        def _fake(cc, prompt, timeout=7200, **kwargs):
-            return (
-                '{"approved": false, "defects": ['
-                '{"check": "a", "description": "d1", "severity": "high"},'
-                '{"check": "b", "description": "d2", "severity": "low"},'
-                '{"check": "c", "description": "d3", "severity": "medium"}], '
-                '"summary": "s"}'
-            )
-
-        monkeypatch.setattr(aicu, "_cc_chat_with_retry", _fake)
-        defects = aicu._pair_review("问题", aicu.ccs[1])
-        assert [d["severity"] for d in defects] == ["high", "medium"]
-
-    def test_parse_failure_yields_none_not_empty_defects(self, tmp_path, monkeypatch):
-        """解析失败返回 None（不是 []）—— 调用方据此判未通过，本次改动不得退回静默放行。"""
-        aicu = _make_aicu(tmp_path, num_ccs=2)
-        monkeypatch.setattr(
-            aicu, "_cc_chat_with_retry",
-            lambda cc, prompt, timeout=7200, **kw: "不是 JSON",
-        )
-        assert aicu._parse_adversarial_vote("不是 JSON") is None
-        assert aicu._pair_review("问题", aicu.ccs[1]) is None
-
-
-# ============================================================================
-# 12. 整体视角（每个 CC 都是同角色克隆，独立的是上下文不是视角）
-# ============================================================================
-#
-# 四个模式的评审位（CC-1/CC-2/CC-3）与生产位共享同一份 role_md 与同一份
-# review_checklist，因此「独立审查」独立的是上下文而非视角。若清单只含零件级
-# 条目，所有评审位就都只有零件级盲区——所以每个角色都必须自带一条整体项。
-
-
-def _holistic_items(role: str):
-    return [it for it in _cfg(role)["review_checklist"] if it[0].startswith("holistic_")]
-
-
-class TestHolisticPerspective:
-    @pytest.mark.parametrize("role", ALL_ROLES)
-    def test_every_role_has_exactly_one_holistic_item(self, role):
-        items = _holistic_items(role)
-        assert len(items) == 1, f"{role} 的整体视角项数量异常：{[i[0] for i in items]}"
-
-    @pytest.mark.parametrize("role", ALL_ROLES)
-    def test_holistic_item_is_last(self, role):
-        """整体项排在最后：先逐条核对，最后退后一步看整体。"""
-        assert _holistic_items(role)[0] == _cfg(role)["review_checklist"][-1]
-
-    @pytest.mark.parametrize("role", ALL_ROLES)
-    def test_holistic_item_is_not_na_able(self, role):
-        """整体项不得写成可 N/A 的「如适用」条目——否则会被 N/A 条款绕过。"""
-        desc = _holistic_items(role)[0][1]
-        assert "如适用" not in desc, f"{role} 的整体项可被 N/A 绕过"
-        assert "N/A" not in desc
-
-    @pytest.mark.parametrize("role", ALL_ROLES)
-    def test_holistic_item_is_judgeable(self, role):
-        """必须写成可判定的：区分于逐条检查 + 明确什么算缺陷（severity）。"""
-        desc = _holistic_items(role)[0][1]
-        assert "报 high" in desc, f"{role} 的整体项没有明确的缺陷判定标准"
-        assert re.search(r"不是逐[条个步页节项]|不是只看", desc), \
-            f"{role} 的整体项没有与逐条检查区分开"
-
-    @pytest.mark.parametrize("role", ALL_ROLES)
-    def test_holistic_item_names_are_distinct(self, role):
-        name = _holistic_items(role)[0][0]
-        assert name != "holistic_overall" or role == "default"
-
-    @pytest.mark.parametrize("role", ALL_ROLES)
-    def test_personas_carry_holistic_clause(self, role):
-        cfg = _cfg(role)
-        assert "整体" in (cfg.get("adversarial_role") or ""), f"{role}.adversarial_role 缺整体口径"
-        assert "整体" in (cfg.get("audit_role") or ""), f"{role}.audit_role 缺整体口径"
-
-    def test_all_holistic_names_unique(self):
-        names = [_holistic_items(r)[0][0] for r in ALL_ROLES]
-        assert len(set(names)) == len(names), f"整体项命名重复：{names}"
-
-
-class TestHolisticRenderedInAllModes:
-    """确认整体项确实进入各模式的评审/审计提示词（而不只是躺在 YAML 里）。"""
-
-    @staticmethod
-    def _prompt_for(monkeypatch, tmp_path, role, run):
-        aicu = _make_aicu(tmp_path, role=role, num_ccs=_BASELINE_NUM_CCS[role])
-        captured = _capture_prompts(monkeypatch, aicu)
-        run(aicu)
-        assert captured, f"{role} 未产生提示词"
-        return captured[0]
-
-    def test_pair_mode(self, tmp_path, monkeypatch):
-        p = self._prompt_for(monkeypatch, tmp_path, "acceptance",
-                             lambda a: a._pair_review("做一个鹈鹕骑车的 SVG 动画", a.ccs[1]))
-        assert "**holistic_experience**" in p
-        assert "产物整体是否满足用户最初提出的那个请求" in p
-        assert '"severity": "high/medium/low"' in p
-
-    def test_triple_mode(self, tmp_path, monkeypatch):
-        p = self._prompt_for(monkeypatch, tmp_path, "prototype",
-                             lambda a: a._triple_review_only("做一个鹈鹕骑车的 SVG 动画"))
-        assert "**holistic_walkthrough**" in p
-
-    def test_full_audit_mode_merges_checklist_and_angles(self, tmp_path, monkeypatch):
-        p = self._prompt_for(monkeypatch, tmp_path, "architecture",
-                             lambda a: a._full_audit("做一个鹈鹕骑车的 SVG 动画"))
-        assert "**holistic_coherence**" in p
-        # 审计位编号在清单之后顺延，整体项仍属清单段
-        assert "按以下角度深入审查:" in p
-        assert '"defects_found"' in p and '"overall_assessment"' in p
-
-    def test_holistic_label_matches_role_not_shared(self, tmp_path, monkeypatch):
-        """不同角色渲染出的整体项不同——证明它是角色化清单而非统一话术。"""
-        a = self._prompt_for(monkeypatch, tmp_path, "acceptance",
-                             lambda x: x._pair_review("q", x.ccs[1]))
-        b = self._prompt_for(monkeypatch, tmp_path, "visual_designer",
-                             lambda x: x._pair_review("q", x.ccs[1]))
-        assert "holistic_experience" in a and "holistic_visual" in b
-        assert "holistic_visual" not in a and "holistic_experience" not in b
 
 
 # ============================================================================

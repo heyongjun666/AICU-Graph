@@ -21,7 +21,7 @@ export interface HoverCardContent {
   /** 一句话定位。 */
   summary?: string;
   groups?: HoverCardGroup[];
-  /** 参数行，形如「num_ccs 2」。 */
+  /** 参数行，形如「Skills a, b」。 */
   facts?: { label: string; value: string }[];
   /** 完整原文（角色的人格配置），限高滚动展示。 */
   body?: string;

@@ -226,33 +226,11 @@ class TestModels:
                         task=long_task, config={})
         assert len(step.task) == 5000
 
-    @test("Models: Step num_ccs out of range raises ValueError")
-    def test_step_num_ccs_invalid():
-        assert_raises(ValueError, Step, step_id="s1", exec_type="worker",
-                      role="c", task="t", config={"num_ccs": 0})
-
-    @test("Models: Step num_ccs at minimum boundary (1)")
-    def test_step_num_ccs_min():
-        step = Step(step_id="s1", exec_type="worker", role="c",
-                    task="t", config={"num_ccs": 1})
-        assert step.config["num_ccs"] == 1
-
-    @test("Models: Step num_ccs at maximum boundary (10)")
-    def test_step_num_ccs_max():
-        step = Step(step_id="s1", exec_type="worker", role="c",
-                    task="t", config={"num_ccs": 10})
-        assert step.config["num_ccs"] == 10
-
-    @test("Models: Step audit_rounds out of range raises ValueError")
-    def test_step_audit_rounds_invalid():
-        assert_raises(ValueError, Step, step_id="s1", exec_type="worker",
-                      role="c", task="t", config={"audit_rounds": -1})
-
-    @test("Models: Step audit_rounds at minimum boundary (0)")
-    def test_step_audit_rounds_min():
-        step = Step(step_id="s1", exec_type="worker", role="c",
-                    task="t", config={"audit_rounds": 0})
-        assert step.config["audit_rounds"] == 0
+    @test("Models: Step silently strips legacy num_ccs/audit_rounds config keys")
+    def test_step_legacy_config_stripped():
+        step = Step(step_id="s1", exec_type="worker", role="c", task="t",
+                    config={"num_ccs": 99, "audit_rounds": -1, "model": "m"})
+        assert step.config == {"model": "m"}
 
     @test("Models: LogEntry invalid level raises ValueError")
     def test_logentry_invalid_level():
@@ -291,7 +269,7 @@ class TestModels:
         error = ErrorObject(message="err", cause="cause", suggestion="fix")
         n = Node(
             id="full_node", parent_id="p1", exec_type="manager", role="architect",
-            task="complex task", config={"num_ccs": 3}, status=NodeStatus.FAILED,
+            task="complex task", config={"model": "m"}, status=NodeStatus.FAILED,
             artifact_path="/tmp/out", step_ref="step_1", manager_phase="review",
             iteration_count=2, max_iterations=5, log=[log_entry], error=error,
         )
@@ -337,21 +315,6 @@ class TestModels:
         assert NodeStatus.STOPPED.value == "Stopped"
         assert NodeStatus.PAUSED.value == "Paused"
 
-    @test("Models: Step with num_ccs as negative raises ValueError")
-    def test_step_num_ccs_negative():
-        assert_raises(ValueError, Step, step_id="s1", exec_type="worker",
-                      role="c", task="t", config={"num_ccs": -5})
-
-    @test("Models: Step with num_ccs exceeded max raises ValueError")
-    def test_step_num_ccs_exceeded():
-        assert_raises(ValueError, Step, step_id="s1", exec_type="worker",
-                      role="c", task="t", config={"num_ccs": 99})
-
-    @test("Models: Step with audit_rounds exceeded max raises ValueError")
-    def test_step_audit_rounds_exceeded():
-        assert_raises(ValueError, Step, step_id="s1", exec_type="worker",
-                      role="c", task="t", config={"audit_rounds": 99})
-
     @test("Models: Node with execution_plan serialization")
     def test_node_with_plan():
         plan = _make_plan()
@@ -370,13 +333,13 @@ class TestModels:
                 {"step_id": "s1", "exec_type": "worker", "role": "coder",
                  "task": "step 1", "config": {}, "depends_on": []},
                 {"step_id": "s2", "exec_type": "worker", "role": "reviewer",
-                 "task": "step 2", "config": {"num_ccs": 2}, "depends_on": ["s1"]},
+                 "task": "step 2", "config": {"model": "m2"}, "depends_on": ["s1"]},
             ]
         }
         plan = ExecutionPlan.from_json(json.dumps(plan_dict))
         assert len(plan.steps) == 2
         assert plan.steps[1].depends_on == ["s1"]
-        assert plan.steps[1].config["num_ccs"] == 2
+        assert plan.steps[1].config["model"] == "m2"
 
 
 # ============================================================================
@@ -935,10 +898,10 @@ class TestPlanner:
         p = Planner(g)
         plan = ExecutionPlan(steps=[
             Step(step_id="s1", exec_type="worker", role="coder", task="t",
-                 config={"num_ccs": 4}, task_summary="t summary"),
+                 config={"model": "m4"}, task_summary="t summary"),
         ])
         nodes = p.translate(plan, "parent")
-        assert nodes[0].config.get("num_ccs") == 4
+        assert nodes[0].config.get("model") == "m4"
 
     @test("Planner: create_retry_node inherits properties")
     def test_create_retry():
@@ -1679,7 +1642,7 @@ def _write_report(total: int, duration: float):
     lines.append("### Key Coverage Highlights")
     lines.append("")
     lines.append("- **Normal paths**: All core workflows covered (serialization, CRUD, transitions)")
-    lines.append("- **Boundary values**: Empty lists, 0 values, min/max ranges (num_ccs: 1-10, audit_rounds: 0-10, task length: 5000)")
+    lines.append("- **Boundary values**: Empty lists, 0 values, min/max ranges (task length: 5000)")
     lines.append("- **Exception paths**: ValueError, IllegalTransitionError, PlanValidationError, DependencyError")
     lines.append("- **Integration**: Cross-module data flow (Planner→Graph, EventBus→SSEManager, StateMachine+Node)")
     lines.append("")

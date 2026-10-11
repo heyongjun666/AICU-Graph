@@ -198,7 +198,7 @@ def _handle_cc_stream_output(
 
         # AICU emits this callback at the semantic CC-attempt boundaries. Keep
         # the live activity update and durable timeline entry in one callback,
-        # instead of duplicating lifecycle logs in every peer strategy.
+        # instead of duplicating lifecycle logs in every call site.
         lifecycle_event = {
             "started": "cc_started",
             "finished": "cc_completed",
@@ -286,8 +286,6 @@ def _create_real_aicu(ctx: ExecutableContext) -> Any:
 
     # ---- V3-2.1 shared_target：Worker 有共享工作区 → CC 直写分区 ----
     # 共享分区 = CC 产物唯一权威（不再产生 nodes/{id}/output 副本）。
-    # 多 CC（pair/triple/full）同样直写同一分区：_copy_best_to_cc0 对同分区
-    # 自动跳过复制，peer 编排只需产生方落分区、审查方在自己 CC 工作区出 review。
     # shared_root 与 shared_target 分开传：前者只用于工作区域边界声明（Manager 节点
     # 同样有 _shared_workspace，但 shared_target 仍为 None —— 它不直写产物分区）。
     shared_root = (node.config or {}).get("_shared_workspace")
@@ -299,13 +297,11 @@ def _create_real_aicu(ctx: ExecutableContext) -> Any:
         role_type=node.exec_type,  # "manager" → roles/Manager/, "worker" → roles/Worker/
         parent_workspace=workspace_dir,
         role=node.role or "default",
-        num_ccs=node.config.get("num_ccs"),
         model=_validate_model(node.config.get("model")),
         # 系统设置（会话配置）以独立键注入，与节点显式 model 区分，
         # 保证解析优先级：节点显式 > 角色 yaml > 系统设置。
         session_model=node.config.get("_session_model"),
         cli_name=node.config.get("cli_name"),
-        audit_rounds=node.config.get("audit_rounds"),
         output_callback=append_output,
         api_base_url=node.config.get("api_base_url"),
         api_key_env=node.config.get("api_key_env"),
@@ -415,7 +411,7 @@ def _fail_startup(ctx: ExecutableContext, exc: Exception) -> NodeStatus:
 
 
 # ========== 生产侧通用验收原则（领域无关，Worker 专属注入） ==========
-# 背景：多个 CC 反复质检 + Manager review 仍可能放行有缺陷的产出（自证式审查闭环：
+# 背景：Worker 自检 + Manager review 仍可能放行有缺陷的产出（自证式审查闭环：
 # 生产与评审共享同一套"看起来对"的信念，异常被各自解释掉）。
 # 仅注入 Worker 首轮/续接 prompt（`_build_worker_context` / `_build_resume_task_body`），
 # Manager 走自己的 expand/review prompt，不受此原则影响（见 aicu.py 顶部注释）。
@@ -634,7 +630,7 @@ class Worker(Executable):
         （这些字段都是参考信号，不含目标/路由指令）。
 
         发布对任何节点都可用：ingest（``scan_all``）扫描全部节点 outbox，Router 从任意
-        producer 路由，与 ``config.events.publish`` 无关。因此无条件注入让每个 CC 都知道
+        producer 路由，与 ``config.events.publish`` 无关。因此无条件注入让节点知道
         **它始终可以发布**——不需要在 plan 里声明 ``events.publish``（历史遗留门控已删除）。
         """
         events_dir = event_queue_dirs(node)["outbox"]

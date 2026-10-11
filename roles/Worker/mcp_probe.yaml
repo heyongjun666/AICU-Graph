@@ -19,10 +19,6 @@ suitable_for:
 not_for:
 - 任何真实业务任务（本角色只为验证 MCP 链路存在）
 
-# ---- AICU 初始化参数 ----
-num_ccs: 1
-audit_rounds: 0
-
 # ---- skills ----
 skills: []
 
@@ -36,7 +32,7 @@ modular_output: false
 output_file: output
 final_file: output
 
-# ---- 生成位（CC-0）----
+# ---- 生成指令 ----
 generate_instruction: |-
   你的任务是验证 MCP 工具通道是否已经打通。
 
@@ -49,26 +45,7 @@ generate_instruction: |-
   产物内容必须**仅**包含工具返回的原文（一行）。不要自行推断工具会返回什么格式 ——
   本任务的唯一意义就是如实回传它的实际输出。
 
-# ---- 修订位（CC-0）----
-revise_instruction: |-
-  重新调用 `probe_echo`（text 传 AICU-MCP-PROBE-7f3a），把返回原文写回 {output_path}。
-
-# ---- 审查位人格 ----
-# 本角色的评审对象只有一件事：产物能不能证明工具真的被调用过，所以两个位都从
-# 「这份东西整体是否成立」出发，而不是逐条核对文案。
-adversarial_role: 严格的审查专家，负责找出方案中的缺陷，并把产出作为整体判断是否满足原始请求
-audit_role: 深度审计专家，负责发现方案中的隐含风险；同时从整体视角判断产出是否满足原始请求
-
-# ---- 审查清单（CC-0 自审）----
-review_checklist:
-- - tool_actually_called
-  - 产物内容是否是 probe_echo 的真实返回原文（而非推断或伪造）？格式为工具自身的输出格式，不含任何额外说明文字
-- - failure_not_faked
-  - 工具调用失败时是否如实记录失败原因，而非编造一个看起来合理的返回值
-- - holistic_probe_integrity
-  - 整体达成度：把产出作为整体看一遍（**不是逐条检查**），只问一句——这份东西能不能证明工具真的被调用过？没有任何调用痕迹、或写下的返回与工具实际输出对不上的，报 high
-
-# ---- AICU 人格（所有 CC 共享）----
+# ---- AICU 人格 ----
 role_md: |-
   # 角色：MCP 链路验证员
 

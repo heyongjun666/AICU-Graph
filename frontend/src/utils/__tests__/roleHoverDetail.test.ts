@@ -23,8 +23,6 @@ describe('toRoleHoverDetail', () => {
       summary: '高级软件工程师，擅长生产级代码编写',
       suitable_for: ['代码实现与算法开发', 'Bug修复与功能开发'],
       not_for: ['需求分析与需求文档编写'],
-      num_ccs: 2,
-      audit_rounds: 2,
       skills: ['diagnosing-bugs', 'to-issues'],
       role_md: '你是高级软件工程师……',
     }));
@@ -38,7 +36,7 @@ describe('toRoleHoverDetail', () => {
     expect(detail.groups?.every((group) => group.label.length > 0)).toBe(true);
 
     // skills 是数组，展示时要拼成一行而不是原样甩个数组进 React
-    expect(detail.facts?.map((fact) => fact.value)).toEqual(['2', '2', 'diagnosing-bugs, to-issues']);
+    expect(detail.facts?.map((fact) => fact.value)).toEqual(['diagnosing-bugs, to-issues']);
 
     expect(detail.body).toBe('你是高级软件工程师……');
     expect(detail.bodyLabel).toBeTruthy();
@@ -65,7 +63,7 @@ describe('toRoleHoverDetail', () => {
   it('omits a fact row rather than showing an empty value', () => {
     const detail = toRoleHoverDetail(roleOf({ summary: 'x', skills: [] }));
 
-    // num_ccs / audit_rounds / skills 都没有，事实行整块不出现
+    // skills 为空，事实行整块不出现
     expect(detail.facts).toEqual([]);
   });
 
@@ -83,12 +81,12 @@ describe('toRoleHoverDetail', () => {
 
   it('prefers effective_config over the raw config', () => {
     // effective_config 是 defaults 叠上 config 的结果，卡片要用那份带继承的，
-    // 否则只覆盖了 role_md 的角色会把 num_ccs 这类继承来的值显示成空。
+    // 否则只覆盖了 role_md 的角色会把 skills 这类继承来的值显示成空。
     const role: RoleInfo = {
-      ...roleOf({ num_ccs: 2 }),
+      ...roleOf({ skills: ['tdd'] }),
       config: { role_md: '人格' },
     };
 
-    expect(toRoleHoverDetail(role).facts?.map((fact) => fact.value)).toContain('2');
+    expect(toRoleHoverDetail(role).facts?.map((fact) => fact.value)).toContain('tdd');
   });
 });

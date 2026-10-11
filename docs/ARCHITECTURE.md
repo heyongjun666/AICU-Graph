@@ -117,7 +117,7 @@ AICU-Graph 的核心运行服务由 `main.py` 启动，使用 `runtime/` 提供�
 | **事件投递生命周期** | Router 决策记录 + 投递状态 | `routed`（已决策未投递）→ `delivered`（已落盘）→ `consumed`（已消费）；`routed_to` = 决策目标列表 |
 | **AICU Router** | 独立路由决策：Event + 组织图 → 目标 Nodes（真实 LLM） | `runtime/router.py`；与 `structure_version` 绑定，结构变更自动重置会话 |
 | **Event→重激活桥** | 把投递给非运行态节点 inbox 的事件解释为"请求该节点行动" | `Scheduler._process_reactivation_events()` |
-| **AICU** | AI 执行引擎：把任务转成 Agent 提示词并编排多 peer（num_ccs） | `aicu.py` |
+| **AICU** | AI 执行引擎：把任务转成 Agent 提示词并驱动单个 CC 执行 | `aicu.py` |
 | **ClaudeCodeAgent** | 程序化封装 AI Coding CLI：多轮对话、超时杀进程 | `claude_code_agent.py` |
 | **Executable** | 可执行体抽象（Manager/Worker 是其子类），统一使用真实 AICU | `executables/base.py` `registry.py` |
 | **Session** | 一次独立的多会话运行（session_id + 独立 Runtime）| `runtime/session_manager.py` |
@@ -151,7 +151,7 @@ AICU-Graph 的核心运行服务由 `main.py` 启动，使用 `runtime/` 提供�
 │          executables/base.py / manager.py / worker.py / registry.py        │
 │          （负责：装配 Prompt → 调 AICU → 解析输出 → 状态回写）            │
 ├────────────────────────────────────────────────────────────────────────┤
-│ 引擎层    aicu.py（peer 编排） + claude_code_agent.py（CLI 封装）           │
+│ 引擎层    aicu.py（单 CC 执行） + claude_code_agent.py（CLI 封装）           │
 │          真实 CLI（由 AICU 配置驱动）                                      │
 │          测试 fake 仅通过测试代码显式注入                                  │
 └────────────────────────────────────────────────────────────────────────┘
@@ -195,7 +195,7 @@ AICU-Graph 的核心运行服务由 `main.py` 启动，使用 `runtime/` 提供�
   - `validate_plan(plan)`：结构校验（steps 非空、必填字段、exec_type 合法、step_id 唯一、depends_on 引用存在且无环、单层 worker ≤8）。
   - `create_retry_node`：**已废弃**，保留仅为兼容旧测试。
 - **PlanValidator（`plan_validator.py`）**：与 Planner 分离的**确定性机械校验器**，绝不进化成"第二个 Manager"：
-  - `validate_errors(plan, manager_roles, worker_roles)`：当前计划校验要求 `config.num_ccs ∈ {1,2,3,4}`、exec_type↔role 一致性（角色集由 RolesManager 提供）；`Step` 模型本身允许更大的 1–10 范围。
+  - `validate_errors(plan, manager_roles, worker_roles)`：当前计划校验检查 exec_type↔role 一致性（角色集由 RolesManager 提供）；`config` 里遗留的 `num_ccs` / `audit_rounds` 会被静默剥离。
   - `validate_warnings(plan)`：软告警（单层 6-8 个 worker → 建议分组）。
   - 协作路由不做任何结构校验（当前设计：目标由 Router LLM 决策，不再有 related_nodes / known_node_ids 跨 scope 引用校验）。
 
@@ -233,11 +233,11 @@ AICU-Graph 的核心运行服务由 `main.py` 启动，使用 `runtime/` 提供�
  > **Organization Graph 是唯一组织事实；Node 产生 EventMessage，包含 objective、intent、affected_roles、scope 和 action 等事件字段；AICU Router 在运行时根据 Event 与当前组织图用 LLM 决定交给哪些 Node；目标节点 inbox 中累计 3 个相关事件或最早事件滞留 1800 秒后，由 Scheduler 批量消费执行。**
 
 - **Router 是当前路由形态**：当前事件均由 `Event + Organization Graph → LLM Router → Targets` 处理，不依赖预声明的通信图。
-- **真实 AICU 执行**：Router 使用 AICU 实例（`num_ccs=1`，`{workspace_root}/router_cc/`）根据事件与组织图决定目标；测试替身仅通过 `aicu_instance` 显式注入。
+- **真实 AICU 执行**：Router 使用 AICU 实例（`{workspace_root}/router_cc/`）根据事件与组织图决定目标；测试替身仅通过 `aicu_instance` 显式注入。
 - **组织图快照是 Router 的唯一外部输入**：`_graph_snapshot` 只含路由决策所需的节点基本上下文（id/step_ref/exec_type/role/status/组织路径/task 摘要），不建立第二套索引体系。
 - **目标可为任意 Node**（Worker→Worker / Worker→Manager / Manager→Manager）——"Worker 发现问题超出职责、需要 Manager 重新规划"是自然协作；Scheduler 不解析事件语义、不校验目标角色（required_role 已删）。
 - **硬约束**：`route()` 不解析 `EventMessage` 中的任何"目标声明"（事件字段只描述事件本身）；`producer` 统一为 node_id（step_ref 仅经 `_resolve_producer_node` 兼容层解析）。
-- **Router 生命周期**：Router 复用一个独立 `num_ccs=1` AICU 和 `router_cc` workspace，但每次真正 `ask()` 前调用 `_reset_conversation()` 清空本地 conversation_id，下一次 CLI invocation 不携带旧 resume/session 参数；这不是重建 AICU，也不影响 Worker/Manager AICU。解析失败时额外 reset 并只重试一次；合法空 targets 不重试。
+- **Router 生命周期**：Router 复用一个独立 AICU 和 `router_cc` workspace，但每次真正 `ask()` 前调用 `_reset_conversation()` 清空本地 conversation_id，下一次 CLI invocation 不携带旧 resume/session 参数；这不是重建 AICU，也不影响 Worker/Manager AICU。解析失败时额外 reset 并只重试一次；合法空 targets 不重试。
 - **快照缓存**：`_graph_snapshot` 按 `graph_version` 缓存节点清单（图没变不扫全量节点）；`task` 截断 ~140 字。`structure_version` 仍记录组织结构变化供 trace 使用，状态变化会改变 `graph_version`，从而刷新快照中的状态字段，但不再额外触发第二次 conversation reset。
 - **目标解析**：`_parse_targets` 容忍 AI 返回 dict / JSON 字符串 / 含围栏文本；`step_ref` 经 `_resolve_node_id` 解析为 node_id（不存在的目标静默丢弃）。real 模式下 `AICU.ask()` 返回元数据 dict（`content`/`content_parsed`/`final_output_path`），先经 `_extract_targets_payload` 归一化再解析。
 
@@ -305,7 +305,7 @@ Shared FS（共享分区）是产物单一事实源。
 | `runtime/repo_paths.py` | `REPO_ROOT` 与 `resolve_repo_relative`（`~` 展开 / 绝对原样 / 相对按仓库根）—— 角色 yaml `skills_dir` 与 MCP 注册表路径共用的唯一一份实现 |
 | `runtime/persistence.py` | `graph.json` 快照的 save/load；graph_version 单调性 |
 | `runtime/sse_manager.py` | `SSEManager` 订阅 EventBus `"*"`，`deque(maxlen=10000, ttl=1800)`，微批合并（同 type <200ms 合并），`get_events_since`（空 → snapshot 回退）、`get_snapshot_event`、`get_stats`、`format_sse` |
-| `runtime/server.py` | `create_app(runtime, sse_manager)` 单会话 app：`CONFIG_WHITELIST{num_ccs,model,skills,audit_rounds,max_iterations}`、task≤5000、graph/manager/plan/stats、pause/resume/stop/clear、node CRUD + start/pause/stop/continue/task/delete/external-input、`/v1/logs`、`/v1/roles`、SSE `/v1/graph/events`（含 `/since/{seq}`，snapshot/catch-up、1s poll、15s keepalive） |
+| `runtime/server.py` | `create_app(runtime, sse_manager)` 单会话 app：`CONFIG_WHITELIST{model,skills,max_iterations}`、task≤5000、graph/manager/plan/stats、pause/resume/stop/clear、node CRUD + start/pause/stop/continue/task/delete/external-input、`/v1/logs`、`/v1/roles`、SSE `/v1/graph/events`（含 `/since/{seq}`，snapshot/catch-up、1s poll、15s keepalive） |
 | `runtime/session_server.py` | `create_session_app(session_manager)` 多会话 app：roles（list/schema/get/create/update）、skills（list/get/create/update）、sessions CRUD + settings（api_key_env 凭据检查）、graph（snapshot/link-candidates/pause/resume/stop/clear）、nodes（**手动建节点 create**/update/delete 级联 + control pause/**resume**/stop/continue/revise + **activity（cc_activity）**）、workspace/shared/results/artifact 浏览、edges add/delete（手动建依赖边）、**agent-events（事件日志查询）**、SSE per-session |
 
 ### 6.11 角色池导入 / 导出
@@ -401,15 +401,11 @@ Shared FS（共享分区）是产物单一事实源。
 
 ### 8.1 AICU（aicu.py）
 
-- **peer 模式由 `config.num_ccs` 决定**：
-  - `1` = solo（单 peer）；
-  - `2` = pair（双人协作：实现 + 交叉评审）；
-  - `3` = triple；
-  - `>=4` = full（并行生成 + 交叉评审 + adversarial 对抗 + audit 审计）。
+- **单 CC 执行（Solo）**：节点内只有一个 CC（`cc_0`），`ask()` / `ask_incremental()` 发起一次 CC 调用即出结果，没有节点内审查、修订、融合或审计；质量把关由 Manager 层审查与 Revise 承担。旧数据里的 `num_ccs` / `audit_rounds` 会被静默忽略。
 - **角色配置数据驱动**：加载 `roles/Manager|Worker/{role}.yaml` 覆盖 `default.yaml`；占位符 `{available_roles}` 展开；`{index_rules}` 由 `aicu.py::_index_rules` 展开为 `_INDEX.md` 只做导航的统一写法约束（只写文件清单 + 一句话用途，叙述内容放主文档），下游依赖提示词只读索引的清单部分。
-- **Sentinel 语义**：None 哨兵（num_ccs/model/cli_name/audit_rounds 未配置）vs `_UNSET` 哨兵（output_file/final_file/modular_output/generate_instruction 显式未提供）。
-- **`shared_target`**：canonical abs 路径；所有 CC（含多 CC 编排）直写同一共享分区，产物权威 = 分区本身。
-- **工作区结构**：`cc_0..cc_{N-1}/`，每个包含 `CLAUDE.md`（role_md）、**该 CLI 自己的**项目级
+- **Sentinel 语义**：None 哨兵（model/cli_name 未配置）vs `_UNSET` 哨兵（output_file/final_file/modular_output/generate_instruction 显式未提供）。
+- **`shared_target`**：canonical abs 路径；CC 直写共享分区，产物权威 = 分区本身。
+- **工作区结构**：`cc_0/`，每个包含 `CLAUDE.md`（role_md）、**该 CLI 自己的**项目级
   skill 目录软链（claude `.claude/skills/`、codebuddy `.codebuddy/skills/`、kimi
   `.agents/skills/`、codex `.agents/skills/`、qwen `.qwen/skills/`、pi `.pi/skills/`、
   gemini `.gemini/skills/`、cursor `.cursor/skills/`；claude 系另加 `--setting-sources
@@ -417,9 +413,9 @@ Shared FS（共享分区）是产物单一事实源。
   `CliAdapter.skills_workspace_dir` 声明，未声明的 CLI（grok/opencode）只告警不报错；
   pi 另需一份项目信任记录（`CliAdapter.skills_workspace_trust`），否则它的信任门禁会
   **静默**不加载项目 skill。
-  - `cc_N/{output_file}`、`review.json`、`vote_round_M.json`、`audit.json`；
+  - `cc_0/{output_file}`；
   - `parent/{final_file}`、`aicu_result.json`。
-- 协作产物：`vote_round_M.json`（peer 投票）、`review.json`（评审）、`audit.json`（审计），最终 `aicu_result.json`。
+- 最终产物：`aicu_result.json`。
 
 ### 8.2 ClaudeCodeAgent（claude_code_agent.py）
 
@@ -472,7 +468,7 @@ Shared FS（共享分区）是产物单一事实源。
 | 文件 | 职责 |
 |---|---|
 | `main.py` | **服务入口**：置 `真实 CLI 配置=real`，注册 Manager/Worker 到 ExecutableRegistry，创建 SessionManager + `create_session_app`，uvicorn 默认起 `127.0.0.1:8080`（`HOST`/`PORT` 可改），SIGINT/SIGTERM 优雅停机 |
-| `aicu.py` | **AI 执行引擎**：peer 编排（num_ccs）、角色配置加载、CC 工作区创建、single-writer 约束、vote/review/audit 产物管理 |
+| `aicu.py` | **AI 执行引擎**：单 CC 执行、角色配置加载、CC 工作区创建、single-writer 约束、结果产物管理 |
 | `claude_code_agent.py` | **AI Coding CLI 程序化封装**：多轮对话（--resume）、stdin 提示、超时 killpg、`CCExecutionError` |
 | `conftest.py` | pytest 根级 fixture（测试 fake、临时工作区等） |
 | `run_tests.py` | **自包含测试编排器**：源码定义并收集 144 个内部测试用例，执行后产出 `test_report.md`；不等于仓库全部 pytest/Vitest 测试 |
@@ -484,7 +480,7 @@ Shared FS（共享分区）是产物单一事实源。
 | `models.py` | **数据模型**：Node / Edge / EdgeType / ExecutionPlan / Step / EventMessage（10 个字段含事件描述和路由状态）/ RoutingDecision（activate/contexts/mark_terminal/reason）/ LogEntry / LogLevel / NodeStatus（含 `READY`）/ ManagerPhase / ErrorObject 等；`to_dict/from_dict` 序列化；Node 含 `cc_activity`/`pending_revise`/`activation_count`/`pending_context` |
 | `graph.py` | 内存图（Node+Edge + 邻接索引），`add_node/update_node/get_node/all_nodes/add_edge/remove_edge/dependencies/children`、`graph_version`（状态/结构都变）、`structure_version`（仅组织结构变更自增，Router 据此切换上下文）、`set_on_mutation` 变更回调 |
 | `planner.py` | 计划翻译和常规图构建的主要入口：`translate` / `translate_revision`（增量复用）/ `restore` / `rewind_parent_chain_for_retry` / `validate_plan` / `create_retry_node`（废弃）；Graph 仍公开提供底层变更方法 |
-| `plan_validator.py` | 确定性机械校验：num_ccs、exec_type↔role、软告警（不做任何通信关系校验） |
+| `plan_validator.py` | 确定性机械校验：exec_type↔role、软告警（不做任何通信关系校验） |
 | `state_machine.py` | 节点状态机：合法转移表、`IllegalTransitionError` |
 | `scheduler.py` | tick 调度循环：并发槽、激活、自动重试（原地+定时重试）、**事件→重激活桥**、`_activate_target`、协作预算/升级（C1） |
 | `router.py` | **AICU Router**：`route(event)` = 组织图快照 + prompt → LLM/桩 → `{"targets":[...]}` 解析；真实 AICU 执行；**生命周期**（复用单个独立 AICU、每次实际 ask 前 `_reset_conversation`，解析失败额外 reset 后只重试一次）、快照缓存、`_resolve_node_id`、real AICU 元数据归一化 |
@@ -558,7 +554,7 @@ MCP 联调 lab 角色使用 `roles/**/_mcp_lab_*.yaml` 命名，仅供仓库内�
 
 ```bash
 python3 -m pytest tests/test_planner.py              # 单文件
-python3 -m pytest tests/test_planner.py -k num_ccs   # 按名字筛
+python3 -m pytest tests/test_planner.py -k validate   # 按名字筛
 python3 -m pytest -x                                 # 第一个失败就停
 cd frontend && npx vitest run src/components/__tests__/NodeInspector.test.tsx
 ```
@@ -648,7 +644,7 @@ cd frontend && npx vitest run src/components/__tests__/NodeInspector.test.tsx
 | 改 Worker 一次任务的提示词装配 | `executables/worker.py`（`_build_worker_context`） |
 | 改依赖按需读取策略 | `executables/worker.py`（`_build_dependency_reading_instructions`） |
 | 改 CC 流式日志分流/日志粒度 | `executables/worker.py`（`_handle_cc_stream_output`）、环境变量 `AICU_NODE_LOG_STREAMING` |
-| 改 peer 协作模式（num_ccs） | `aicu.py`（策略选择 + 工作区结构） |
+| 改 AICU 单 CC 执行流程 | `aicu.py`（`_ask_solo` / `_finalize_result` + 工作区结构） |
 | 改 AI Coding CLI 的调用参数 | `claude_code_agent.py`（`_build_base_command` / `chat`） |
 | 换默认模型 | `claude_code_agent.py`（`model` 参数）、`main.py`、roles yaml |
 | 改测试 fake 行为 | `tests/` 中对应 fake |

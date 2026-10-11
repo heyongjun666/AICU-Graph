@@ -2,7 +2,7 @@
 tests/test_plan_validator.py — PlanValidator 确定性结构校验测试
 
 覆盖 V3.0 收尾 PlanValidator：
-  1. config.num_ccs 合法性（非 int / 越界 → error；1-4 → 通过）
+  1. 遗留 config 键（num_ccs / audit_rounds）静默剥除，不报错
   2. exec_type↔role 一致性（manager↔Manager 角色、worker↔Worker 角色；
      "default" 两类均合法；未提供角色集时跳过）
   3. 告警：worker 平铺 6-8 → warning；≤5 无；>8 → Planner 硬错误（MAX_DIRECT_WORKERS）
@@ -64,7 +64,7 @@ def _step(
 def _raw_step(step_id, **kw) -> SimpleNamespace:
     """绕过 Step 构造校验的裸步骤对象（用于测试 Validator 自身的防御逻辑）。
 
-    Step.__post_init__ 会拦截 num_ccs<1/>10/非 int 等值（构造期 ValueError），
+    Step.__post_init__ 会拦截部分脏值（构造期 ValueError / 剥除遗留键），
     但 Validator 是 Runtime 边界的第二道防线，须独立验证其对任何脏输入的判定。
     """
     base = {
@@ -85,32 +85,19 @@ def _plan(*steps) -> ExecutionPlan:
 
 
 # ============================================================================
-# 1. config.num_ccs 合法性
+# 1. 遗留 config 键（num_ccs / audit_rounds）静默剥除，不报错
 # ============================================================================
 
-class TestNumCcs:
-    def test_num_ccs_5_is_error(self):
-        """1-4 是 Manager 决策 7 的合法档位；5 虽通过 Step 构造（1-10）但 Validator 拒绝。"""
-        plan = _plan(_step("a", config={"num_ccs": 5}))
-        errors = validate_errors(plan)
-        assert any("num_ccs" in e for e in errors)
+class TestLegacyConfigKeys:
+    def test_legacy_keys_validate_and_are_stripped(self):
+        """多 CC 协作已移除：plan 里残留的 num_ccs/audit_rounds 不得导致校验失败，且不进 step.config。"""
+        step = _step("a", config={"num_ccs": 3, "audit_rounds": 2, "model": "m"})
+        assert "num_ccs" not in step.config
+        assert "audit_rounds" not in step.config
+        assert step.config == {"model": "m"}
+        assert validate_errors(_plan(step)) == []
 
-    def test_num_ccs_0_is_error(self):
-        plan = _plan(_raw_step("a", config={"num_ccs": 0}))
-        errors = validate_errors(plan)
-        assert any("num_ccs" in e for e in errors)
-
-    def test_num_ccs_string_is_error(self):
-        plan = _plan(_raw_step("a", config={"num_ccs": "2"}))
-        errors = validate_errors(plan)
-        assert any("num_ccs" in e for e in errors)
-
-    @pytest.mark.parametrize("valid", [1, 2, 3, 4])
-    def test_valid_num_ccs_passes(self, valid):
-        plan = _plan(_step("a", config={"num_ccs": valid}))
-        assert validate_errors(plan) == []
-
-    def test_missing_num_ccs_passes(self):
+    def test_missing_legacy_keys_passes(self):
         plan = _plan(_step("a"))
         assert validate_errors(plan) == []
 
@@ -255,10 +242,11 @@ class TestPlannerWiring:
             "add_edge": lambda *a: None,
         })())
 
-    def test_validate_plan_catches_num_ccs_out_of_range(self):
-        plan = _plan(_step("a", config={"num_ccs": 5}))
+    def test_validate_plan_accepts_legacy_config_keys(self):
+        plan = _plan(_step("a", config={"num_ccs": 5, "audit_rounds": 2}))
         errors = self._make_planner().validate_plan(plan)
-        assert any("num_ccs" in e for e in errors)
+        assert not any("num_ccs" in e or "audit_rounds" in e for e in errors)
+        assert plan.steps[0].config == {}
 
 
 class _TestExecutable(Executable):

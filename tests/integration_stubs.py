@@ -72,15 +72,10 @@ class SuccessStub(StubProtocol):
             "best_id": 0,
             "consensus_reached": True,
             "vote_rounds": 1,
-            "audit_defects": [],
-            "audit_passed": True,
-            "strategy": "pair (2CC: 生产+审查)",
             "role_config": {
                 "output_file": "solution.py",
                 "main_doc": None,
                 "index_file": "_INDEX.md",
-                "adversarial_role": "严格的审查专家...",
-                "audit_role": "深度审计专家...",
             },
         }
         self._chat_text = chat_text or json.dumps({
@@ -160,9 +155,6 @@ class FailureStub(StubProtocol):
             "best_id": 0,
             "consensus_reached": True,
             "vote_rounds": 1,
-            "audit_defects": [],
-            "audit_passed": True,
-            "strategy": "solo (1CC: 生成)",
             "role_config": {},
         }
 
@@ -233,9 +225,6 @@ class TimeoutStub(StubProtocol):
             "best_id": 0,
             "consensus_reached": True,
             "vote_rounds": 1,
-            "audit_defects": [],
-            "audit_passed": True,
-            "strategy": "solo (1CC: 生成)",
             "role_config": {},
         }
 
@@ -332,7 +321,7 @@ Error: ENOENT: no such file or directory, open '/path/to/nonexistent/file'
             return {
                 "final_output_path": "/tmp/stub_output/solution.py",
                 "scores": {0: 9.0},
-                # 缺少 consensus_reached / audit_passed 等字段
+                # 缺少 consensus_reached 等字段
             }
         elif self._output_mode == "error_stack":
             return {
@@ -342,9 +331,6 @@ Error: ENOENT: no such file or directory, open '/path/to/nonexistent/file'
                 "best_id": -1,
                 "consensus_reached": False,
                 "vote_rounds": 0,
-                "audit_defects": "CORRUPTED_DATA",  # 类型异常（应该是 list）
-                "audit_passed": False,
-                "strategy": "unknown",
                 "role_config": {},
             }
         else:
@@ -355,9 +341,6 @@ Error: ENOENT: no such file or directory, open '/path/to/nonexistent/file'
                 "best_id": 0,
                 "consensus_reached": True,
                 "vote_rounds": 1,
-                "audit_defects": [],
-                "audit_passed": True,
-                "strategy": "solo (1CC: 生成)",
                 "role_config": {},
             }
 

@@ -2220,13 +2220,13 @@ class Manager(Executable):
     ) -> tuple[list[dict], str]:
         """Review 输出格式失败（JSON 契约未满足、无任何判定）后的降级决策。
 
-        AICU 的审计字段只为**确实跑过审计**的策略（CC≥4）写入 —— 没有审计阶段
-        就不会伪造 `audit_passed=True`。以此区分三种情况：
+        AICU 不再产生审计字段；`audit_passed` / `audit_defects` 只会出现在旧版本
+        遗留的 aicu_result.json 或外部 stub 中，这里仍保持兼容。以此区分三种情况：
           - 显式 audit_passed=True 且无缺陷 → 无已知质量问题，降级为**全量通过**，
             让 Manager 完成（避免格式失败触发无意义重建循环）。
           - 显式 audit_passed=False 或有缺陷 → 存在已知问题但无法解析逐项评估，
             降级为**快速失败**（格式失败会反复复现，重建无法自愈，不再重建）。
-          - 无任何 audit 信号（CC<4 的结果、legacy stub / 异常 dict）→ 保持旧行为：
+          - 无任何 audit 信号（当前 AICU 的结果、legacy stub / 异常 dict）→ 保持旧行为：
             全量失败，status="parsed" 走正常迭代修复路径（submit_fix_plan）。
 
         Returns:

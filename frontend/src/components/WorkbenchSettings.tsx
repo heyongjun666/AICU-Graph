@@ -66,13 +66,8 @@ const emptyConfig: GlobalConfig = {
   model: null,
   api_base_url: null,
   api_key_env: null,
-  dynamic_num_ccs: true,
-  default_num_ccs: 1,
 };
 
-/** 单节点 agent 数量在关闭动态配置时的合法区间（与后端 plan_validator 对齐）。 */
-const NUM_CCS_MIN = 1;
-const NUM_CCS_MAX = 4;
 const MAX_CONCURRENCY_MIN = 1;
 const MAX_CONCURRENCY_MAX = 16;
 
@@ -94,12 +89,6 @@ function routeApiKeyEnv(route: ProviderRoute | undefined, preset: ProviderPreset
   return route?.auth_env || route?.api_key_env || preset?.api_key_env || null;
 }
 
-const clampNumCcs = (value: unknown): number => {
-  const parsed = Number.parseInt(String(value ?? ''), 10);
-  if (Number.isNaN(parsed)) return NUM_CCS_MIN;
-  return Math.min(NUM_CCS_MAX, Math.max(NUM_CCS_MIN, parsed));
-};
-
 const clampConcurrency = (value: unknown): number => {
   const parsed = Number.parseInt(String(value ?? ''), 10);
   if (Number.isNaN(parsed)) return MAX_CONCURRENCY_MIN;
@@ -108,7 +97,7 @@ const clampConcurrency = (value: unknown): number => {
 
 const ROLE_FIELD_SECTIONS: Record<string, string> = {
   summary: 'Identity', description: 'Identity', suitable_for: 'Identity', not_for: 'Identity',
-  num_ccs: 'Execution', model: 'Execution', cli_name: 'Execution', audit_rounds: 'Execution',
+  model: 'Execution', cli_name: 'Execution',
   skills_dir: 'Skills', skills: 'Skills', mcp: 'Skills',
   output_file: 'Output', final_file: 'Output', modular_output: 'Output', main_doc: 'Output', index_file: 'Output',
 };
@@ -124,7 +113,7 @@ const SECTION_KEYS: Record<string, string> = {
 
 function roleFieldSection(field: RoleField): string {
   return ROLE_FIELD_SECTIONS[field.name]
-    || (field.type === 'multiline' || field.name.includes('audit') || field.name.includes('review')
+    || (field.type === 'multiline'
       ? 'Instructions'
       : 'Advanced');
 }
@@ -843,8 +832,6 @@ const WorkbenchSettings: React.FC<WorkbenchSettingsProps> = ({ open, onClose, on
     setBusy(true); setError(''); setNotice('');
     try {
       await updateGlobalConfig({
-        dynamic_num_ccs: config.dynamic_num_ccs !== false,
-        default_num_ccs: clampNumCcs(config.default_num_ccs),
         max_concurrency: clampConcurrency(config.max_concurrency),
       });
       const message = t('settings.executionSaved');
@@ -1481,8 +1468,6 @@ const WorkbenchSettings: React.FC<WorkbenchSettingsProps> = ({ open, onClose, on
             )}
             {tab === 'workspace' && <div className="settings-section">
               <div className="section-heading"><div><h3>{t('settings.executionTitle')}</h3><p>{t('settings.executionDesc')}</p></div></div>
-              <label className="settings-toggle"><input type="checkbox" checked={config.dynamic_num_ccs !== false} onChange={(event) => setGlobal('dynamic_num_ccs', event.target.checked)} /><span>{t('settings.dynamicNumCcs')}</span><HelpTip text={t('settings.dynamicNumCcsHelp')} title={t('settings.dynamicNumCcs')} /></label>
-              {config.dynamic_num_ccs === false && <label>{t('settings.defaultNumCcs')}<input aria-label={t('settings.defaultNumCcs')} type="number" min={NUM_CCS_MIN} max={NUM_CCS_MAX} step={1} value={config.default_num_ccs ?? NUM_CCS_MIN} disabled={busy} onChange={(event) => setGlobal('default_num_ccs', clampNumCcs(event.target.value))} /><small>{t('settings.defaultNumCcsHelp', { min: NUM_CCS_MIN, max: NUM_CCS_MAX })}</small></label>}
               <label>
                 {t('settings.maxConcurrency')}
                 <input

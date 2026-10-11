@@ -32,7 +32,7 @@ function toStringList(value: unknown): string[] {
     .filter(Boolean);
 }
 
-/** 标量转成可显示的文本；数字要留（num_ccs: 2），null / undefined / 空串要丢掉。 */
+/** 标量转成可显示的文本；数字要留，null / undefined / 空串要丢掉。 */
 function toText(value: unknown): string | undefined {
   if (value === null || value === undefined) return undefined;
   const text = String(value).trim();
@@ -48,14 +48,12 @@ export function toRoleHoverDetail(role: RoleInfo): HoverCardDetail {
     { label: translate('hover.notFor'), items: toStringList(config.not_for), tone: 'negative' as const },
   ];
 
-  // 事实行：值取不到就整条不显示，而不是留一个「num_ccs: 」的空壳。
+  // 事实行：值取不到就整条不显示，而不是留一个「skills: 」的空壳。
   const facts = [
-    { label: translate('hover.numCcs'), value: toText(config.num_ccs) },
-    { label: translate('hover.auditRounds'), value: toText(config.audit_rounds) },
     { label: translate('hover.skills'), value: toStringList(config.skills).join(', ') || undefined },
   ].filter((fact): fact is { label: string; value: string } => Boolean(fact.value));
 
-  // role_md 是写进每个 CC 的 CLAUDE.md 的人格正文。Manager 角色常常是空串
+  // role_md 是写进 CC 的 CLAUDE.md 的人格正文。Manager 角色常常是空串
   // （通用组织者人格由运行时的骨架拼在前面），这时不留空块。
   const body = toText(config.role_md);
 

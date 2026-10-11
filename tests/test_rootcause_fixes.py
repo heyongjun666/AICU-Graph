@@ -234,7 +234,6 @@ class TestRealMetadataReviewContent:
             "scores": {"c1": 8.0},
             "audit_passed": True,
             "consensus_reached": True,
-            "strategy": "pair (2CC: 生产+审查)",
             "content": json.dumps(_review_contract(), ensure_ascii=False),
         }
         node, result = self._run_review(tmp_path, payload)

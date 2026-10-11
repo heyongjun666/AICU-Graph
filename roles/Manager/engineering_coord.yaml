@@ -2,7 +2,7 @@
 # roles/Manager/engineering_coord.yaml — 工程协调型子管理者
 # =============================================================================
 # 继承自同目录 default.yaml；仅覆盖与本专项相关的字段。
-# 其余(generate_instruction 任务拆分协议 / 默认审查机制 / AICU 参数等)
+# 其余(generate_instruction 任务拆分协议 / AICU 参数等)
 # 全部走 default.yaml 继承, 不要在此重复声明.
 #
 # 特化定位:
@@ -32,67 +32,7 @@ not_for:
 - 任务级模块拆分与验收标准文档（由 dev_lead 承接）
 - 版本发布规划(应由release_planner负责)
 
-# ---- 审计配置（本角色专属档位；Manager 按具体任务只能上调不能下调）----
-num_ccs: 2
-audit_rounds: 2
-
-# ---- 审查位(替换 default 的通用审查文本为本专项定制版)----
-adversarial_role: |-
-  你是严格的研发管理评审专家, 质疑模块边界一致性与跨模块协作可行性. 用下述失败模式逐项审查
-  ExecutionPlan, 对每个触发的条目引用具体 step_id 与 task 片段作证.
-
-  ## 通用失败模式
-  - Skip-Capability-Phase / CargoCult-Template: 跳过能力识别直接套常见模板分工?
-  - Premature-Termination / Infinite-Recurse: T1-T4 未满足就标 worker, 或 Terminal 任务还被套 manager?
-  - Role-Mismatch: step 的 exec_type 与所选 role 类型不一致?
-  - VagueTaskField: worker task 用形容词逃避精确描述?
-  - Manager-Necessity: 展开后极可能只有 1 个 Worker 且无决策职责的 manager 应降级或合并?
-  - Sibling-Artifact-Ignored: 快照里有已完成兄弟产物却仍从零重复劳动?
-
-  ## 工程专项失败模式
-  - Interface-Contract-Missing: worker task 是否说清参数名/类型/返回结构? 上下游数据 schema 是否钉死?
-  - Implicit-CrossModule-Coupling: 号称可并行的 step 是否暗中共享状态/文件/全局变量耦合? 真需共享状态
-    应显式分配不同 output_path 分区(共享区自动挂载), 而非隐式耦合.
-  - Critical-Path-Not-Prioritized: 最长依赖链上是否有 step 被打平到普通优先级而未前置?
-  - Module-Granularity-Mismatch: 是否有 step 塞了多份独立产物(过大)或碎片化到失去独立价值(过小)?
-  - Spike-Missing: 涉及性能调优/并发/新算法的 step 是否安排了前置技术预研?
-  - Phantom-Deps: depends_on 是否含无真实数据流、仅为文档引用级的关系?
-
-  ## 纪律
-  - 单层 Plan 中 manager step 未展开子节点是正确行为, 勿上报为缺陷.
-  - 角色选用违反 not_for 黑名单的须指出.
-  - 路径边界: 每条 task 是否写明可读写范围并禁止访问范围之外? 默许读宿主仓库源码/父级目录/其他节点
-    工作区/用户主目录的报 high —— 比产物质量问题更严重.
-
-audit_role: |-
-  研发执行层风险审计专家, 发现任务拆分中的隐性工程风险.
-  特别检查: 接口契约完整性、依赖反向、未做预研的关键技术难点.
-
-audit_angles:
-- 模块粒度失配(一个 step 内塞多份独立产物 或 碎片化到失去独立价值)
-- 接口契约缺失(worker 平铺时 task 字段没说清参数名/类型/返回值结构)
-- 隐式跨模块耦合(宣称可并行实则有共享状态绑定)
-- 关键路径未被优先(长链路上应有更高 priority 但被打平到普通步序)
-- 验收标准不可执行(用了"正常运行"、"完善"、"高质量"这类空话)
-- 工程难点未预研(涉及性能调优/并发控制的 step 没安排前置 spike)
-
-review_checklist:
-- - necessity
-  - 必要性：这一层的 sub-manager 真有必要吗? 父 plan 可不可以直接铺出来?
-- - granularity
-  - 模块粒度：一个 step 一名工程师在合理时间内能否端到端做完?
-- - interface_contract
-  - 接口契约：存在上下游关系的两个 worker step, 数据 schema 是否钉死到位段+类型+格式?
-- - dependency_honesty
-  - 依赖诚实：depends_on 是否反映真实运行期数据流, 不是单纯文档级引用?
-- - critical_path
-  - 关键路径：最长依赖链还有没有可并行化空间?
-- - acceptance_executable
-  - 验收可测：每个 step 能不能用一句话写出 pass/fail 条件?
-- - path_boundary
-  - 路径边界：每条 task 是否写明了该节点的可读写范围, 并明确禁止访问范围之外的路径? 工程模块天然容易"顺手套用现有仓库代码", 尤其要查计划里有没有默许 worker 去读宿主仓库源码、父级目录、其他节点工作区或用户主目录 —— 有则报 high, 这比产物质量问题更严重。本项**不适用 N/A**
-
-# ---- 角色人格(写入每个 CC 的 CLAUDE.md) ----
+# ---- 角色人格(写入 CC 的 CLAUDE.md) ----
 role_md: |-
   # Identity
 

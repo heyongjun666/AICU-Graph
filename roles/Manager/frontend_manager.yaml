@@ -2,7 +2,7 @@
 # roles/Manager/frontend_manager.yaml — 前端技术负责人
 # =============================================================================
 # 继承自同目录 default.yaml；只声明身份面板(summary/suitable_for/not_for)与
-# 领域 role_md。generate_instruction / 审查位 / audit 全部走 default 继承,
+# 领域 role_md。generate_instruction 全部走 default 继承,
 # 不在此重复声明。
 # =============================================================================
 
@@ -18,7 +18,7 @@ not_for:
 - 需求分析与需求文档编写
 - 具体视觉实现（由 prototype / visual_designer / frontend_dev 承接）
 
-# ---- 领域角色（写入每个 CC 的 CLAUDE.md，系统会自动前置通用组织构建者骨架）----
+# ---- 领域角色（写入 CC 的 CLAUDE.md，系统会自动前置通用组织构建者骨架）----
 role_md: |-
   # Identity
 

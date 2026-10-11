@@ -138,7 +138,9 @@ class TestReviseManagerNode:
             "node_status_changed", status_events.append
         )
 
-        rt.revise_manager_node(mgr_id, "Add pagination", config={"num_ccs": 3})
+        rt.revise_manager_node(
+            mgr_id, "Add pagination", config={"model": "revise-model", "num_ccs": 3}
+        )
 
         node = rt.graph.get_node(mgr_id)
         assert node.status == NodeStatus.WAITING
@@ -152,7 +154,9 @@ class TestReviseManagerNode:
         assert node.manager_phase == "expand"
         assert node.pending_revise is True
         assert node.task == "Add pagination"
-        assert node.config["num_ccs"] == 3
+        assert node.config["model"] == "revise-model"
+        # 遗留 num_ccs 被静默剥除（revise 不 ValueError）
+        assert "num_ccs" not in node.config
         assert node.activation_count == 0
         assert node.iteration_count == 0
         assert node.routing_history == []
@@ -281,7 +285,9 @@ class TestReviseWorkerNode:
         status_events = []
         rt.event_bus.subscribe("node_status_changed", status_events.append)
 
-        rt.revise_worker_node(child.id, "Add pagination", config={"num_ccs": 3})
+        rt.revise_worker_node(
+            child.id, "Add pagination", config={"model": "revise-model", "num_ccs": 3}
+        )
 
         node = rt.graph.get_node(child.id)
         assert node.status == NodeStatus.WAITING
@@ -293,7 +299,9 @@ class TestReviseWorkerNode:
         ), f"revise_worker_node 应发布 node_status_changed(Waiting); events={[e.payload for e in status_events]}"
         assert node.pending_revise is True
         assert node.task == "Add pagination"
-        assert node.config["num_ccs"] == 3
+        assert node.config["model"] == "revise-model"
+        # 遗留 num_ccs 被静默剥除（revise 不 ValueError）
+        assert "num_ccs" not in node.config
         assert node.activation_count == 1  # 复用即一次新的激活
         assert node.iteration_count == 0
         assert node.manager_phase is None
@@ -1162,7 +1170,7 @@ class TestReviseEndpoint:
 
         ok = session_client.post(
             f"/v1/sessions/{sid}/nodes/{root_id}/revise",
-            json={"task": "Add pagination", "config": {"num_ccs": 3}},
+            json={"task": "Add pagination", "config": {"model": "revise-model", "num_ccs": 3}},
         )
         assert ok.status_code == 200, ok.text
         assert ok.json()["status"] == "revising"
@@ -1172,6 +1180,8 @@ class TestReviseEndpoint:
         assert node.manager_phase == "expand"
         assert node.pending_revise is True
         assert node.task == "Add pagination"
+        assert node.config["model"] == "revise-model"
+        assert "num_ccs" not in node.config
 
         # 第二次 revise：当前 WAITING（非终态）→ 409
         again = session_client.post(

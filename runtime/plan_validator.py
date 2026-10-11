@@ -3,7 +3,6 @@ runtime/plan_validator.py — PlanValidator：ExecutionPlan 的确定性结构�
 
 职责边界（与 Manager/Reviewer 的分工）：
   - 确定性 / 机械规则 → 本模块（代码校验，绝不误报）
-      * config.num_ccs 合法性（若存在必须为 int ∈ {1,2,3,4}，Runtime 合法性校验，非资源分配）
       * exec_type ↔ role 一致性（角色集由 RolesManager.list_roles() 提供；未提供角色集时跳过）
   - 语义判断（集成 Worker 是否合理、Terminal 判据、Role 必要性、是否拆 Manager）→ 留在 Manager + Reviewer
 
@@ -16,7 +15,7 @@ runtime/plan_validator.py — PlanValidator：ExecutionPlan 的确定性结构�
 
 from typing import Optional
 
-from runtime.models import NUM_CCS_TIERS, ExecutionPlan
+from runtime.models import ExecutionPlan
 
 
 def validate_errors(
@@ -44,15 +43,6 @@ def validate_errors(
     for i, step in enumerate(plan.steps):
         prefix = f"step[{i}]"
         sid = step.step_id or "<no_id>"
-
-        # ---- config.num_ccs 合法性（Manager 的资源决策；此处仅做合法性校验） ----
-        num_ccs = (step.config or {}).get("num_ccs")
-        if num_ccs is not None:
-            if not isinstance(num_ccs, int) or num_ccs not in NUM_CCS_TIERS:
-                errors.append(
-                    f"{prefix} '{sid}': config.num_ccs must be an int in "
-                    f"{sorted(NUM_CCS_TIERS)} (got {num_ccs!r})"
-                )
 
         # ---- exec_type ↔ role 一致性 ----
         # 角色集来自 RolesManager.list_roles()；"default" 在两目录均存在，两类均合法。

@@ -421,8 +421,6 @@ class TestRealMode:
             "skills": ["review"],
             "skills_dir": "/tmp/skills",
             "skip_permissions": False,
-            # 单节点 agent 数量策略钉死后的值（runtime._apply_num_ccs_policy 写入）
-            "num_ccs": 1,
         })
         ctx = _make_context(node=node, runtime=runtime)
         monkeypatch.setattr(aicu_module, "AICU", CapturingAICU)
@@ -438,7 +436,9 @@ class TestRealMode:
         assert captured["skills"] == ["review"]
         assert captured["skills_dir"] == "/tmp/skills"
         assert captured["skip_permissions"] is False
-        assert captured["num_ccs"] == 1
+        # 多 CC 协作已移除：AICU 构造不再收 num_ccs / audit_rounds
+        assert "num_ccs" not in captured
+        assert "audit_rounds" not in captured
 
         captured["output_callback"]("stdout", "incremental output")
         assert runtime.status_updates[-1][2]["log_message"] == "incremental output"
@@ -754,55 +754,6 @@ class TestRoutingPromptDomainNeutral:
         assert "带 target 的事件" not in text
         assert "payload.feedback" not in text
         assert "payload.issues" not in text
-
-
-class TestParseAdversarialVoteFallback:
-    """_parse_adversarial_vote —— 结构化结论是唯一来源，没有结论即 None。
-
-    旧实现回退到 {"approved": False, "defects": [], ...}，那与「解析成功且无缺陷」
-    在下游不可区分：调用方只看 defects 是否为空，于是解析失败 = 审查通过。
-    现在解析失败返回 None，由调用方 fail-closed。仍然不做关键词推断——既不猜
-    approved，也不猜 defects。
-    """
-
-    @staticmethod
-    def _parsed(text):
-        a = aicu_module.AICU.__new__(aicu_module.AICU)
-        return a._parse_adversarial_vote(text)
-
-    def test_json_path_untouched(self):
-        """结构化 JSON 路径保持原样。"""
-        p = self._parsed(
-            '{"approved": false, "defects": [{"check": "c", "severity": "high"}], "summary": "s"}'
-        )
-        assert p["approved"] is False
-        assert len(p["defects"]) == 1
-        assert p["defects"][0]["severity"] == "high"
-
-    def test_pass_phrasing_returns_none(self):
-        """自由文本「全部通过」不构成结论：None 不是通过。"""
-        assert self._parsed("审查完成，所有检查项均通过。") is None
-
-    def test_defect_wording_not_inferred_defects(self):
-        """自由文本提到「严重缺陷」也不产出结构化 defects（不做关键词猜测）。"""
-        assert self._parsed("发现严重缺陷：模块 A 返回值错误，请修复。") is None
-
-    def test_json_without_required_keys_is_none(self):
-        """有 JSON 但缺 approved/defects 判据键 → 同样视为未给出结论。"""
-        assert self._parsed('{"summary": "已全部通过"}') is None
-
-    def test_example_payload_in_prose_does_not_hijack_verdict(self):
-        """散文先引用示例负载、结论在后 → 必须取结论而非示例（回归主用例）。"""
-        p = self._parsed(
-            '接口返回 {"message": "login success"} 后跳转首页。\n'
-            '审查结论：\n'
-            '{"approved": false, "defects": ['
-            '{"check": "鉴权", "description": "未校验 token", "severity": "high"}], '
-            '"summary": "s"}'
-        )
-        assert p is not None
-        assert p["approved"] is False
-        assert p["defects"][0]["severity"] == "high"
 
 
 class TestBuildResumeTaskBody:

@@ -113,11 +113,35 @@ class TestAddGetRole:
         )
         rm = RolesManager(str(tmp_path))
         r = rm.add_role(
-            "lead", role_type="worker", config={"summary": "L", "num_ccs": 3},
+            "lead", role_type="worker", config={"summary": "L", "model": "m2"},
         )
         assert r["config"]["summary"] == "L"
         assert r["effective_config"]["summary"] == "L"
         assert "schema" in r
+
+    def test_add_with_config_strips_legacy_fields(self, tmp_path):
+        """遗留字段（num_ccs/audit_rounds 等）静默剥除：不抛、不落盘、不进 config。"""
+        _write_role_yaml(
+            tmp_path, "worker", "default",
+            "summary: S\nmodel: m\nnum_ccs: 2\n",
+        )
+        rm = RolesManager(str(tmp_path))
+        r = rm.add_role(
+            "lead", role_type="worker",
+            config={"summary": "L", "num_ccs": 3, "audit_rounds": 2},
+        )
+        assert r["config"] == {"summary": "L"}
+        on_disk = (tmp_path / "Worker" / "lead.yaml").read_text(encoding="utf-8")
+        assert "num_ccs" not in on_disk
+        assert "audit_rounds" not in on_disk
+
+    def test_validate_config_ignores_legacy_fields(self, tmp_path):
+        _write_role_yaml(tmp_path, "worker", "default", "summary: S\n")
+        rm = RolesManager(str(tmp_path))
+        cleaned = rm.validate_config(
+            {"summary": "x", "num_ccs": "many", "audit_rounds": 9}, "worker"
+        )
+        assert cleaned == {"summary": "x"}
 
     def test_add_with_config_rejects_unknown_field(self, tmp_path):
         rm = RolesManager(str(tmp_path))  # 无 default.yaml → 目录为空
@@ -183,14 +207,16 @@ class TestRoleSchema:
     def test_field_type_derivation_and_hidden_fields(self, tmp_path):
         _write_role_yaml(
             tmp_path, "worker", "default",
-            "summary: S\nmodel: m\nnum_ccs: 2\nskills: [a]\n"
+            "summary: S\nmodel: m\nnum_ccs: 2\ncustom_limit: 2\nskills: [a]\n"
             "index_file: _INDEX.md\n",
         )
         _write_role_yaml(tmp_path, "worker", "dev", "role_md: |\n  Dev\n")
         schema = RolesManager(str(tmp_path)).get_role_schema("worker")
         assert schema["role_type"] == "worker"
         by_name = {f["name"]: f for f in schema["fields"]}
-        assert by_name["num_ccs"]["type"] == "number"
+        assert by_name["custom_limit"]["type"] == "number"  # int 默认值 → number
+        assert "num_ccs" not in by_name  # 遗留字段不进字段目录
+        assert "num_ccs" not in schema["defaults"]
         assert by_name["model"]["type"] == "text"
         assert by_name["skills"]["type"] == "list"
         assert by_name["role_md"]["type"] == "multiline"

@@ -747,6 +747,9 @@ class TestManagerReviewPhase:
 class _UnparseableAuditPassStub:
     """Review AICU：final_output_path 内容不可解析（产物回显），但 audit 通过。
 
+    audit_* 是旧版本 AICU 遗留的结果形态（现版本 AICU 不再产出）；Manager 的
+    降级路径仍需容忍它，所以这里手写旧形态 fixture。
+
     模拟真实 AICU 在 Review 阶段把产物代码回显到 plan_result 而非输出
     要求的 assessments JSON 契约（E2E 冒烟中的实际失败形态）。
     修复性重试同样返回不可解析产物，验证 Manager 走到审计降级路径。
@@ -766,7 +769,6 @@ class _UnparseableAuditPassStub:
             "audit_passed": True,
             "audit_defects": [],
             "consensus_reached": True,
-            "strategy": "pair (2CC: 生产+审查)",
         }
 
 

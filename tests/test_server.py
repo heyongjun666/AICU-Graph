@@ -30,11 +30,23 @@ class TestGraphEndpoints:
         resp = client.post("/v1/graph/manager", json={
             "task": "Build the project",
             "role": "architect",
-            "config": {"num_ccs": 2},
+            "config": {"model": "custom-model"},
         })
         assert resp.status_code == 201
         data = resp.json()
         assert "node_id" in data
+
+    def test_create_manager_legacy_config_keys_ignored(self, client):
+        """遗留 num_ccs/audit_rounds 静默剥除：不 4xx，也不进节点 config。"""
+        resp = client.post("/v1/graph/manager", json={
+            "task": "Build the project",
+            "config": {"num_ccs": 2, "audit_rounds": 2},
+        })
+        assert resp.status_code == 201, resp.text
+        graph = client.get("/v1/graph").json()
+        node = next(n for n in graph["nodes"] if n["id"] == resp.json()["node_id"])
+        assert "num_ccs" not in node["config"]
+        assert "audit_rounds" not in node["config"]
 
     def test_create_manager_defaults(self, client):
         resp = client.post("/v1/graph/manager", json={"task": "test"})

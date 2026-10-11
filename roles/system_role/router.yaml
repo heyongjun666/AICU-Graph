@@ -4,12 +4,6 @@
 # 职责边界（用户定稿）：Event + 当前 Organization Graph → LLM Router → Targets。
 # Event 是简短结构化多字段（objective/intent/affected_roles/scope/action），
 # 全部只是生产者的「参考信号」，不含路由指令；目标由 Router 从组织图中独立选择。
-#
-# 本角色与 Manager/Worker 的关键差异：review_checklist 是「路由专用」清单，
-# 逐项核对「目标覆盖完整性 / 精确性 / 节点真实性 / 契约对齐」，而非 Manager 的
-# 组织树审查清单（能力覆盖 / exec_type 标错 / 依赖合理性 …）。
-# 注意：路由默认 num_ccs=1（solo），而 solo 已硬删自审 —— 因此这份清单在 solo 下
-# 不会被渲染；仅在显式把路由升到 pair 模式时才生效。
 # =============================================================================
 
 summary: "事件路由器：根据事件的客观描述与组织图快照，决定事件应交由哪些节点处理"
@@ -73,34 +67,3 @@ generate_instruction: |-
   产出读取，多写的任何一个文件都会让本次路由结果作废。
   你不需要读取工作目录里的任何文件：事件与组织图都已完整给出。核对引文、比对措辞、
   清点节点都在回复正文里直接推理完成，不要落盘、不要跑脚本。
-
-# ---- 路由专用审查清单（仅 pair 模式审查位据此找缺陷；solo 已硬删自审，不渲染） ----
-review_checklist:
-- - producer_exclusion
-  - 生产者排除: 事件是否被路由回生产者自己（除非事件明确要求回环）
-- - target_coverage
-  - 目标覆盖完整性: 事件的客观描述（objective）与受影响角色（affected_roles）中「需要立即响应/行动」的节点是否都被包含？有无遗漏真正需要接收该事件并采取行动的执行节点？
-- - target_precision
-  - 目标精确性: 是否路由给了「职责相关但无需此刻行动」的节点（如下游尚未启动、或本事件不改变其当前任务的节点）？这类节点应移除。
-- - node_existence
-  - 节点真实性: targets 是否都真实存在于组织图中？有无臆造不存在的节点？
-- - contract_alignment
-  - 契约对齐: 涉及契约锚点（如 interface_contract.md）的事件，是否同时通知了契约的生产方与所有需要立即对齐的消费方（含跨前后端的消费方），且未拉入不需要此刻对齐的节点？
-- - scope_respect
-  - 范围合理性: 是否优先在建议范围（scope）内选择？越界时是否确有必须响应的节点落在范围外（而非随意扩大）？
-
-# ---- 审查位人格 ----
-adversarial_role: |-
-  严格审计事件路由决策的审查专家。逐项核对事件的客观描述（objective）、意图（intent）、
-  受影响角色（affected_roles）与组织图节点职责，判断 targets 是否精准：不漏掉任何需要
-  立即响应的下游节点，也不拉入职责相关但无需此刻行动的节点、不臆造节点、不遗漏跨前后端契约消费方、
-  不随意越过建议范围（scope）。
-
-# ---- 审计位人格与角度 ----
-audit_role: |-
-  事件路由风险审计专家，发现路由决策中的隐性缺陷。
-
-audit_angles:
-- Missing-Implementation: 事件涉及某个具体实现产出时，是否漏掉了真正负责该实现的 Worker（而只路由给了 Manager/coordinator）
-- Coordinator-Only: 是否把本应直达执行节点的事件只路由到了协调节点，导致无人真正执行
-- Contract-Consumer-Omission: 契约/接口变更事件是否遗漏了跨前后端的消费方

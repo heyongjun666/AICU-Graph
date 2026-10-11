@@ -1,7 +1,6 @@
 """Global (system-level) concurrency settings; all state lives under pytest tmp_path.
 
-``max_concurrency`` is a global config key, alongside ``dynamic_num_ccs`` /
-``default_num_ccs``: new sessions inherit it at creation, and changing it via
+``max_concurrency`` is a global config key: new sessions inherit it at creation, and changing it via
 ``update_global_config`` pushes the new limit to every already-running session's
 Runtime (``set_max_concurrency`` does not interrupt in-flight nodes). Sessions no
 longer hold their own limit, so a session-level ``max_concurrency`` is a no-op.
@@ -85,9 +84,8 @@ def test_update_global_config_pushes_to_every_session(manager_factory, limit):
 def test_session_level_max_concurrency_is_ignored(manager_factory):
     manager = manager_factory()
     # 创建时带 max_concurrency：被白名单丢弃，不报错，会话跟随全局默认。
-    handle = _create(manager, max_concurrency=9, num_ccs=2)
+    handle = _create(manager, max_concurrency=9)
     _assert_session(manager, handle, DEFAULT_MAX_CONCURRENCY)
-    assert handle.metadata.config.get("num_ccs") == 2
     # 会话级 PATCH 带 max_concurrency：同样静默丢弃。
     manager.update_settings(handle.metadata.id, {"max_concurrency": 3})
     _assert_session(manager, handle, DEFAULT_MAX_CONCURRENCY)
@@ -224,9 +222,12 @@ def test_concurrency_not_forwarded_to_node_config(session_client, session_manage
         json={"task": "No external execution", "exec_type": "worker", "config": {"num_ccs": 2}},
     )
     assert node.status_code == 201, node.text
+    # 遗留 num_ccs 被静默剥除（不 4xx、不落到节点 config）。
+    assert "num_ccs" not in node.json()["config"]
     assert "max_concurrency" not in node.json()["config"]
     runtime = session_manager.get_session(sid).runtime
     assert "max_concurrency" not in runtime.get_node(node.json()["id"]).config
+    assert "num_ccs" not in runtime.get_node(node.json()["id"]).config
     # 会话级来源的 max_concurrency 也不该漏进节点连接合并。
     assert _merge_session_connection({"max_concurrency": 8, "model": "deepseek-chat"}, {}) == {
         "_session_model": "deepseek-chat"

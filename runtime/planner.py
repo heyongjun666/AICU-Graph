@@ -406,7 +406,7 @@ class Planner:
           - step_id 唯一
           - depends_on 引用存在
           - depends_on 无循环依赖（拓扑排序检测）
-          - config.num_ccs 合法性（由 PlanValidator 补充）
+          - exec_type ↔ role 一致性（由 PlanValidator 补充）
 
         Args:
             plan: 待校验的 ExecutionPlan。
@@ -508,7 +508,7 @@ class Planner:
                     f"Group related workers under sub-manager nodes instead."
                 )
 
-        # PlanValidator 确定性结构校验（num_ccs 合法性）。
+        # PlanValidator 确定性结构校验。
         # 此处不提供角色集 → exec_type↔role 一致性由 Runtime 在图形变更前补充校验
         # （roles_dir 未注入时跳过，validate_plan 保持纯净）。
         errors.extend(validate_plan_structure(plan))

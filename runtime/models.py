@@ -62,21 +62,18 @@ MAX_TASK_LENGTH = 5000
 
 # 节点 config 允许出现的键。同样被 HTTP 边界与 Revise 路径共用；两处抛的异常类型
 # 有意不同（HTTPException vs ValueError），共用的是集合与错误文案模板。
-CONFIG_WHITELIST = {"num_ccs", "model", "skills", "audit_rounds", "max_iterations"}
+CONFIG_WHITELIST = {"model", "skills", "max_iterations"}
 
-# num_ccs 的**宽上界**（构造期兜底，防明显非法值建出 Step）。它与下面的
-# NUM_CCS_TIERS 不是一回事，两档并存是**有意设计**，不要合并：
-# tests/test_plan_validator.py 正是靠「num_ccs=5 能构造成功、再被 validator 判错」成立。
-_MIN_NUM_CCS = 1
-_MAX_NUM_CCS = 10
+# 已移除的节点 config 键（AICU 节点内多 CC 协作模式已删，只剩单 CC）。旧计划、旧 graph.json
+# 与旧前端回传里仍可能带着它们：静默剥离，不当作非法字段拒绝。
+LEGACY_CONFIG_KEYS = frozenset({"num_ccs", "audit_rounds"})
 
-# num_ccs 的**业务档位**（Manager 决策 7：1=简单 / 2=普通 / 3=重要 / 4=极高风险）。
-# plan 校验、运行时收敛、会话设置三处都读这一份 —— 各写一遍的话，改档位时
-# 漏掉的那处仍在按旧档位截断，表现为「Manager 按新档位产出、运行时悄悄压回 4」。
-NUM_CCS_TIERS = (1, 2, 3, 4)
 
-_MIN_AUDIT_ROUNDS = 0
-_MAX_AUDIT_ROUNDS = 10
+def strip_legacy_config(config: Optional[dict]) -> dict:
+    """返回去掉已移除键的 config 浅拷贝（None 视作空 dict）。"""
+    return {k: v for k, v in (config or {}).items() if k not in LEGACY_CONFIG_KEYS}
+
+
 # Node log 最大条目数
 _MAX_LOG_ENTRIES = 10000
 # Node task_history 最大条目数（超出的丢最旧，与 log 的 FIFO 口径一致）。
@@ -120,8 +117,14 @@ def superseded_task_history(
 
 
 def non_whitelisted_config_keys(config: Optional[dict]) -> set:
-    """返回 config 里不在 ``CONFIG_WHITELIST`` 中的键。空/None 视作无越界键。"""
-    return {k for k in (config or {}) if k not in CONFIG_WHITELIST}
+    """返回 config 里不在 ``CONFIG_WHITELIST`` 中的键。空/None 视作无越界键。
+
+    ``LEGACY_CONFIG_KEYS`` 不算越界（由调用方用 ``strip_legacy_config`` 剥掉）。
+    """
+    return {
+        k for k in (config or {})
+        if k not in CONFIG_WHITELIST and k not in LEGACY_CONFIG_KEYS
+    }
 
 
 def task_too_long_message(length: int) -> str:
@@ -453,24 +456,7 @@ class Step:
                 stacklevel=2,
             )
             self.task = self.task[:MAX_TASK_LENGTH]
-
-        # config.num_ccs 范围 1-10
-        num_ccs = self.config.get("num_ccs")
-        if num_ccs is not None:
-            if not isinstance(num_ccs, int) or num_ccs < _MIN_NUM_CCS or num_ccs > _MAX_NUM_CCS:
-                raise ValueError(
-                    f"config.num_ccs must be between {_MIN_NUM_CCS} and {_MAX_NUM_CCS} "
-                    f"(got {num_ccs})"
-                )
-
-        # config.audit_rounds 范围 0-10
-        audit_rounds = self.config.get("audit_rounds")
-        if audit_rounds is not None:
-            if not isinstance(audit_rounds, int) or audit_rounds < _MIN_AUDIT_ROUNDS or audit_rounds > _MAX_AUDIT_ROUNDS:
-                raise ValueError(
-                    f"config.audit_rounds must be between {_MIN_AUDIT_ROUNDS} and {_MAX_AUDIT_ROUNDS} "
-                    f"(got {audit_rounds})"
-                )
+        self.config = strip_legacy_config(self.config)
 
 
 @dataclass
@@ -629,6 +615,9 @@ class Node(_JsonSerializable):
         """初始化后处理：string→enum 转换 + log FIFO 裁剪。"""
         if isinstance(self.status, str):
             self.status = NodeStatus(self.status)
+        # 旧 graph.json 里的已移除键（num_ccs/audit_rounds）静默丢弃
+        if isinstance(self.config, dict):
+            self.config = strip_legacy_config(self.config)
         # FIFO 裁剪 log 至 _MAX_LOG_ENTRIES 条
         if len(self.log) > _MAX_LOG_ENTRIES:
             self.log = self.log[-_MAX_LOG_ENTRIES:]

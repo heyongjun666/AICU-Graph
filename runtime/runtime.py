@@ -28,7 +28,6 @@ from runtime.graph import DependencyError, Graph
 from runtime.handoff import fresh_session_fields
 from runtime.models import (
     MAX_TASK_LENGTH,
-    NUM_CCS_TIERS,
     Edge,
     EdgeType,
     ExecutionPlan,
@@ -39,6 +38,7 @@ from runtime.models import (
     Step,
     non_whitelisted_config_keys,
     non_whitelisted_config_message,
+    strip_legacy_config,
     superseded_task_history,
     task_too_long_message,
 )
@@ -118,8 +118,6 @@ class Runtime(RuntimeGateway, SchedulerDelegate):
         candidate_roles: Optional[Sequence[str]] = None,
         router_aicu_instance: Optional[Any] = None,
         router_config: Optional[dict[str, Any]] = None,
-        dynamic_num_ccs: Optional[bool] = None,
-        default_num_ccs: Optional[int] = None,
     ):
         self.max_concurrency = validate_max_concurrency(max_concurrency)
         self.workspace_root = workspace_root or os.getcwd()
@@ -128,13 +126,6 @@ class Runtime(RuntimeGateway, SchedulerDelegate):
         self.shared_workspace = (
             os.path.abspath(shared_workspace) if shared_workspace else None
         )
-
-        # 单节点 agent（CC）数量策略（session 级，由全局设置注入）：
-        #   dynamic_num_ccs=True  → 维持现状，由 Manager 规划决定每个节点的数量；
-        #   dynamic_num_ccs=False → 所有节点一律钉死为 default_num_ccs。
-        # None 归一为「动态 + 默认 1」，保证旧调用方与 legacy server 行为不变。
-        self.dynamic_num_ccs = True if dynamic_num_ccs is None else bool(dynamic_num_ccs)
-        self.default_num_ccs = self._clamp_num_ccs(default_num_ccs)
 
         # 会话候选角色池（session 级，由会话 config 注入）：
         # 绑定后该会话的 Manager 只看到池内角色的摘要（见 roles_manager.build_available_roles_text）。
@@ -367,7 +358,7 @@ class Runtime(RuntimeGateway, SchedulerDelegate):
         config: Optional[dict],
         parent_id: Optional[str] = None,
     ) -> dict:
-        prepared = dict(config or {})
+        prepared = strip_legacy_config(config)
         if parent_id:
             parent = self.graph.get_node(parent_id)
             if parent is None:
@@ -423,38 +414,6 @@ class Runtime(RuntimeGateway, SchedulerDelegate):
         if prepared.get("events") is not None:
             prepared["events"] = self._normalize_events_config(prepared["events"])
 
-        # ---- 单节点 agent 数量策略（Session 级 · 最后收口） ----
-        # 必须放在最后：无条件压过 plan 传入值、Manager 角色 YAML 的 num_ccs
-        # 以及手动节点传入值。开关开启时原样返回，行为与改动前完全一致。
-        return self._apply_num_ccs_policy(prepared)
-
-    # ========================================================================
-    # 单节点 agent（CC）数量策略
-    # ========================================================================
-
-    @staticmethod
-    def _clamp_num_ccs(value: Optional[int]) -> int:
-        """把 num_ccs 收敛到合法区间；None/非法值回退为 1。
-
-        区间从 ``models.NUM_CCS_TIERS`` 派生，不写死 1/4：这里的注入发生在 plan 校验
-        之后，属于校验盲区，必须自行兜底（num_ccs=0 会让 AICU 建出零个 CC）；
-        而两处各写一份区间的话，改档位时会漏掉这里 —— 表现是「Manager 按新档位产出、
-        运行时被悄悄压回旧上界」，且不报错。
-        """
-        try:
-            parsed = int(value) if value is not None else 1
-        except (TypeError, ValueError):
-            parsed = 1
-        return min(max(NUM_CCS_TIERS), max(min(NUM_CCS_TIERS), parsed))
-
-    def _apply_num_ccs_policy(self, config: Optional[dict]) -> dict:
-        """开关关闭时把所有节点的 num_ccs 统一钉死为 ``default_num_ccs``。
-
-        开关开启（默认）时原样返回浅拷贝，不做任何改动。
-        """
-        prepared = dict(config or {})
-        if not self.dynamic_num_ccs:
-            prepared["num_ccs"] = self.default_num_ccs
         return prepared
 
     # ========================================================================
@@ -981,9 +940,7 @@ class Runtime(RuntimeGateway, SchedulerDelegate):
             if step.config:
                 merged = dict(child.config or {}) if child is not None else {}
                 merged.update(step.config)
-                # 修复 step 若带 num_ccs 会压掉已钉死的值；本路径同样不走
-                # _prepare_node_config，需自行套用策略。
-                updates["config"] = self._apply_num_ccs_policy(merged)
+                updates["config"] = merged
             self.scheduler.reactivate(
                 child.id,
                 target_status=NodeStatus.READY,
@@ -1511,6 +1468,7 @@ class Runtime(RuntimeGateway, SchedulerDelegate):
         extra = non_whitelisted_config_keys(config)
         if extra:
             raise ValueError(non_whitelisted_config_message(extra))
+        config = strip_legacy_config(config)
         node = self._require_node(node_id)
         if node.exec_type != expected_exec_type:
             raise ValueError(
@@ -1550,9 +1508,6 @@ class Runtime(RuntimeGateway, SchedulerDelegate):
             node, merged_config = self._validate_revise_request(
                 node_id, task, config, "manager"
             )
-            # 本路径不走 _prepare_node_config（直接写回 graph），需自行套用策略，
-            # 否则开关关闭后 revise 会把节点重新放大回 Manager 规划值。
-            merged_config = self._apply_num_ccs_policy(merged_config)
             pending_context = {
                 "collaboration_type": "revise",
                 "original_task": node.task,

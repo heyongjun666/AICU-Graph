@@ -143,14 +143,12 @@ export interface NodeConfig {
   api_key_env?: string;
   provider_id?: string | null;
   skip_permissions?: boolean;
-  num_ccs?: number;
   skills?: string[];
   /**
    * 会话候选角色池：绑定后该会话的 Manager 只看到池内角色的摘要（严格模式，面板 == 池）。
    * 空数组/缺省 = 未绑定 → 看到全部角色。存的是角色 id 快照，不是池 id。
    */
   candidate_roles?: string[];
-  audit_rounds?: number;
   max_iterations?: number;
   [key: string]: unknown;
 }
@@ -220,10 +218,6 @@ export interface GlobalConfig {
   api_key_env: string | null;
   provider_id?: string | null;
   language?: 'zh' | 'en';
-  /** 单节点 agent 数量是否由 Manager 动态规划（false = 全部节点使用 default_num_ccs）。 */
-  dynamic_num_ccs?: boolean;
-  /** dynamic_num_ccs=false 时所有节点统一的 agent 数量，取值 1–4。 */
-  default_num_ccs?: number;
   /** 系统级最大同时运行节点数，取值 1–16，跨会话生效。 */
   max_concurrency?: number;
 }

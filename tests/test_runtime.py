@@ -375,7 +375,7 @@ class TestSubmitRootManager:
         node_id = runtime.submit_root_manager(
             task="Build the project",
             role="architect",
-            config={"num_ccs": 2},
+            config={"model": "custom-model", "num_ccs": 2},
         )
         assert node_id is not None
         node = runtime.graph.get_node(node_id)
@@ -385,7 +385,9 @@ class TestSubmitRootManager:
         assert node.role == "architect"
         assert node.task == "Build the project"
         # config 会附加内部 workspace 元数据（_workspace_root/_workspace_relpath）
-        assert node.config["num_ccs"] == 2
+        assert node.config["model"] == "custom-model"
+        # 遗留 num_ccs 被静默剥除（不报错、不入 node.config）
+        assert "num_ccs" not in node.config
         assert node.config["_workspace_root"]
         assert node.config["_workspace_relpath"].startswith("nodes/")
 

@@ -21,11 +21,8 @@
 # ---- 角色选择结构化元数据 ----
 summary: "通用组织构建者：将目标拆解为合理的执行组织树，识别所需 Capability 并映射到合适的角色"
 
-# ---- AICU 初始化参数 ----
-num_ccs: 2                # Manager 用 Pair 模式（生成 + 独立审查），计划质量是全局杠杆
 # model: 默认跟随系统设置（解析：节点显式 > 角色显式 > 系统设置 > CLI 默认，无代码兜底）
 cli_name: null
-audit_rounds: 2
 
 # ---- 产出文件 ----
 output_file: null
@@ -104,7 +101,7 @@ generate_instruction: |-
   ## 决策工作流 (Decision Policy)
 
   每次收到 task 必须严格按下列顺序完成思考后再产出 JSON. **这是决策规则, 不是教程** —— 跳过任何
-  一步都会在后续 CC 审查中被标记缺陷.
+  一步都会在后续审查中被标记缺陷.
 
   ### 决策 0 · 增量续跑 (Revise · 仅当收到「可复用候选节点」块时执行)
 
@@ -239,18 +236,7 @@ generate_instruction: |-
     发布 content 事件携带上下文, Router 自动决定重激活协作方. 该机制适用于任何领域和角色的节点对
     (产出者↔评审者、执行者↔验收者).
 
-  ### 决策 7 · 资源分配 (num_ccs)
-
-  按任务重要性/错误代价/下游影响范围为每个 step 设置 `config.num_ccs`:
-
-  - `1` = 简单、低风险、机械性任务(如文档汇总、简单检查、打包交付)(**默认选择**)
-  - `2` = 普通任务
-  - `3` = 重要决策、关键路径或高影响任务
-  - `4` = 极高风险、错误代价极高的关键任务(如核心方向选型、关键方案设计)
-
-  规则: 无明显理由时使用默认值 `1`; 不为了增加审查而盲目提高; 由任务的实际影响半径决定, 不由角色名称决定.
-
-  ### 决策 8 · 组织反问 (Anti-OverOrganization + Anti-Flattening + Anti-OverSerialization)
+  ### 决策 7 · 组织反问 (Anti-OverOrganization + Anti-Flattening + Anti-OverSerialization)
 
   把任意 node 标为 exec_type="manager" 后, 必须补问并诚实回答:
 
@@ -305,7 +291,7 @@ generate_instruction: |-
           "role": "<from available_roles>",
           "task": "<capability 描述(manager) / actionable 指令(worker)>",
           "task_summary": "<~100字职责摘要, 供路由匹配>",
-          "config": {"num_ccs": 1},
+          "config": {},
           "depends_on": ["<step_id>", ...],
           "reuse_step_ref": "<既有子节点 step_ref 或省略>"
         }
@@ -334,7 +320,7 @@ generate_instruction: |-
     例如 `负责某项成果的具体产出` 或 `验证多个成果之间的一致性并输出验收报告`;
     反例(过于笼统, 会导致路由命中不到): `完成主要部分`、`做检查`、`完善细节`. 复用节点(reuse_step_ref)
     不填(职责沿用原节点).
-  - config: 按决策 7 设置 num_ccs; 可覆盖 model/skills/audit_rounds; 共享工作区为**会话级自动挂载**
+  - config: 可覆盖 model/skills; 共享工作区为**会话级自动挂载**
     (无需声明 shared_workspace 组), 只需为分工分配 `output_path="<分区>"`(默认给 Worker 分配具体分区;
     空串 ""= 全局写高权限, 仅在确实需要时使用); output_path **不**产生执行顺序约束(顺序仍用 depends_on);
     事件协作**无需声明**(发布默认开启, 见决策 6); 可选 `sibling_artifacts` 外部输入复用列表;
@@ -351,7 +337,7 @@ generate_instruction: |-
   1. 仅输出纯 JSON 文本, 无 markdown 围栏/表格/列表, 无任何额外解释文字;
   2. step_id 唯一; depends_on 引用的每个 id 都必须存在于当前 steps;
   3. role 只从可用角色列表取值, 且遵守 exec_type="manager" ↔ Manager 角色、exec_type="worker" ↔ Worker 角色的类型一致性;
-  4. 每个 step 的 exec_type 选择严格遵守决策 1-8 及 T1-T4 判据与组织反问约束;
+  4. 每个 step 的 exec_type 选择严格遵守决策 1-7 及 T1-T4 判据与组织反问约束;
   5. steps 不得为空 —— 唯一例外是增量续跑(决策 0 ①)判定本轮无需本子树行动, 此时输出空 steps 并附 reason;
   6. 最终只输出纯 JSON 文本无 markdown 围栏无解释文字.
 
@@ -367,54 +353,6 @@ generate_instruction: |-
   ✗ 是否有可独立并行的能力被错误串行合并? → Over-Serialization
   ✗ worker task 是否足够具体可独立执行? → VagueTask
   ✗ 是否有 task 未写明可读写范围, 或计划本身默许了访问工作区之外的路径? → Path-Overreach
-
-# ---- 审查位 ----
-adversarial_role: |-
-  严格审计执行组织树。按 audit_angles + review_checklist 逐项审查，重点关注能力缺失、exec_type 错标、不必要的 Manager 冗余。
-  注意: exec_type=manager 的节点在单层 Plan 中不展开子节点是正确行为，勿将其视为缺陷。
-
-audit_role: |-
-  执行组织风险审计专家, 发现组织结构中的隐性缺陷.
-  重点检查: 跨 Capability 衔接处的契约缺失、循环依赖或反向倒挂、过度深度导致管理开销超过收益等问题.
-
-audit_angles:
-- Manager-Necessity: exec_type=manager 的节点若展开后最可能只含 1 个 Worker 且无实质决策职责, 应建议降级或合并
-- Over-Deep-Manager: 明显已是 Terminal Action 还被标为 manager 形成冗余层级
-- VagueTask: worker 的 task 字段含糊("完善一下"/"做好看点"/"按需调整")未被识破
-- Missing-Coordination-Anchor: 有依赖/协作关系的节点，其 task 是否引用了同一个上游规格文档或共享契约作为协作锚点？若各节点的 task 各自独立未提及对齐目标，则协作将失败
-- Recursion-区分: 区分"冗余递归"(真缺陷)与"合法的单层 Manager 占位"(组织树标准写法), 后者不应上报
-- Over-Serialization: 是否有可独立并行的能力(评判/验收/整理/交付准备)被错误串行合并到单一 Manager 分支, 本可并行推进却被排到链尾?
-- 其他维度的审查覆盖见下方 review_checklist
-
-review_checklist:
-- - capability_coverage
-  - 能力完整性：达成本目标所需的关键 Capability 有没有遗漏?
-- - role_coverage
-  - 角色覆盖完整性：可用角色列表中, 有哪些角色的 suitable_for 覆盖了本任务**实际需要**的 Capability 却被遗漏? (仅领域语义重叠但任务不需要该能力 → 不算遗漏) → Missing-Role
-- - boundary_correctness
-  - 边界正确性：每个 step 的 exec_type 是否真实反映它是 Capability 还是 Terminal Action? (注意不要把"manager step 未在本 Plan 内展开子节点"误判为缺陷)
-- - honest_termination
-  - 终止诚实性：标记为 worker 的 step 是否真同时满足 T1-T4?
-- - dependency_soundness
-  - 依赖合理性：depends_on 表达的是运行期实质前置约束还是仅文档级的松散关联?
-- - parallelism
-  - 并行性：是否将可独立并行的能力(评判/验收/整理/交付准备)错误串行合并到单一 Manager 分支? 是否本可并行推进却被排到链尾拉长交付路径?
-- - tree_balance
-  - 子树均衡度：不同分支最大深度差距是否过大?
-- - role_alignment
-  - 角色贴合度：所选 role 是否落在其 suitable_for 范围内且不被 not_for 否决?
-- - reuse_awareness
-  - 复用意识：有无可利用的已完成兄弟产物?若有则本Plan是否显式引入?
-- - workspace_group_correctness
-  - 共享组正确性：需要互读真实文件/协作的 worker 是否都分配到明确 output_path 分区? 同一非空分区是否被多个节点声明(冲突)? output_path 是否含穿越(绝对路径/..段)?
-- - shared_consistency_check
-  - 跨模块一致性：跨模块接口/schema/配置对齐是否由 QA/reviewer 节点验证共享分区真实产物, 而非创建专门聚合节点?
-# 注意: review_checklist 的**描述行必须用全角冒号「：」**, 不能用半角 ": "。
-# 半角会让 YAML 把这一项解析成映射而非字符串, 于是 aicu.py:1223 的 `for name, desc in`
-# 拿到的 desc 是 dict, 渲染进审查提示词的会是 {'能力完整性': '...'} 这样的 Python 字面量。
-# 全文件所有条目均已按此约定改写, 新增条目请照做。
-- - path_boundary
-  - 路径边界：每条 task 是否写明了该节点的可读写范围, 并明确禁止访问范围之外的路径? 计划中若有任何指示或默许去读宿主仓库、父级目录、其他节点的工作区或用户主目录的内容, 报 high —— 这比产物质量问题更严重。本项**不适用 N/A**, 任何计划都必须为每个节点划定边界
 
 # ---- 领域角色（可编辑） ----
 # Manager 的 role_md 现在只承载「领域角色」部分（如「项目组长，负责组织各成员工作」）。

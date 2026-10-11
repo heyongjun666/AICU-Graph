@@ -35,7 +35,7 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 # ============================================================================
 
 
-def _make_aicu(tmp_path, role="code", num_ccs=1, shared_root=None,
+def _make_aicu(tmp_path, role="code", shared_root=None,
                shared_target=None, mcp=None, role_type="worker"):
     """离线构造带真实 Session Shared Workspace 布局的 AICU。
 
@@ -48,7 +48,6 @@ def _make_aicu(tmp_path, role="code", num_ccs=1, shared_root=None,
         role_type=role_type,
         role=role,
         parent_workspace=str(node_ws),
-        num_ccs=num_ccs,
         skills=[],          # 跳过 skills_dir 校验
         modular_output=True,
         output_file=None,
@@ -347,10 +346,9 @@ class TestNoteIsDelivered:
     """
 
     @staticmethod
-    def _with_note(tmp_path, num_ccs=1):
+    def _with_note(tmp_path):
         sh = tmp_path / "workspace" / "shared"
-        aicu = _make_aicu(tmp_path, num_ccs=num_ccs, shared_root=sh,
-                          shared_target=sh / "impl")
+        aicu = _make_aicu(tmp_path, shared_root=sh, shared_target=sh / "impl")
         aicu._mcp_capability_note = f"{NOTE_HEAD}\n\n- lab：probe_echo"
         return aicu
 
@@ -377,26 +375,6 @@ class TestNoteIsDelivered:
         sent = sends[aicu.ccs[0]][0]
         assert NOTE_HEAD in sent
         assert "增量需求" in sent
-
-    def test_review_path_carries_note(self, tmp_path):
-        """审查位（_pair_review）走自己的 prompt 构造，不走 _build_generation_prompt。"""
-        aicu = self._with_note(tmp_path, num_ccs=2)
-        sends = _capture_sends(aicu)
-
-        aicu._pair_review("原始问题", aicu.ccs[1])
-
-        sent = sends[aicu.ccs[1]][0]
-        assert NOTE_HEAD in sent
-        assert "审查" in sent
-
-    def test_audit_path_carries_note(self, tmp_path):
-        """审计位（_full_audit）用 self.ccs[3]。"""
-        aicu = self._with_note(tmp_path, num_ccs=4)
-        sends = _capture_sends(aicu)
-
-        aicu._full_audit("原始问题")
-
-        assert NOTE_HEAD in sends[aicu.ccs[3]][0]
 
     def test_retry_branch_keeps_note(self, tmp_path, monkeypatch):
         """读图恢复重试会**整体替换** prompt ⇒ 块必须挂在 cc.chat() 调用点。

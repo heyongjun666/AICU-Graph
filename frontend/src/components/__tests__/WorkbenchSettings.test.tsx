@@ -38,25 +38,22 @@ vi.mock('../../utils/api', () => ({
 
 const fieldNames = [
   'summary', 'description', 'suitable_for', 'not_for',
-  'num_ccs', 'model', 'cli_name', 'audit_rounds',
+  'model', 'cli_name',
   'skills_dir', 'skills', 'output_file', 'final_file',
   'modular_output', 'main_doc', 'index_file', 'generate_instruction',
-  'revise_instruction', 'review_checklist', 'adversarial_role',
-  'audit_role', 'audit_angles', 'role_md',
+  'role_md',
 ];
 
 const fields: RoleField[] = fieldNames.map((name) => ({
   name,
   label: name.replace(/_/g, ' '),
-  type: ['suitable_for', 'not_for', 'skills', 'review_checklist', 'audit_angles'].includes(name)
+  type: ['suitable_for', 'not_for', 'skills'].includes(name)
     ? 'list'
-    : name === 'num_ccs' || name === 'audit_rounds'
-      ? 'number'
-      : name === 'modular_output'
-        ? 'boolean'
-        : name.includes('instruction') || ['adversarial_role', 'audit_role', 'role_md'].includes(name)
-          ? 'multiline'
-          : 'text',
+    : name === 'modular_output'
+      ? 'boolean'
+      : name.includes('instruction') || name === 'role_md'
+        ? 'multiline'
+        : 'text',
   default: null,
   has_default: !['description', 'main_doc', 'index_file'].includes(name),
 }));
@@ -103,13 +100,13 @@ describe('WorkbenchSettings roles form', () => {
     await waitFor(() => expect(api.getRoleSchema).toHaveBeenCalledWith('worker'));
     fireEvent.click(screen.getByText('角色'));
 
-    expect(await screen.findByText('该角色类型支持 22 个字段。仅覆盖该角色所需的值。')).toBeDefined();
+    expect(await screen.findByText('该角色类型支持 15 个字段。仅覆盖该角色所需的值。')).toBeDefined();
     // 未选中任何角色时是空闲态，只给一句提示；表单要点了「新建角色」才出现。
     fireEvent.click(screen.getByText('新建角色'));
     expect(screen.getByText('main_doc')).toBeDefined();
     expect(screen.getByText('index_file')).toBeDefined();
     expect(screen.getAllByText('description')).toHaveLength(2);
-    expect(container.querySelectorAll('.role-field')).toHaveLength(22);
+    expect(container.querySelectorAll('.role-field')).toHaveLength(15);
   });
 
   it('unlocks the config fields on Edit but keeps the role identity locked', async () => {
@@ -158,130 +155,18 @@ describe('WorkbenchSettings roles form', () => {
 });
 
 
-describe('WorkbenchSettings execution section', () => {
-  const renderSettings = () => {
-    const view = render(
-      <WorkbenchSettings open onClose={() => {}} onSaved={() => {}} />,
-    );
-    return view;
-  };
-
-  const openWorkspaceTab = async (container: HTMLElement) => {
-    fireEvent.click(screen.getByText('工作区与执行'));
-    // 等待异步 getGlobalConfig 落地（右侧面板渲染出执行区块）
-    await waitFor(() =>
-      expect(screen.getByText('单节点 agent 数量动态配置')).toBeDefined(),
-    );
-    return container;
-  };
-
-  const toggleOf = (container: HTMLElement) =>
-    container.querySelector('.settings-toggle input[type="checkbox"]') as HTMLInputElement;
-
-  const numInput = () =>
-    screen.queryByLabelText('默认单节点 agent 数量') as HTMLInputElement | null;
-
-  it('defaults to dynamic with no number input', async () => {
-    // getGlobalConfig mock（beforeEach）未提供新字段，模拟旧后端 / 老 config.json
-    const { container } = renderSettings();
-    await openWorkspaceTab(container);
-
-    expect(toggleOf(container).checked).toBe(true);
-    expect(numInput()).toBeNull();
-  });
-
-  it('defaults to dynamic when the backend returns the fields explicitly', async () => {
-    vi.mocked(api.getGlobalConfig).mockResolvedValue({
-      config: {
-        workspace_root: null, cli_name: null, model: null,
-        api_base_url: null, api_key_env: null,
-        dynamic_num_ccs: true, default_num_ccs: 2,
-      },
-      clis: [],
-      default_cli: 'claude',
-    });
-    const { container } = renderSettings();
-    await openWorkspaceTab(container);
-
-    expect(toggleOf(container).checked).toBe(true);
-    expect(numInput()).toBeNull();
-  });
-
-  it('reveals a 1-4 number input when the toggle is turned off', async () => {
-    const { container } = renderSettings();
-    await openWorkspaceTab(container);
-
-    fireEvent.click(toggleOf(container));
-
-    const input = await waitFor(() => {
-      const el = numInput();
-      expect(el).not.toBeNull();
-      return el as HTMLInputElement;
-    });
-    expect(input.min).toBe('1');
-    expect(input.max).toBe('4');
-    expect(input.value).toBe('1');
-  });
-
-  it('shows the persisted default count when reopened with the toggle off', async () => {
-    vi.mocked(api.getGlobalConfig).mockResolvedValue({
-      config: {
-        workspace_root: null, cli_name: null, model: null,
-        api_base_url: null, api_key_env: null,
-        dynamic_num_ccs: false, default_num_ccs: 3,
-      },
-      clis: [],
-      default_cli: 'claude',
-    });
-    const { container } = renderSettings();
-    await openWorkspaceTab(container);
-
-    expect(toggleOf(container).checked).toBe(false);
-    expect((numInput() as HTMLInputElement).value).toBe('3');
-  });
-
-  it('saves the toggle state and default count', async () => {
-    vi.mocked(api.updateGlobalConfig).mockResolvedValue({ config: {} as never });
-    const { container } = renderSettings();
-    await openWorkspaceTab(container);
-
-    fireEvent.click(toggleOf(container));
-    fireEvent.change(numInput() as HTMLInputElement, { target: { value: '3' } });
-    fireEvent.click(screen.getByText('保存执行配置'));
-
-    await waitFor(() => expect(api.updateGlobalConfig).toHaveBeenCalled());
-    expect(vi.mocked(api.updateGlobalConfig).mock.calls[0][0]).toMatchObject({
-      dynamic_num_ccs: false,
-      default_num_ccs: 3,
-    });
-  });
-
-  it('clamps out-of-range values before saving', async () => {
-    vi.mocked(api.updateGlobalConfig).mockResolvedValue({ config: {} as never });
-    const { container } = renderSettings();
-    await openWorkspaceTab(container);
-
-    fireEvent.click(toggleOf(container));
-    fireEvent.change(numInput() as HTMLInputElement, { target: { value: '9' } });
-    fireEvent.click(screen.getByText('保存执行配置'));
-
-    await waitFor(() => expect(api.updateGlobalConfig).toHaveBeenCalled());
-    expect(vi.mocked(api.updateGlobalConfig).mock.calls[0][0]).toMatchObject({
-      default_num_ccs: 4,
-    });
-  });
-
+describe('WorkbenchSettings workspace save', () => {
   it('does not touch execution settings when saving the workspace only', async () => {
     vi.mocked(api.updateGlobalConfig).mockResolvedValue({ config: {} as never });
-    const { container } = renderSettings();
-    await openWorkspaceTab(container);
+    render(<WorkbenchSettings open onClose={() => {}} onSaved={() => {}} />);
+    fireEvent.click(screen.getByText('工作区与执行'));
+    await waitFor(() => expect(screen.getByLabelText('最大同时运行节点数')).toBeDefined());
 
     fireEvent.click(screen.getByText('保存工作区'));
 
     await waitFor(() => expect(api.updateGlobalConfig).toHaveBeenCalled());
     const payload = vi.mocked(api.updateGlobalConfig).mock.calls[0][0];
-    expect(payload).not.toHaveProperty('dynamic_num_ccs');
-    expect(payload).not.toHaveProperty('default_num_ccs');
+    expect(payload).not.toHaveProperty('max_concurrency');
   });
 });
 
@@ -291,7 +176,7 @@ describe('WorkbenchSettings 全局最大并发', () => {
 
   const openWorkspaceTab = async () => {
     fireEvent.click(screen.getByText('工作区与执行'));
-    await waitFor(() => expect(screen.getByText('单节点 agent 数量动态配置')).toBeDefined());
+    await waitFor(() => expect(screen.getByLabelText('最大同时运行节点数')).toBeDefined());
   };
 
   const concurrencyInput = () =>
@@ -332,8 +217,6 @@ describe('WorkbenchSettings 全局最大并发', () => {
 
     await waitFor(() => expect(api.updateGlobalConfig).toHaveBeenCalled());
     expect(vi.mocked(api.updateGlobalConfig).mock.calls[0][0]).toMatchObject({
-      dynamic_num_ccs: true,
-      default_num_ccs: 1,
       max_concurrency: 6,
     });
   });
@@ -1607,7 +1490,7 @@ describe('WorkbenchSettings 工作区：当前生效目录', () => {
 
   const openWorkspaceTab = async () => {
     fireEvent.click(screen.getByText('工作区与执行'));
-    await waitFor(() => expect(screen.getByText('单节点 agent 数量动态配置')).toBeDefined());
+    await waitFor(() => expect(screen.getByLabelText('最大同时运行节点数')).toBeDefined());
   };
 
   const effectiveHint = () =>

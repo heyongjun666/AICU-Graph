@@ -1391,13 +1391,18 @@ def test_structured_role_schema_defaults_and_validation(session_manager, tmp_pat
         worker_schema = client.get("/v1/roles/schema/worker")
         assert worker_schema.status_code == 200
         assert worker_schema.json()["defaults"]["model"] == "worker-default"
+        # 遗留 num_ccs（default.yaml 里仍写着）不进 defaults / 字段目录
+        assert "num_ccs" not in worker_schema.json()["defaults"]
         worker_fields = {field["name"]: field for field in worker_schema.json()["fields"]}
         assert worker_fields["main_doc"]["has_default"] is False
+        assert "num_ccs" not in worker_fields
         assert "index_file" not in worker_fields
         assert worker_fields["description"]["type"] == "text"
         manager_schema = client.get("/v1/roles/schema/manager")
         assert manager_schema.json()["defaults"]["model"] == "manager-default"
         manager_fields = {field["name"]: field for field in manager_schema.json()["fields"]}
+        assert "num_ccs" not in manager_schema.json()["defaults"]
+        assert "num_ccs" not in manager_fields
         assert manager_fields["summary"]["has_default"] is False
         assert manager_fields["suitable_for"]["type"] == "list"
         # Manager 表单隐藏协议/样板字段（Decision Policy 生成指令、审查/审计、产出/交付），
@@ -1421,11 +1426,14 @@ def test_structured_role_schema_defaults_and_validation(session_manager, tmp_pat
         )
         assert created.status_code == 201, created.text
         role = created.json()
+        # 遗留 num_ccs 被静默剥除，不落盘、不回显
         assert role["config"] == {
-            "num_ccs": 1,
             "main_doc": "README.md",
             "role_md": "Write focused output.",
         }
+        assert "num_ccs" not in (
+            roles_dir / "Worker" / "focused_writer.yaml"
+        ).read_text(encoding="utf-8")
         assert role["effective_config"]["model"] == "worker-default"
         assert "model:" not in (
             roles_dir / "Worker" / "focused_writer.yaml"
@@ -1434,12 +1442,24 @@ def test_structured_role_schema_defaults_and_validation(session_manager, tmp_pat
         invalid_type = client.post(
             "/v1/roles",
             json={
-                "role_id": "invalid_count",
+                "role_id": "invalid_type",
                 "role_type": "worker",
-                "config": {"num_ccs": "many"},
+                "config": {"main_doc": 5},
             },
         )
         assert invalid_type.status_code == 400
+        # 遗留键即使值非法也直接被忽略，不触发类型校验
+        legacy_only = client.post(
+            "/v1/roles",
+            json={
+                "role_id": "legacy_only",
+                "role_type": "worker",
+                "config": {"num_ccs": "many", "audit_rounds": "x", "main_doc": "README.md"},
+            },
+        )
+        assert legacy_only.status_code == 201, legacy_only.text
+        assert "num_ccs" not in legacy_only.json()["config"]
+        assert "audit_rounds" not in legacy_only.json()["config"]
         unknown_field = client.post(
             "/v1/roles",
             json={
@@ -1679,41 +1699,49 @@ def test_provider_id_persists_and_is_inherited_by_new_session(session_client, se
     assert session_manager.get_settings(session_id)["config"]["provider_id"] == "openrouter"
 
 
-# 单节点 agent 数量策略（dynamic_num_ccs / default_num_ccs）
+# ============================================================================
+# 遗留全局配置键（dynamic_num_ccs / default_num_ccs）静默丢弃
 # ============================================================================
 
-def test_num_ccs_policy_defaults_and_roundtrip(session_client):
-    """默认 = 动态 + 1；关闭后必须回 false 而不是被兜底吞成 null。"""
-    config = session_client.get("/v1/config").json()["config"]
-    assert config["dynamic_num_ccs"] is True
-    assert config["default_num_ccs"] == 1
+def test_legacy_num_ccs_global_config_keys_are_silently_dropped(session_client, session_manager):
+    """旧前端/旧脚本仍可能 PATCH 这两个键：必须 2xx，且不出现在返回值或存储里。"""
+    before = session_client.get("/v1/config").json()["config"]
+    assert "dynamic_num_ccs" not in before
+    assert "default_num_ccs" not in before
 
     resp = session_client.patch(
         "/v1/config",
-        json={"config": {"dynamic_num_ccs": False, "default_num_ccs": 2}},
+        json={"config": {"dynamic_num_ccs": False, "default_num_ccs": 3}},
     )
     assert resp.status_code == 200, resp.text
-    # 关键回归：`value or None` 会把 False 吞成 None，此断言专门守这个坑。
-    assert resp.json()["config"]["dynamic_num_ccs"] is False
-    assert resp.json()["config"]["default_num_ccs"] == 2
+    assert "dynamic_num_ccs" not in resp.json()["config"]
+    assert "default_num_ccs" not in resp.json()["config"]
 
-    config = session_client.get("/v1/config").json()["config"]
-    assert config["dynamic_num_ccs"] is False
-    assert config["default_num_ccs"] == 2
-
-
-def test_num_ccs_default_out_of_range_rejected(session_client):
-    for bad in (0, 5, -1, "abc", None):
-        resp = session_client.patch(
-            "/v1/config", json={"config": {"default_num_ccs": bad}}
-        )
-        assert resp.status_code == 400, f"{bad!r} should be rejected"
-    # 拒绝后不得污染已存配置
-    assert session_client.get("/v1/config").json()["config"]["default_num_ccs"] == 1
+    stored = session_client.get("/v1/config").json()["config"]
+    assert "dynamic_num_ccs" not in stored
+    assert "default_num_ccs" not in stored
+    assert "dynamic_num_ccs" not in session_manager.get_global_config()
+    assert "default_num_ccs" not in session_manager.get_global_config()
 
 
-def test_num_ccs_policy_persists_across_manager_reload(session_client, tmp_path):
-    """持久化：重新加载 global config 后仍是 false（老 config.json 自动补默认）。"""
+def test_legacy_num_ccs_global_keys_do_not_block_valid_fields(session_client):
+    """遗留键与合法键同批提交：合法键照常生效，遗留键即使值非法（0/"abc"/None）也不 4xx。"""
+    resp = session_client.patch(
+        "/v1/config",
+        json={"config": {"default_num_ccs": 0, "dynamic_num_ccs": "abc", "max_concurrency": 3}},
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["config"]["max_concurrency"] == 3
+    assert "default_num_ccs" not in resp.json()["config"]
+    assert "dynamic_num_ccs" not in resp.json()["config"]
+
+    resp = session_client.patch("/v1/config", json={"config": {"default_num_ccs": None}})
+    assert resp.status_code == 200, resp.text
+    assert session_client.get("/v1/config").json()["config"]["max_concurrency"] == 3
+
+
+def test_legacy_num_ccs_in_old_config_file_is_not_loaded(session_client, tmp_path):
+    """旧 config.json 里残留的遗留键重新加载后不会出现在全局配置里。"""
     session_client.patch(
         "/v1/config", json={"config": {"dynamic_num_ccs": False, "default_num_ccs": 3}}
     )
@@ -1726,64 +1754,32 @@ def test_num_ccs_policy_persists_across_manager_reload(session_client, tmp_path)
     )
     try:
         config = reloaded.get_global_config()
-        assert config["dynamic_num_ccs"] is False
-        assert config["default_num_ccs"] == 3
+        assert "dynamic_num_ccs" not in config
+        assert "default_num_ccs" not in config
     finally:
         reloaded.shutdown()
 
 
-def test_num_ccs_policy_applies_to_new_session_nodes(session_client, session_manager):
-    """开关关闭 → 新会话里 Manager 规划的 num_ccs 被压成默认值。"""
-    session_client.patch(
-        "/v1/config", json={"config": {"dynamic_num_ccs": False, "default_num_ccs": 1}}
-    )
+def test_node_config_num_ccs_is_silently_stripped(session_client, session_manager):
+    """创建节点时带遗留 num_ccs/audit_rounds：201，且不存入 node.config。"""
     session_id = _create_session(session_client)["id"]
-
     runtime = session_manager.get_session(session_id).runtime
-    assert runtime.dynamic_num_ccs is False
-    assert runtime.default_num_ccs == 1
 
     resp = session_client.post(
         f"/v1/sessions/{session_id}/nodes",
-        json={"task": "t", "exec_type": "worker", "config": {"num_ccs": 3}},
+        json={
+            "task": "t", "exec_type": "worker",
+            "config": {"num_ccs": 3, "audit_rounds": 2},
+        },
     )
     assert resp.status_code == 201, resp.text
-    assert resp.json()["config"]["num_ccs"] == 1
+    assert "num_ccs" not in resp.json()["config"]
+    assert "audit_rounds" not in resp.json()["config"]
+    assert "num_ccs" not in runtime.get_node(resp.json()["id"]).config
 
 
-def test_num_ccs_policy_pushed_to_existing_sessions(session_client, session_manager):
-    """已存在的会话即时收到策略更新；已建节点不回改。"""
-    session_id = _create_session(session_client)["id"]
-    runtime = session_manager.get_session(session_id).runtime
-    assert runtime.dynamic_num_ccs is True
-
-    pre = session_client.post(
-        f"/v1/sessions/{session_id}/nodes",
-        json={"task": "pre", "exec_type": "worker", "config": {"num_ccs": 3}},
-    )
-    assert pre.status_code == 201, pre.text
-    pre_node_id = pre.json()["id"]
-    assert pre.json()["config"]["num_ccs"] == 3
-
-    session_client.patch(
-        "/v1/config", json={"config": {"dynamic_num_ccs": False, "default_num_ccs": 1}}
-    )
-
-    assert runtime.dynamic_num_ccs is False
-    assert runtime.default_num_ccs == 1
-    # 已建节点保持原值（不回溯）
-    assert runtime.get_node(pre_node_id).config["num_ccs"] == 3
-    # 此后新建的节点按新策略
-    post = session_client.post(
-        f"/v1/sessions/{session_id}/nodes",
-        json={"task": "post", "exec_type": "worker", "config": {"num_ccs": 3}},
-    )
-    assert post.status_code == 201, post.text
-    assert post.json()["config"]["num_ccs"] == 1
-
-
-def test_num_ccs_policy_rejects_unknown_keys(session_client):
-    """白名单仍然生效：未登记的键不能借这个口子进来。"""
+def test_global_config_rejects_unknown_keys(session_client):
+    """白名单仍然生效：未登记的键不能借遗留键的静默丢弃口子进来。"""
     resp = session_client.patch(
         "/v1/config", json={"config": {"totally_unknown_key": 1}}
     )
@@ -1866,7 +1862,7 @@ def test_session_binding_to_candidate_roles_reaches_the_runtime(session_manager,
         assert session_manager.get_session(session_id).runtime.candidate_roles == ["code"]
 
         # 后续 PATCH 未带该键 → 不得把已有绑定清空
-        assert client.patch(url, json={"config": {"num_ccs": 2}}).status_code == 200
+        assert client.patch(url, json={"config": {"num_ccs": 2}}).status_code == 200  # 遗留键，静默忽略
         assert client.get(url).json()["config"]["candidate_roles"] == ["code"]
         assert session_manager.get_session(session_id).runtime.candidate_roles == ["code"]
 

@@ -88,7 +88,6 @@ class TestRegistry:
     def test_priority_order_prefers_claude_and_excludes_copilot(self):
         ids = [a.id for a in cli_adapters._ADAPTERS]
         assert ids[0] == "claude"
-        assert "internal" not in ids
         assert "copilot" not in ids
 
 

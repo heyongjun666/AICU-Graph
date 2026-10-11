@@ -320,7 +320,7 @@ describe('复制路径 / 拖出载荷', () => {
 // ---------------------------------------------------------------------------
 // 非安全上下文下的剪贴板
 //
-// 服务绑 0.0.0.0，用 http://<局域网IP>:8080 打开时 navigator.clipboard 是
+// 服务绑到局域网（HOST=0.0.0.0），用 http://<局域网IP>:8080 打开时 navigator.clipboard 是
 // **undefined**（只有 https 与 localhost 是 secure context）。原来的写法
 // `navigator.clipboard.writeText(...)` 会在属性访问那一步抛 TypeError，
 // 界面显示「复制失败」而用户什么都没做错 —— 这是真机上报回来的 bug。

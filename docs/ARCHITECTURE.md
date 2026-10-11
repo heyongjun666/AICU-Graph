@@ -222,7 +222,7 @@ AICU-Graph 的核心运行服务由 `main.py` 启动，使用 `runtime/` 提供�
   4. **事件→重激活桥** `_process_reactivation_events()`（见 6.7）；
   5. `_handle_routing` / `_activate_target`：处理节点激活（当前设计：无 related_nodes 可达边界，允许任意 Node 含 Manager 为目标；保留 C1 协作预算和 `mark_terminal`）。
   6. 父 Manager 通知：子节点全部完成后通知父 Manager 进入 review。
-- 全局协作预算 `max_collaboration_rounds`（默认 10）、节点 `activation_count`（仅作观测计数，不设激活上限）、Watchdog（异常自动重启，最多 3 次，最小间隔 60s）。
+- 节点 `activation_count`（仅作观测计数，不设激活上限）、Watchdog（调度 tick 抛异常时记录并继续；累计 3 次出错、且相邻两次间隔不小于 60s 后，停止该会话的调度循环）。
 
 ### 6.5 独立 AICU Router（Event + 组织图 → 目标 Nodes）
 
@@ -270,7 +270,7 @@ AICU-Graph 的核心运行服务由 `main.py` 启动，使用 `runtime/` 提供�
 - 桥的行为：Scheduler 每 tick 扫描处于 `WAITING` 或 `COMPLETED` 状态的节点（`_REACTIVATABLE_STATUSES`）的 `event_inbox/`。默认累计 **3 个相关事件**，或最早相关事件滞留达到 **1800 秒（30 分钟）**时触发一次批处理；触发后全量 drain 该节点的相关事件，并只重激活一次。消费后删除 inbox 文件（delete-on-consume，事实仍在 events.json 留痕）。`FAILED`、`PAUSED`、`STOPPED` 不会由事件桥自动恢复，FAILED 需要人工 `continue_node`。
 - 消费语义：读完整 `event_batch`（每条含 `event_id / producer / objective`，并保留 intent/scope/action/affected_roles）→ 构造 activation 上下文写入 pending_context，同时保留旧 scalar 字段兼容 → `_activate_target(...)`（无 collaboration_type，无 target 校验）。RUNNING 节点的消费走 CC 有界轮询 `events_inbox/` 信号路径。
 - 会话策略：**Worker** 被事件唤醒时，`_consume_inbox_batch` 额外写入 `runtime/handoff.fresh_session_fields(node)`（`session_mode=fresh` / `original_task` / `prior_artifacts`），`Worker.run` 据此丢弃 `_aicu_cache`、以**新会话**启动，不再 `--resume` 累积历史；上一轮状态靠检查点 + 工作笔记交接（见 §7.3）。Manager 不在此列（走自己的 expand/revise 链路）。
-- 安全边界：C1 全局协作预算（超限升级 `collaboration_budget_exceeded`）、父 Manager 通知清除 + `rewind_parent_chain_for_retry`、`mark_terminal`。`activation_count` 仅作观测计数，不限制节点重激活；**不再有 related_nodes 能力边界 / A3 Manager 目标拦截 / required_role 校验**，角色与目标判断由 Router LLM 负责。
+- 安全边界：父 Manager 通知清除 + `rewind_parent_chain_for_retry`、`mark_terminal`。`activation_count` 仅作观测计数，不限制节点重激活；**不再有 related_nodes 能力边界 / A3 Manager 目标拦截 / required_role 校验**，角色与目标判断由 Router LLM 负责。
 - Manager 兜底：`Manager.run()` 阶段完成后 `flush_node_events`（scheduler tick 扫描仅在存在 RUNNING 节点时执行，Manager 无 worker 时需自己 flush）；`_build_event_context_block` 主读 pending_context，fallback 读 inbox 事件（覆盖"目标先于事件 READY/RUNNING"竞态）。
 
 ### 6.8 闭环与产物可靠性
@@ -299,6 +299,7 @@ Shared FS（共享分区）是产物单一事实源。
 |---|---|
 | `runtime/roles_manager.py` | 扫描 `roles/Manager/` + `roles/Worker/` YAML；`list_roles`（跳过 default.yaml）、`get_role_schema`、`get_role`、`add_role/update_role`；role_id 模式 `^[a-z][a-z0-9_]*$` |
 | `runtime/skills_manager.py` | 扫描带 `SKILL.md` 的目录（主目录 + 额外目录）；`list_skills / get_skill / save_skill` |
+| `runtime/role_pool_bundle.py` | 角色池导入 / 导出（见 6.11）：`RolePoolBundle.preview_export / build_export / import_bundle` |
 | `runtime/mcp_manager.py` | MCP server 注册表（仓库根 `mcp_servers.json`）读取与名字解析：`load_registry` / `resolve_servers`；`McpServer` 中立表示（command 与 args 分开存，各 CLI 自己序列化）；相对路径按仓库根解析 |
 | `runtime/mcp_client.py` | MCP server 的 stdio 与 Streamable HTTP 预检：`probe_server`（initialize → notifications/initialized → tools/list）、`probe_servers_detailed`（返回 configured / active / tools / failures 三态报告；`required=false` 失败保留告警但不下发 CLI，空工具仍算 active）、`probe_servers`（兼容的工具映射）；stdio 子进程连完即收 |
 | `runtime/repo_paths.py` | `REPO_ROOT` 与 `resolve_repo_relative`（`~` 展开 / 绝对原样 / 相对按仓库根）—— 角色 yaml `skills_dir` 与 MCP 注册表路径共用的唯一一份实现 |
@@ -306,6 +307,38 @@ Shared FS（共享分区）是产物单一事实源。
 | `runtime/sse_manager.py` | `SSEManager` 订阅 EventBus `"*"`，`deque(maxlen=10000, ttl=1800)`，微批合并（同 type <200ms 合并），`get_events_since`（空 → snapshot 回退）、`get_snapshot_event`、`get_stats`、`format_sse` |
 | `runtime/server.py` | `create_app(runtime, sse_manager)` 单会话 app：`CONFIG_WHITELIST{num_ccs,model,skills,audit_rounds,max_iterations}`、task≤5000、graph/manager/plan/stats、pause/resume/stop/clear、node CRUD + start/pause/stop/continue/task/delete/external-input、`/v1/logs`、`/v1/roles`、SSE `/v1/graph/events`（含 `/since/{seq}`，snapshot/catch-up、1s poll、15s keepalive） |
 | `runtime/session_server.py` | `create_session_app(session_manager)` 多会话 app：roles（list/schema/get/create/update）、skills（list/get/create/update）、sessions CRUD + settings（api_key_env 凭据检查）、graph（snapshot/link-candidates/pause/resume/stop/clear）、nodes（**手动建节点 create**/update/delete 级联 + control pause/**resume**/stop/continue/revise + **activity（cc_activity）**）、workspace/shared/results/artifact 浏览、edges add/delete（手动建依赖边）、**agent-events（事件日志查询）**、SSE per-session |
+
+### 6.11 角色池导入 / 导出
+
+**文件**：`runtime/role_pool_bundle.py`；路由在 `runtime/session_server.py`（紧贴 `/v1/role-pools`）。
+
+**包格式**：单个 zip（`<池名>.aicu-pool.zip`）。
+
+| 条目 | 内容 |
+|---|---|
+| `manifest.json` | `format="aicu-role-pool"`、`version=1`、`defaults_sha256{manager,worker}`、pool / roles / skills / mcp 清单、`warnings` |
+| `roles/{Manager,Worker}/<id>.yaml` | 角色 yaml 原文（保留注释） |
+| `skills/<id>/...` | 整个 skill 目录，含二进制；符号链接跳过 |
+| `mcp_servers.json` | 仅含被引用的条目，spec 原样（env / headers 不脱敏） |
+
+**路由**
+
+- `GET /v1/role-pools/{id}/export/preview`：返回将导出的内容、带凭据的 MCP（只列服务名与键名，不含值）、取自个人目录（非项目 `skills/`）的 `personal_skills`、缺失引用警告。
+- `GET /v1/role-pools/{id}/export`：下载 zip，`Content-Disposition` 用 `filename*=UTF-8''` 编码中文池名。
+- `POST /v1/role-pools/import?on_conflict=skip|overwrite&dry_run=true|false[&decide=<key>=skip|overwrite ...]`：请求体为原始 zip 字节（与 skills/import 一致，无 multipart）；超过 50 MB 返回 413；校验失败或 `decide` 格式 / 取值非法返回 400。`decide` 可重复，按计划里每项的 `key`（`role:<type>/<id>`、`skill:<id>`、`mcp:<name>`、`pool`）单独指定冲突项的处理，优先于 `on_conflict`；对不上任何项的 key 忽略。
+
+**导入流程**
+
+1. 全部校验在任何写入之前完成并一次性列出所有错误：体积 / 条目数 / 解压总量上限、zip-slip、manifest、`fullmatch` 的 id、角色 yaml 过 `RolesManager.validate_config` 字段白名单、MCP 过 `validate_server`、池引用的角色必须在包内或本地存在。
+2. 每项得到状态 `new` / `same`（内容一致，不算冲突）/ `conflict`（同名但内容不同）。`dry_run=true` 到此为止，只返回计划（含 MCP 的 `command` + `args`，因为导入后它们会在本机被执行）。
+3. 真正导入按 MCP → skill → 角色 → 池的顺序写入，每步登记 undo；中途失败逆序回滚，不留半个池。写入期间持有模块级 `_APPLY_LOCK`（`mcp_servers.json` 读改写本身没有锁）。冲突策略由全局 `on_conflict` 给默认值、再由逐项 `decisions` 覆盖：`skip` 保留本机版本，`overwrite` 用包内版本；池 id 总是本地的（新建则重新生成）。计划里的冲突项带 `policy`（最终生效的处理）和「本机还有谁在用」（角色 → `used_by` 池名；skill / MCP → `used_by` 角色 id；池 → `local_roles`），skill 项带 `script_count`（按扩展名统计的脚本数），界面据此提示覆盖的影响。
+4. 导入前后各做一次只读、不联网的可用性自检（`readiness`）：skill 是否存在、MCP 是否已登记、stdio `command` 是否可执行、`args` 中的仓库内路径是否存在。角色指定的 `cli_name` 在 PATH 里找不到可执行文件时给 `cli_missing`（只查 PATH，不启动进程）。结论只是「未发现问题」，不代表一定能跑通：MCP 真实连通性和 skill 内部调用的外部程序都不在检查范围，用界面的「测试连接」。
+
+**包带不走的东西（界面如实提示）**
+
+- 继承自 `default.yaml` 的字段不在包里，按接收方本机的 default 执行；manifest 记录发送方 default 的哈希，不同时给 `defaults_differ` 警告。
+- MCP 的 `command` 与 `args` 里的相对路径依赖接收方机器和仓库根。
+- 选「跳过」时，同名但内容不同的角色保留本机版本，池将使用本机版本。
 
 ---
 
@@ -377,7 +410,7 @@ Shared FS（共享分区）是产物单一事实源。
 - **Sentinel 语义**：None 哨兵（num_ccs/model/cli_name/audit_rounds 未配置）vs `_UNSET` 哨兵（output_file/final_file/modular_output/generate_instruction 显式未提供）。
 - **`shared_target`**：canonical abs 路径；所有 CC（含多 CC 编排）直写同一共享分区，产物权威 = 分区本身。
 - **工作区结构**：`cc_0..cc_{N-1}/`，每个包含 `CLAUDE.md`（role_md）、**该 CLI 自己的**项目级
-  skill 目录软链（claude/internal `.claude/skills/`、codebuddy `.codebuddy/skills/`、kimi
+  skill 目录软链（claude `.claude/skills/`、codebuddy `.codebuddy/skills/`、kimi
   `.agents/skills/`、codex `.agents/skills/`、qwen `.qwen/skills/`、pi `.pi/skills/`、
   gemini `.gemini/skills/`、cursor `.cursor/skills/`；claude 系另加 `--setting-sources
   project`）。以上目录都是真机 A/B 实测的结论，不是从各家文档抄的 —— 目录由
@@ -438,7 +471,7 @@ Shared FS（共享分区）是产物单一事实源。
 
 | 文件 | 职责 |
 |---|---|
-| `main.py` | **服务入口**：置 `真实 CLI 配置=real`，注册 Manager/Worker 到 ExecutableRegistry，创建 SessionManager + `create_session_app`，uvicorn 起 `0.0.0.0:8080`，SIGINT/SIGTERM 优雅停机 |
+| `main.py` | **服务入口**：置 `真实 CLI 配置=real`，注册 Manager/Worker 到 ExecutableRegistry，创建 SessionManager + `create_session_app`，uvicorn 默认起 `127.0.0.1:8080`（`HOST`/`PORT` 可改），SIGINT/SIGTERM 优雅停机 |
 | `aicu.py` | **AI 执行引擎**：peer 编排（num_ccs）、角色配置加载、CC 工作区创建、single-writer 约束、vote/review/audit 产物管理 |
 | `claude_code_agent.py` | **AI Coding CLI 程序化封装**：多轮对话（--resume）、stdin 提示、超时 killpg、`CCExecutionError` |
 | `conftest.py` | pytest 根级 fixture（测试 fake、临时工作区等） |
@@ -472,7 +505,7 @@ Shared FS（共享分区）是产物单一事实源。
 | `repo_paths.py` | `REPO_ROOT` + `resolve_repo_relative`：仓库根相对路径的唯一实现（skills_dir 与 MCP 注册表共用） |
 | `role_pools_manager.py` | 候选角色池管理：`RolePoolsManager` |
 | `shared_io.py` | Runtime 与交付路径共用的文件系统助手：`previewable_path` / `mime_type_for` |
-| `credentials.py` | 凭据存储（明文）与模型厂商映射：`CredentialStore` / `set_credential_store` / `resolve_sk_for_model` / `resolve_internal_username` / `vendor_of_model` / `api_key_env_for_vendor` |
+| `credentials.py` | 凭据存储（明文）与模型厂商映射：`CredentialStore` / `set_credential_store` / `resolve_sk_for_model` / `vendor_of_model` / `api_key_env_for_vendor` |
 | `i18n.py` | 后端面向用户消息的轻量 i18n：`t` / `localized_detail` / `LanguageMiddleware` |
 | `sse_manager.py` | SSE 事件流：环形缓冲、微批合并、`get_events_since`（空→snapshot 回退）、`get_snapshot_event` |
 | `server.py` | `create_app` 单会话 FastAPI app（CONFIG_WHITELIST、节点 CRUD、日志查询、SSE `/v1/graph/events`） |
@@ -509,9 +542,9 @@ MCP 联调 lab 角色使用 `roles/**/_mcp_lab_*.yaml` 命名，仅供仓库内�
 
 | 体系 | 位置 | 怎么跑 | 规模 | 依赖 |
 |---|---|---|---|---|
-| **pytest 套件** | `tests/` + `runtime/test_sse_push.py` | `python3 -m pytest tests` | 2164 | `requirements-dev.txt` |
+| **pytest 套件** | `tests/` + `runtime/test_sse_push.py` | `python3 -m pytest tests` | 2300+ | `requirements-dev.txt` |
 | **自带测试套件** | `run_tests.py`（单文件） | `python3 run_tests.py` | 144 | `requirements.txt`（不需要 pytest） |
-| **前端测试** | `frontend/src/**/*.test.tsx` | `cd frontend && npm test -- --run` | 408 | `npm ci` |
+| **前端测试** | `frontend/src/**/*.test.tsx` | `cd frontend && npm test -- --run` | 430+ | `npm ci` |
 
 **分工：**
 
@@ -542,7 +575,7 @@ cd frontend && npx vitest run src/components/__tests__/NodeInspector.test.tsx
 
 提交前把这三条各跑一遍，就等于预跑了一遍 CI。
 
-当前项目测试基线为 `2200 passed`。
+当前项目测试基线为 `2300+ passed`（具体数字随提交变化，以 CI 为准）。
 
 **测试不依赖跑测试的机器上装了什么 CLI。** `ClaudeCodeAgent` 在构造期会探测本机 CLI，`tests/conftest.py` 有一条 autouse fixture 把这一步钉死——否则「本地绿」与「CI 绿」会变成两个不同的集合（开发机通常装齐了 CLI，runner 一个都没有）。要验证这一点，把 PATH 里的 AI CLI 摘掉跑一遍即可：`env PATH="/usr/bin:/bin" python3 -m pytest -q`。
 
@@ -573,8 +606,7 @@ cd frontend && npx vitest run src/components/__tests__/NodeInspector.test.tsx
 | `frontend/src/providers/SSEProvider.tsx` | SSE 事件订阅（EventSource） |
 | `frontend/src/components/GraphCanvas.tsx` `TreeNode.tsx` `DependencyEdge.tsx` | React Flow 图渲染 |
 | `frontend/src/components/NodeInspector.tsx` | 节点详情与产物查看 |
-| `frontend/src/components/SessionSidebar.tsx` `SessionOutputsDialog.tsx` `WorkbenchSettings.tsx` `CanvasControls.tsx` `ToastContainer.tsx` `WorkbenchDialogs.tsx` `WorkbenchHeader.tsx` | 工作台各 UI 组件 |
-| `frontend/src/components/mdeditor/` | Markdown 编辑器（编辑/预览/图片上传/自动保存） |
+| `frontend/src/components/SessionSidebar.tsx` `WorkbenchSettings.tsx` `CanvasControls.tsx` `ToastContainer.tsx` `WorkbenchDialogs.tsx` `WorkbenchHeader.tsx` | 工作台各 UI 组件 |
 | `frontend/src/utils/` `dagreLayout.ts` `layoutCache.ts` `api.ts` | 布局缓存/API 工具 |
 | `frontend/src/hooks/` | `useGraphOptimizations` |
 

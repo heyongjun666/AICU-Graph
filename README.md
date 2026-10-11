@@ -128,7 +128,8 @@ AICU-Graph is currently a runnable research and engineering prototype. The avail
 
 ### Requirements
 
-- Python 3.10+;
+- macOS or Linux (the terminal panel relies on `pty` / `fcntl`; Windows is not supported);
+- Python 3.10+ (CI runs on 3.13);
 - At least one available AI coding CLI;
 - Node.js 18+ for building the frontend.
 
@@ -155,6 +156,8 @@ The default server address is:
 http://localhost:8080
 ```
 
+The server listens on `127.0.0.1:8080` by default (local machine only) and has **no authentication**. Set `HOST=0.0.0.0` only on a network you fully trust, and never expose it to an untrusted one — anyone who can reach the port can run commands through your CLI sessions. `PORT` changes the port.
+
 After startup, open the workbench or use the REST API to create sessions and submit tasks. For CLI installation, credential configuration, API details, and troubleshooting, see [docs/INSTALL.md](docs/INSTALL.md).
 
 ## Testing
@@ -164,8 +167,8 @@ There are three suites, and none of them subsumes another — a green `run_tests
 | Suite | Command | Cases |
 |---|---|---|
 | Core primitives (self-contained runner, stdlib only) | `python3 run_tests.py` | 144 |
-| Full pytest suite | `python3 -m pytest tests` | 2164 |
-| Frontend (vitest + Testing Library) | `cd frontend && npm test -- --run` | 408 |
+| Full pytest suite | `python3 -m pytest tests` | 2300+ |
+| Frontend (vitest + Testing Library) | `cd frontend && npm test -- --run` | 430+ |
 
 Install the test dependencies first:
 
@@ -210,4 +213,4 @@ Please read the existing documentation and tests before submitting changes, and 
 
 ## License
 
-There is currently no LICENSE file at the repository root. Before publishing a formal release, add the appropriate license file and update this section.
+Released under the Apache License 2.0. See [LICENSE](LICENSE). Bundled skills under `skills/` keep their original licenses; see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).

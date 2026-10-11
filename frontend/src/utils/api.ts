@@ -5,13 +5,7 @@
 // ============================================================================
 
 import {
-  CreateManagerRequest,
-  CreateManagerResponse,
-  UpdateNodeTaskRequest,
-  SearchLogsRequest,
-  SearchLogsResponse,
   LogEntry,
-  LogLevel,
   GraphNode,
   GraphEdge,
   NodeStatus,
@@ -24,6 +18,10 @@ import {
   RoleInfo,
   RoleSchema,
   RolePool,
+  RolePoolExportPreview,
+  RolePoolImportResult,
+  BundleConflictPolicy,
+  BundleDecisions,
   SkillInfo,
   McpServerInfo,
   McpServerInput,
@@ -37,7 +35,6 @@ import {
   OutputFile,
   AgentEvent,
   ApiKeyResponse,
-  InternalUsernameResponse,
   EffectiveBaseUrlResponse,
 } from '../types';
 import { useUIStateStore } from '../stores/UIStateStore';
@@ -47,8 +44,8 @@ export type { RoleInfo } from '../types';
 // 配置
 // ============================================================================
 
-const API_BASE = (import.meta as any).env?.VITE_API_BASE_URL || '/v1/';
-const MOCK_MODE = (import.meta as any).env?.VITE_MOCK_MODE === 'true';
+const API_BASE = import.meta.env.VITE_API_BASE_URL || '/v1/';
+const MOCK_MODE = import.meta.env.VITE_MOCK_MODE === 'true';
 
 // 确保 API_BASE 以 / 结尾
 const baseUrl = API_BASE.endsWith('/') ? API_BASE : `${API_BASE}/`;
@@ -65,45 +62,6 @@ function buildQueryString(params: Record<string, string | number | undefined | n
     }
   }
   return parts.length > 0 ? `?${parts.join('&')}` : '';
-}
-
-// ============================================================================
-// Mock 实现
-// ============================================================================
-
-let mockLogIdCounter = 100;
-const mockLogs: LogEntry[] = [];
-
-function generateMockLogs(nodeId: string): LogEntry[] {
-  const logs: LogEntry[] = [];
-  const levels = [LogLevel.INFO, LogLevel.DEBUG, LogLevel.WARN, LogLevel.ERROR];
-  const messages = [
-    'Task initialized',
-    'Processing step 1 of 3',
-    'Processing step 2 of 3',
-    'Processing step 3 of 3',
-    'Allocating resources',
-    'Validating configuration',
-    'Executing subtask',
-    'Merging results',
-    'Task completed successfully',
-    'Connection timeout, retrying...',
-    'Memory usage: 45%',
-    'Disk I/O in progress',
-  ];
-
-  const baseTime = Date.now() - 3600000;
-  for (let i = 0; i < 20; i++) {
-    mockLogIdCounter++;
-    logs.push({
-      id: mockLogIdCounter,
-      node_id: nodeId,
-      level: levels[Math.floor(Math.random() * levels.length)],
-      message: messages[Math.floor(Math.random() * messages.length)],
-      timestamp: new Date(baseTime + i * 30000).toISOString(),
-    });
-  }
-  return logs;
 }
 
 // ============================================================================
@@ -166,85 +124,6 @@ export { mapEdgeFromBackend };
 // ============================================================================
 
 /**
- * 搜索日志（多会话前缀）。后端日志按节点归档：必须提供 node_id，
- * level/keyword 过滤在客户端完成（后端仅支持 offset/limit）。
- */
-export async function searchLogs(
-  sessionId: string,
-  params: SearchLogsRequest,
-): Promise<SearchLogsResponse> {
-  if (MOCK_MODE) {
-    // 生成 mock 日志
-    const logs = generateMockLogs(params.node_id || 'mock-node');
-    const filtered = logs.filter((log) => {
-      if (params.level && log.level !== params.level) return false;
-      if (params.keyword && !log.message.includes(params.keyword)) return false;
-      if (params.node_id && log.node_id !== params.node_id) return false;
-      return true;
-    });
-    const offset = params.offset || 0;
-    const limit = params.limit || 50;
-    return {
-      logs: filtered.slice(offset, offset + limit),
-      total: filtered.length,
-    };
-  }
-
-  if (!params.node_id) return { logs: [], total: 0 };
-  const query = buildQueryString({ offset: params.offset, limit: params.limit });
-  const response = await fetch(
-    `${baseUrl}sessions/${sessionId}/nodes/${encodeURIComponent(params.node_id)}/logs${query}`,
-  );
-  if (!response.ok) throw new Error(`HTTP ${response.status}`);
-  const entries: LogEntry[] = await response.json();
-  const filtered = entries.filter((log) => {
-    if (params.level && log.level !== params.level) return false;
-    if (params.keyword && !log.message.includes(params.keyword)) return false;
-    return true;
-  });
-  const offset = params.offset || 0;
-  const limit = params.limit || 50;
-  return {
-    logs: filtered.slice(offset, offset + limit),
-    total: filtered.length,
-  };
-}
-
-/**
- * 获取节点详情（多会话前缀）。
- */
-export async function getNode(sessionId: string, nodeId: string): Promise<GraphNode> {
-  if (MOCK_MODE) {
-    return {
-      id: nodeId,
-      label: `Node ${nodeId}`,
-      status: NodeStatus.Running,
-      exec_type: 'M',
-      role: 'developer',
-      task: 'Implement feature',
-    };
-  }
-
-  const response = await fetch(`${baseUrl}sessions/${sessionId}/nodes/${nodeId}`);
-  if (!response.ok) throw new Error(`HTTP ${response.status}`);
-  const raw = await response.json();
-  return mapNodeFromBackend(raw);
-}
-
-/**
- * 更新节点任务（多会话前缀）。等价于 updateSessionNode，保留旧方法名兼容。
- */
-export async function updateNodeTask(
-  sessionId: string,
-  nodeId: string,
-  data: UpdateNodeTaskRequest,
-): Promise<void> {
-  if (MOCK_MODE) return;
-
-  await updateSessionNode(sessionId, nodeId, data as Record<string, unknown>);
-}
-
-/**
  * 继续执行任意 FAILED/STOPPED 节点（Manager/Worker 通用）。
  * 保留已有日志和产出，Manager 有子节点时锁定 max_iterations 防止 re-expand。
  */
@@ -255,68 +134,6 @@ export async function continueNode(sessionId: string, nodeId: string): Promise<v
     method: 'POST',
   });
   if (!response.ok) throw new Error(`HTTP ${response.status}`);
-}
-
-/**
- * 创建 Manager 节点（提交任务，多会话前缀）。等价于 createSessionNode(exec_type='manager')。
- */
-export async function createManager(
-  sessionId: string,
-  data: CreateManagerRequest,
-): Promise<CreateManagerResponse> {
-  if (MOCK_MODE) {
-    return {
-      node_id: `manager-${Date.now()}`,
-      status: NodeStatus.Ready,
-    };
-  }
-
-  const node = await createSessionNode(sessionId, {
-    task: data.task,
-    role: data.role,
-    exec_type: 'manager',
-    config: data.config,
-  });
-  return { node_id: node.id, status: node.status };
-}
-
-/**
- * 暂停图（多会话前缀）。等价于 controlSession(sessionId, 'pause')。
- */
-export async function pauseGraph(sessionId: string): Promise<void> {
-  if (MOCK_MODE) return;
-
-  await controlSession(sessionId, 'pause');
-}
-
-/**
- * 恢复图（多会话前缀）。等价于 controlSession(sessionId, 'resume')。
- */
-export async function resumeGraph(sessionId: string): Promise<void> {
-  if (MOCK_MODE) return;
-
-  await controlSession(sessionId, 'resume');
-}
-
-/**
- * 停止图（多会话前缀）。等价于 controlSession(sessionId, 'stop')。
- */
-export async function stopGraph(sessionId: string): Promise<void> {
-  if (MOCK_MODE) {
-    // Mock 模式下只清空
-    return;
-  }
-
-  await controlSession(sessionId, 'stop');
-}
-
-/**
- * 清除图（多会话前缀）。
- */
-export async function clearGraph(sessionId: string): Promise<void> {
-  if (MOCK_MODE) return;
-
-  await sessionRequest(`sessions/${sessionId}/graph`, { method: 'DELETE' });
 }
 
 /**
@@ -363,6 +180,16 @@ export function isMockMode(): boolean {
   return MOCK_MODE;
 }
 
+/**
+ * 非 2xx 时抛错：优先用响应体里后端写好的 {detail}，读不出来再退回 `HTTP <status>`。
+ * sessionRequest / rawRequest / exportRolePool 共用，错误文案以此为准。
+ */
+async function throwIfNotOk(response: Response): Promise<void> {
+  if (response.ok) return;
+  const payload = await response.json().catch(() => null);
+  throw new Error(payload?.detail || `HTTP ${response.status}`);
+}
+
 async function sessionRequest<T>(path: string, init?: RequestInit): Promise<T> {
   const langHeader = { 'X-Language': useUIStateStore.getState().language };
   const response = await fetch(`${baseUrl}${path}`, {
@@ -371,10 +198,7 @@ async function sessionRequest<T>(path: string, init?: RequestInit): Promise<T> {
       ? { 'Content-Type': 'application/json', ...langHeader, ...init.headers }
       : { ...langHeader, ...init?.headers },
   });
-  if (!response.ok) {
-    const payload = await response.json().catch(() => null);
-    throw new Error(payload?.detail || `HTTP ${response.status}`);
-  }
+  await throwIfNotOk(response);
   return response.status === 204 ? (undefined as T) : response.json();
 }
 
@@ -536,13 +360,6 @@ export function getSessionNodeLogs(sessionId: string, nodeId: string): Promise<L
   return sessionRequest(`sessions/${sessionId}/nodes/${nodeId}/logs?limit=500`);
 }
 
-export function getSessionArtifact(
-  sessionId: string,
-  nodeId: string,
-): Promise<{ path: string | null; content: string | null }> {
-  return sessionRequest(`sessions/${sessionId}/nodes/${nodeId}/artifact`);
-}
-
 export function getSessionEventsUrl(sessionId: string, sequenceId?: string): string {
   const suffix = sequenceId ? `/since/${sequenceId}` : '';
   return `${baseUrl}sessions/${sessionId}/graph/events${suffix}`;
@@ -625,23 +442,6 @@ export function saveApiKey(model: string, api_key: string, provider_id?: string 
   return sessionRequest('config/api-key', {
     method: 'PUT',
     body: JSON.stringify({ model, provider_id, api_key }),
-  });
-}
-
-export function deleteApiKey(vendor: string): Promise<void> {
-  return sessionRequest(`config/api-key?vendor=${encodeURIComponent(vendor)}`, {
-    method: 'DELETE',
-  });
-}
-
-export function getInternalUsername(): Promise<InternalUsernameResponse> {
-  return sessionRequest('config/internal-username');
-}
-
-export function saveInternalUsername(username: string): Promise<InternalUsernameResponse> {
-  return sessionRequest('config/internal-username', {
-    method: 'PUT',
-    body: JSON.stringify({ username }),
   });
 }
 
@@ -732,6 +532,45 @@ export function deleteRolePool(poolId: string): Promise<void> {
   return sessionRequest(`role-pools/${poolId}`, { method: 'DELETE' });
 }
 
+export function previewRolePoolExport(poolId: string): Promise<RolePoolExportPreview> {
+  return sessionRequest(`role-pools/${encodeURIComponent(poolId)}/export/preview`);
+}
+
+/** 下载角色池包：fetch → blob → 临时 <a download>（文件名取自 Content-Disposition 的 filename*）。 */
+export async function exportRolePool(poolId: string, fallbackName: string): Promise<void> {
+  const response = await fetch(`${baseUrl}role-pools/${encodeURIComponent(poolId)}/export`, {
+    headers: { 'X-Language': useUIStateStore.getState().language },
+  });
+  await throwIfNotOk(response);
+  const disposition = response.headers.get('Content-Disposition') || '';
+  const encoded = /filename\*=UTF-8''([^;]+)/i.exec(disposition)?.[1];
+  let filename = `${fallbackName}.aicu-pool.zip`;
+  if (encoded) {
+    try { filename = decodeURIComponent(encoded); } catch { /* 保持兜底文件名 */ }
+  }
+  const url = URL.createObjectURL(await response.blob());
+  const anchor = document.createElement('a');
+  anchor.href = url;
+  anchor.download = filename;
+  document.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
+  URL.revokeObjectURL(url);
+}
+
+export function importRolePool(
+  file: Blob,
+  options: { dryRun: boolean; onConflict: BundleConflictPolicy; decisions?: BundleDecisions },
+): Promise<RolePoolImportResult> {
+  const decide = Object.entries(options.decisions ?? {})
+    .map(([key, value]) => `&decide=${encodeURIComponent(`${key}=${value}`)}`)
+    .join('');
+  return rawRequest<RolePoolImportResult>(
+    `role-pools/import?on_conflict=${options.onConflict}&dry_run=${options.dryRun}${decide}`,
+    file,
+  );
+}
+
 export async function getSkills(): Promise<SkillInfo[]> {
   const payload = await sessionRequest<{ skills: SkillInfo[] }>('skills');
   return payload.skills;
@@ -807,28 +646,6 @@ function workspaceQuery(path: string): string {
   return path ? `?path=${encodeURIComponent(path)}` : '';
 }
 
-export function listSessionWorkspace(sessionId: string, path = ''): Promise<WorkspaceListing> {
-  return sessionRequest(`sessions/${sessionId}/workspace${workspaceQuery(path)}`);
-}
-
-export function listNodeWorkspace(
-  sessionId: string,
-  nodeId: string,
-  path = '',
-): Promise<WorkspaceListing> {
-  return sessionRequest(`sessions/${sessionId}/nodes/${nodeId}/workspace${workspaceQuery(path)}`);
-}
-
-export function readNodeWorkspaceFile(
-  sessionId: string,
-  nodeId: string,
-  path: string,
-): Promise<WorkspaceFile> {
-  return sessionRequest(
-    `sessions/${sessionId}/nodes/${nodeId}/workspace/file${workspaceQuery(path)}`,
-  );
-}
-
 export function listNodeResults(sessionId: string, nodeId: string, path = ''): Promise<WorkspaceListing> {
   return sessionRequest(`sessions/${sessionId}/nodes/${nodeId}/results${workspaceQuery(path)}`);
 }
@@ -872,7 +689,7 @@ export function revealBrowsePath(
   path: string,
   nodeId?: string,
 ): Promise<{ revealed: boolean; abs_path: string }> {
-  // POST：这是有副作用的端点（会在用户机器上弹 Finder），服务又默认监听 0.0.0.0。
+  // POST：这是有副作用的端点（会在用户机器上弹 Finder），服务又可能被绑到局域网。
   // GET 会被 <img src> 或链接预取之类的东西触发。
   return sessionRequest(`${browseBase(sessionId, scope, nodeId)}/reveal${workspaceQuery(path)}`, {
     method: 'POST',
@@ -920,10 +737,7 @@ async function rawRequest<T>(path: string, body: Blob): Promise<T> {
       'Content-Type': 'application/octet-stream',
     },
   });
-  if (!response.ok) {
-    const payload = await response.json().catch(() => null);
-    throw new Error(payload?.detail || `HTTP ${response.status}`);
-  }
+  await throwIfNotOk(response);
   return response.json();
 }
 

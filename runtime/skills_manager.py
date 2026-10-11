@@ -8,7 +8,7 @@ import re
 import shutil
 import zipfile
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 import yaml
 
@@ -172,6 +172,19 @@ class SkillsManager:
         if root not in dest.parents and dest != root:
             raise ValueError(f"Invalid entry path in archive: {rel}")
         return dest
+
+    def skill_dir(self, skill_id: str, primary_only: bool = False) -> Optional[Path]:
+        """按名字找 skill 目录（主目录优先，再额外目录）；找不到返回 None。
+
+        ``primary_only=True`` 只看主目录 —— 角色运行时默认只从主目录解析 skill。
+        """
+        self._validate_id(skill_id)
+        dirs = [self.skills_dir] if primary_only else self._all_dirs()
+        for root in dirs:
+            path = root / skill_id
+            if path.is_dir() and (path / "SKILL.md").is_file():
+                return path
+        return None
 
     def _skill_path(self, skill_id: str) -> Path:
         self._validate_id(skill_id)

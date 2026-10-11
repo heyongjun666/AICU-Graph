@@ -39,6 +39,7 @@ import { useMcpCompatWarning } from '../hooks/useMcpCompatWarning';
 import { useWorkspaceDrop } from '../hooks/useWorkspaceDrop';
 import WorkspaceEntryRow from './WorkspaceEntryRow';
 import { CliOptions } from './CliOptions';
+import { errorMessage } from '../utils/errorMessage';
 
 type Tab = 'overview' | 'logs' | 'artifact' | 'events';
 
@@ -94,7 +95,7 @@ const NodeInspector: React.FC = () => {
   const [reviseTask, setReviseTask] = useState('');
   const [task, setTask] = useState('');
   const [role, setRole] = useState('');
-  const [cliName, setCliName] = useState<NodeConfig['cli_name']>('internal');
+  const [cliName, setCliName] = useState<NodeConfig['cli_name']>('claude');
   const [model, setModel] = useState('');
   const [apiBaseUrl, setApiBaseUrl] = useState('');
   const [apiKeyEnv, setApiKeyEnv] = useState('');
@@ -124,20 +125,29 @@ const NodeInspector: React.FC = () => {
     onUploaded: () => setWorkspaceReload((count) => count + 1),
   });
 
+  // 节点展示跟随 store；编辑表单不跟：SSE 每推一次更新 storeNode 就会换引用，
+  // 若在这里顺手重置表单，用户正在输入的内容会被抹掉。
+  const storeNodeRef = useRef(storeNode);
+  storeNodeRef.current = storeNode;
+
   useEffect(() => {
     setNode(storeNode || null);
-    if (storeNode) {
-      const config = storeNode.config || {};
-      setTask(storeNode.task || '');
-      setRole(storeNode.role || 'default');
-      setCliName(config.cli_name || '');
-      setModel(config.model || '');
-      setApiBaseUrl(config.api_base_url || '');
-      setApiKeyEnv(config.api_key_env || '');
-      setSkillIds((config.skills || []).join(', '));
-      setSkipPermissions(config.skip_permissions ?? true);
-    }
   }, [storeNode]);
+
+  // 表单只在两个时机从节点同步：切换选中节点、进入编辑模式。编辑期间不碰。
+  useEffect(() => {
+    const source = storeNodeRef.current;
+    if (!source) return;
+    const config = source.config || {};
+    setTask(source.task || '');
+    setRole(source.role || 'default');
+    setCliName(config.cli_name || '');
+    setModel(config.model || '');
+    setApiBaseUrl(config.api_base_url || '');
+    setApiKeyEnv(config.api_key_env || '');
+    setSkillIds((config.skills || []).join(', '));
+    setSkipPermissions(config.skip_permissions ?? true);
+  }, [selectedNodeId, editing]);
 
   useEffect(() => {
     setWorkspace(null);
@@ -231,7 +241,7 @@ const NodeInspector: React.FC = () => {
     listNodeResults(sessionId, selectedNodeId, workspacePath)
       .then((listing) => { if (!cancelled) setWorkspace(listing); })
       .catch((reason) => {
-        if (!cancelled) setWorkspaceError(reason instanceof Error ? reason.message : String(reason));
+        if (!cancelled) setWorkspaceError(errorMessage(reason));
       })
       .finally(() => { if (!cancelled) setWorkspaceBusy(false); });
     return () => { cancelled = true; };
@@ -323,7 +333,7 @@ const NodeInspector: React.FC = () => {
       setNode(updated);
       updateNode(updated.id, updated);
     } catch (reason) {
-      const msg = reason instanceof Error ? reason.message : String(reason);
+      const msg = errorMessage(reason);
       setError(msg);
       addToast({ type: 'error', message: msg });
     } finally {
@@ -353,7 +363,7 @@ const NodeInspector: React.FC = () => {
       updateNode(updated.id, updated);
       setEditing(false);
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : String(reason));
+      setError(errorMessage(reason));
     } finally {
       setBusy(false);
     }
@@ -378,8 +388,8 @@ const NodeInspector: React.FC = () => {
       selectNode(null);
       addToast({ type: 'success', message: t('inspector.nodeDeleted') });
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : String(reason));
-      addToast({ type: 'error', message: reason instanceof Error ? reason.message : String(reason) });
+      setError(errorMessage(reason));
+      addToast({ type: 'error', message: errorMessage(reason) });
     } finally {
       setBusy(false);
     }
@@ -395,7 +405,7 @@ const NodeInspector: React.FC = () => {
       setNode(updated);
       updateNode(updated.id, updated);
     } catch (reason) {
-      const msg = reason instanceof Error ? reason.message : String(reason);
+      const msg = errorMessage(reason);
       setError(msg);
       addToast({ type: 'error', message: msg });
     } finally {
@@ -416,7 +426,7 @@ const NodeInspector: React.FC = () => {
       setNode(updated);
       updateNode(updated.id, updated);
     } catch (reason) {
-      const msg = reason instanceof Error ? reason.message : String(reason);
+      const msg = errorMessage(reason);
       setError(msg);
       addToast({ type: 'error', message: msg });
     } finally {
@@ -435,7 +445,7 @@ const NodeInspector: React.FC = () => {
     try {
       setWorkspaceFile(await readNodeResultFile(sessionId, node.id, entry.path));
     } catch (reason) {
-      setWorkspaceError(reason instanceof Error ? reason.message : String(reason));
+      setWorkspaceError(errorMessage(reason));
     } finally {
       setWorkspaceBusy(false);
     }
@@ -466,7 +476,7 @@ const NodeInspector: React.FC = () => {
           <span className={`node-status-icon status-${node.status.toLowerCase()}`} />
           <div><strong>{node.role || node.exec_type}</strong><span>{node.id.slice(0, 8)}</span></div>
         </div>
-        <button className="icon-button" onClick={() => selectNode(null)} title={t('inspector.closeInspector')}><X size={18} /></button>
+        <button className="icon-button" onClick={() => selectNode(null)} title={t('inspector.closeInspector')} aria-label={t('inspector.closeInspector')}><X size={18} /></button>
       </div>
 
       <div className="inspector-status-row">
@@ -719,7 +729,7 @@ const NodeInspector: React.FC = () => {
 
       {editing && (
         <div className="inspector-editor">
-          <div className="dialog-header"><h2>{t('inspector.editNode')}</h2><button className="icon-button" onClick={() => setEditing(false)}><X size={17} /></button></div>
+          <div className="dialog-header"><h2>{t('inspector.editNode')}</h2><button className="icon-button" onClick={() => setEditing(false)} aria-label={t('common.close')}><X size={17} /></button></div>
           <div className="form-grid two-columns"><label>{t('node.role')}<input value={role} onChange={(event) => setRole(event.target.value)} /></label><label>{t('dialog.cli')}<select value={cliName} onChange={(event) => setCliName(event.target.value as NodeConfig['cli_name'])}><CliOptions clis={clis} defaultCli={defaultCli} />{cliName && !clis.some((cli) => cli.id === cliName) ? <option value={cliName}>{cliName}</option> : null}</select>{mcpWarning && <div className="form-notice is-warning">{mcpWarning}</div>}</label></div>
           <label>{t('dialog.task')}<textarea value={task} onChange={(event) => setTask(event.target.value)} rows={7} /></label>
           <div className="form-grid two-columns"><label>{t('dialog.model')}<input value={model} onChange={(event) => setModel(event.target.value)} placeholder={t('dialog.useSessionDefault')} /></label><label>{t('dialog.apiKeyEnv')}<input value={apiKeyEnv} onChange={(event) => setApiKeyEnv(event.target.value)} placeholder="ANTHROPIC_API_KEY" /></label><label className="full-field">{t('dialog.apiBaseUrl')}<input value={apiBaseUrl} onChange={(event) => setApiBaseUrl(event.target.value)} /></label><label className="full-field">{t('inspector.skillIds')}<input value={skillIds} onChange={(event) => setSkillIds(event.target.value)} placeholder="skill-one, focused-review" /></label></div>
@@ -730,7 +740,7 @@ const NodeInspector: React.FC = () => {
 
       {revising && (
         <div className="inspector-editor">
-          <div className="dialog-header"><h2>{isManager ? t('inspector.reviseManager') : t('inspector.reviseWorker')}</h2><button className="icon-button" onClick={() => setRevising(false)}><X size={17} /></button></div>
+          <div className="dialog-header"><h2>{isManager ? t('inspector.reviseManager') : t('inspector.reviseWorker')}</h2><button className="icon-button" onClick={() => setRevising(false)} aria-label={t('common.close')}><X size={17} /></button></div>
           <p className="detail-hint">{isManager ? t('inspector.reviseHint') : t('inspector.reviseHintWorker')}</p>
           <label>{t('inspector.incrementalTask')}<textarea value={reviseTask} onChange={(event) => setReviseTask(event.target.value)} rows={7} placeholder={t('inspector.revisePlaceholder')} /></label>
           <div className="dialog-actions"><button className="secondary-button" onClick={() => setRevising(false)}>{t('common.cancel')}</button><button className="primary-button" onClick={handleRevise} disabled={!reviseTask.trim() || busy}><RefreshCw size={15} /> {t('inspector.revise')}</button></div>

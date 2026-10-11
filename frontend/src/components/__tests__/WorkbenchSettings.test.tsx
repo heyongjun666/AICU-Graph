@@ -5,7 +5,7 @@ import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-li
 import WorkbenchSettings from '../WorkbenchSettings';
 import * as api from '../../utils/api';
 import { useSessionStore } from '../../stores/SessionStore';
-import { CliInfo, GlobalConfig, McpServerInfo, ProviderPreset, RoleField, RoleInfo } from '../../types';
+import { CliInfo, GlobalConfig, McpServerInfo, ProviderPreset, RoleField, RoleInfo, RolePoolExportPreview, RolePoolImportResult } from '../../types';
 import { zh } from '../../i18n/zh';
 import { en } from '../../i18n/en';
 
@@ -16,6 +16,7 @@ vi.mock('../../utils/api', () => ({
   createSkill: vi.fn(),
   deleteMcpServer: vi.fn(),
   deleteRolePool: vi.fn(),
+  exportRolePool: vi.fn(),
   getEffectiveBaseUrl: vi.fn(),
   getGlobalConfig: vi.fn(),
   getMcpServers: vi.fn(),
@@ -25,6 +26,8 @@ vi.mock('../../utils/api', () => ({
   getRoles: vi.fn(),
   getSkill: vi.fn(),
   getSkills: vi.fn(),
+  importRolePool: vi.fn(),
+  previewRolePoolExport: vi.fn(),
   probeMcpServer: vi.fn(),
   updateGlobalConfig: vi.fn(),
   updateMcpServer: vi.fn(),
@@ -498,6 +501,143 @@ describe('WorkbenchSettings role pools', () => {
     vi.unstubAllGlobals();
   });
 
+  describe('export / import', () => {
+    const preview = (overrides: Partial<RolePoolExportPreview> = {}): RolePoolExportPreview => ({
+      pool: { id: 'p1', name: '博客开发', roles: ['code'] },
+      roles: [], skills: [], personal_skills: [], mcp: [], sensitive_mcp: [], warnings: [],
+      ...overrides,
+    } as RolePoolExportPreview);
+
+    const importPlan = (overrides: Partial<RolePoolImportResult> = {}): RolePoolImportResult => ({
+      dry_run: true,
+      on_conflict: 'skip',
+      has_conflict: false,
+      pool: { name: '博客开发', roles: ['code'], status: 'new', local_id: null, key: 'pool' },
+      roles: [{ id: 'code', type: 'worker', status: 'new', key: 'role:worker/code' }],
+      skills: [],
+      mcp: [],
+      readiness: [],
+      warnings: [],
+      ...overrides,
+    });
+
+    const exportButton = () => headingButton('导出');
+    const importButton = () => headingButton('导入');
+    const pickFile = () => {
+      const input = screen.getByTestId('pool-import-input') as HTMLInputElement;
+      fireEvent.change(input, { target: { files: [new File(['zip'], '博客开发.aicu-pool.zip')] } });
+    };
+
+    beforeEach(() => {
+      vi.mocked(api.getRolePools).mockResolvedValue([existingPool]);
+    });
+
+    it('warns about credential keys (never values) before exporting, then downloads', async () => {
+      const confirm = vi.fn(() => true);
+      vi.stubGlobal('confirm', confirm);
+      vi.mocked(api.previewRolePoolExport).mockResolvedValue(
+        preview({ sensitive_mcp: [{ name: 'github', keys: ['GITHUB_TOKEN'] }] }),
+      );
+      vi.mocked(api.exportRolePool).mockResolvedValue(undefined);
+      renderSettings();
+      await openPoolsTab();
+      await screen.findByText('博客开发');
+
+      fireEvent.click(exportButton());
+
+      await waitFor(() => expect(api.exportRolePool).toHaveBeenCalledWith('p1', '博客开发'));
+      const prompt = String((confirm.mock.calls[0] as unknown[])[0]);
+      expect(prompt).toContain('github');
+      expect(prompt).toContain('GITHUB_TOKEN');
+      vi.unstubAllGlobals();
+    });
+
+    it('also tells the user which skills come from their personal directory', async () => {
+      const confirm = vi.fn(() => false);
+      vi.stubGlobal('confirm', confirm);
+      vi.mocked(api.previewRolePoolExport).mockResolvedValue(preview({ personal_skills: ['mine'] }));
+      renderSettings();
+      await openPoolsTab();
+      await screen.findByText('博客开发');
+
+      fireEvent.click(exportButton());
+
+      await waitFor(() => expect(confirm).toHaveBeenCalled());
+      const prompt = String((confirm.mock.calls[0] as unknown[])[0]);
+      expect(prompt).toContain('~/.claude/skills');
+      expect(prompt).toContain('mine');
+      expect(api.exportRolePool).not.toHaveBeenCalled();
+      vi.unstubAllGlobals();
+    });
+
+    it('does not download when the credential warning is declined', async () => {
+      vi.stubGlobal('confirm', vi.fn(() => false));
+      vi.mocked(api.previewRolePoolExport).mockResolvedValue(
+        preview({ sensitive_mcp: [{ name: 'github', keys: ['GITHUB_TOKEN'] }] }),
+      );
+      renderSettings();
+      await openPoolsTab();
+      await screen.findByText('博客开发');
+
+      fireEvent.click(exportButton());
+
+      await waitFor(() => expect(api.previewRolePoolExport).toHaveBeenCalledWith('p1'));
+      expect(api.exportRolePool).not.toHaveBeenCalled();
+      vi.unstubAllGlobals();
+    });
+
+    it('exports straight away when there is nothing to warn about', async () => {
+      const confirm = vi.fn(() => true);
+      vi.stubGlobal('confirm', confirm);
+      vi.mocked(api.previewRolePoolExport).mockResolvedValue(preview());
+      vi.mocked(api.exportRolePool).mockResolvedValue(undefined);
+      renderSettings();
+      await openPoolsTab();
+      await screen.findByText('博客开发');
+
+      fireEvent.click(exportButton());
+
+      await waitFor(() => expect(api.exportRolePool).toHaveBeenCalledWith('p1', '博客开发'));
+      expect(confirm).not.toHaveBeenCalled();
+      vi.unstubAllGlobals();
+    });
+
+    it('keeps export disabled until a pool is selected, but import is always available', async () => {
+      vi.mocked(api.getRolePools).mockResolvedValue([]);
+      renderSettings();
+      await openPoolsTab();
+
+      expect(exportButton().disabled).toBe(true);
+      expect(importButton().disabled).toBe(false);
+    });
+
+    it('previews the picked file with a dry run and only imports after confirming', async () => {
+      vi.mocked(api.importRolePool)
+        .mockResolvedValueOnce(importPlan())
+        .mockResolvedValueOnce(importPlan({
+          dry_run: false,
+          counts: { created: 2, overwritten: 0, skipped: 0, unchanged: 0 },
+        }));
+      renderSettings();
+      await openPoolsTab();
+      await screen.findByText('博客开发');
+      const poolFetchesBefore = vi.mocked(api.getRolePools).mock.calls.length;
+
+      pickFile();
+
+      await waitFor(() => expect(api.importRolePool).toHaveBeenCalledTimes(1));
+      expect(vi.mocked(api.importRolePool).mock.calls[0][1]).toEqual({ dryRun: true, onConflict: 'skip', decisions: {} });
+
+      fireEvent.click(await screen.findByText('确认导入'));
+
+      await waitFor(() => expect(api.importRolePool).toHaveBeenCalledTimes(2));
+      expect(vi.mocked(api.importRolePool).mock.calls[1][1]).toEqual({ dryRun: false, onConflict: 'skip', decisions: {} });
+      await waitFor(() =>
+        expect(vi.mocked(api.getRolePools).mock.calls.length).toBeGreaterThan(poolFetchesBefore));
+      expect(api.getRoles).toHaveBeenCalled();
+    });
+  });
+
   it('keeps a selected pool read-only until Edit is clicked', async () => {
     vi.mocked(api.getRolePools).mockResolvedValue([existingPool]);
     const { container } = renderSettings();
@@ -765,8 +905,8 @@ describe('WorkbenchSettings CLI 下拉的 MCP 标注', () => {
   // 标注必须从后端下发的 supports_mcp 派生。若改回在前端硬编码名单，将来后端接一个
   // 新 CLI 就会出现「实际已接入、界面却说未接入」的假象 —— 这条测试就是拦这个的。
   const CLIS: CliInfo[] = [
-    { id: 'internal', display_name: 'Internal', installed: true, priority: 0,
-      models: ['DeepSeek-V4-Flash'], supports_mcp: true },
+    { id: 'claude', display_name: 'Claude Code', installed: true, priority: 0,
+      models: ['claude-sonnet-5'], supports_mcp: true },
     { id: 'codex', display_name: 'OpenAI Codex CLI', installed: true, priority: 1,
       models: ['gpt-5.6'], supports_mcp: true },
     // 未接线 + 未安装：两个标注都要出，且互不覆盖
@@ -785,7 +925,7 @@ describe('WorkbenchSettings CLI 下拉的 MCP 标注', () => {
       },
       clis: CLIS,
       provider_presets: [],
-      default_cli: 'internal',
+      default_cli: 'claude',
     });
     render(<WorkbenchSettings open onClose={() => {}} onSaved={() => {}} />);
     await waitFor(() => expect(api.getGlobalConfig).toHaveBeenCalled());
@@ -801,7 +941,7 @@ describe('WorkbenchSettings CLI 下拉的 MCP 标注', () => {
   it('已接入 MCP 的 CLI 不带任何标注', async () => {
     await renderSettings();
     const labels = optionLabels();
-    expect(labels.internal).toBe('Internal');
+    expect(labels.claude).toBe('Claude Code');
     expect(labels.codex).toBe('OpenAI Codex CLI');
   });
 

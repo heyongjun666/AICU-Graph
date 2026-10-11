@@ -26,6 +26,7 @@ import { createSessionNode, getGlobalConfig, getGraphSnapshot, getLinkCandidates
 import { useI18n } from './i18n';
 import ToastContainer from './components/ToastContainer';
 import './workbench.css';
+import { errorMessage } from './utils/errorMessage';
 
 const App: React.FC = () => {
   const { t } = useI18n();
@@ -46,6 +47,7 @@ const App: React.FC = () => {
   const nodes = useGraphStore((state) => state.nodes);
   const selectedNodeId = useGraphStore((state) => state.selectedNodeId);
   const clientStatus = useUIStateStore((state) => state.clientStatus);
+  const addToast = useUIStateStore((state) => state.addToast);
   const loadEvents = useEventStore((state) => state.loadEvents);
   const clearEvents = useEventStore((state) => state.clear);
   const [sidebarOpen, setSidebarOpen] = useState(false);
@@ -103,7 +105,7 @@ const App: React.FC = () => {
         // Keep the last authoritative list while exposing the request error;
         // never turn an error into an all-nodes fallback.
         setLinkCandidateStatus('error');
-        setLinkCandidateError(reason instanceof Error ? reason.message : String(reason));
+        setLinkCandidateError(errorMessage(reason));
       });
     return () => { cancelled = true; };
   }, [activeSessionId, newNodeOpen]);
@@ -156,12 +158,21 @@ const App: React.FC = () => {
 
   const handleRename = async (session: SessionSummary) => {
     const title = window.prompt(t('session.rename'), session.title)?.trim();
-    if (title && title !== session.title) await renameSession(session.id, title);
+    if (!title || title === session.title) return;
+    try {
+      await renameSession(session.id, title);
+    } catch (reason) {
+      addToast({ type: 'error', message: errorMessage(reason) });
+    }
   };
 
   const handleDelete = async (session: SessionSummary) => {
     if (!confirmSessionDelete(session)) return;
-    await deleteSession(session.id);
+    try {
+      await deleteSession(session.id);
+    } catch (reason) {
+      addToast({ type: 'error', message: errorMessage(reason) });
+    }
   };
 
   const SIDEBAR_WIDTH = 276;

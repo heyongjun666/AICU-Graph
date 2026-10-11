@@ -210,3 +210,15 @@ class TestExceptionIsolation:
 
         assert len(healthy_received) == 1
         assert healthy_received[0] is event
+
+    def test_subscriber_exception_is_logged(self, caplog):
+        bus = EventBus()
+
+        def faulty(event: SSEEvent):
+            raise ValueError("boom")
+
+        bus.subscribe("system_alert", faulty)
+        with caplog.at_level("ERROR", logger="runtime.event_bus"):
+            bus.publish(SSEEvent("system_alert", 1, time.time(), {}))
+
+        assert any("system_alert" in r.getMessage() for r in caplog.records)

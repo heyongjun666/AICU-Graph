@@ -46,7 +46,7 @@ D. 反问门 — 对每个拟设为 manager 的节点验证其在下展后是否
 E. 应用 T1–T4 进一步校验每个 worker 标签确实触底;
 F. 设计 depends_on 强数据流关系, 为协作节点指定共享锚点确保接口对齐;
 F2. 设计事件协作（决策 6）——需要反馈闭环的节点对（如产出↔质检、审核↔产出）不必声明通信关系,
-由系统 Router 统一路由; 需并发协作时给生产者配置 events.publish, 事件 content 只描述事件本身;
+由系统 Router 统一路由; 需并发协作时让生产者直接发布事件(默认开启, 无需在计划里声明), 事件只描述事件本身;
 G. 共享工作区 — 所有节点自动挂载同一 Session Shared Workspace; 为需要协作/融合的 worker 分配
 不同 output_path 分区(默认给 Worker 分配具体分区, 空串=全局写高权限仅确实需要时用); 不再规划集成节点;
 H. 输出纯 JSON ExecutionPlan.
@@ -665,7 +665,7 @@ class AICU:
         """把 self.skills 送进这个 CC 的 CLI 能读到的项目级 skill 目录。
 
         目录由 adapter 声明（``skills_workspace_dir``），因为**每家读的位置不一样**：
-        claude / internal 读 ``.claude/skills``（另加 ``--setting-sources project``），
+        claude 读 ``.claude/skills``（另加 ``--setting-sources project``），
         codebuddy 读 ``.codebuddy/skills``，kimi / codex 读 ``.agents/skills``，
         qwen 读 ``.qwen/skills``，pi 读 ``.pi/skills``，gemini 读 ``.gemini/skills``，
         cursor 读 ``.cursor/skills``。
@@ -1911,7 +1911,7 @@ class AICU:
             revise_instr = self.revise_instruction
         else:
             output_path = str(self._cc_output_path(0))
-            revise_instr = self.revise_instruction.format(output_path=output_path)
+            revise_instr = self.revise_instruction.replace("{output_path}", output_path)
 
         prompt = (
             f"原始问题: {question}\n\n"

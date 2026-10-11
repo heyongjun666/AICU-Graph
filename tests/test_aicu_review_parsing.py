@@ -184,6 +184,23 @@ class TestPairFailClosed:
         assert result["consensus_reached"] is False
 
 
+class TestReviseInstructionTemplate:
+    def test_braces_in_revise_instruction_do_not_crash(self, tmp_path):
+        """角色里的 revise_instruction 可能含 JSON 示例的花括号，不能被当成 format 字段。"""
+        a = _make_aicu(tmp_path, num_ccs=2)
+        a.modular_output = False
+        a.revise_instruction = '按缺陷修订 {output_path}，格式示例 {"ok": true}'
+        prompts = []
+        a._cc_chat_with_retry = lambda cc, prompt, timeout=7200, **kw: prompts.append(prompt)
+
+        a._revise_with_defect_list(
+            "问题", a.ccs[0], [{"severity": "high", "check": "c", "description": "d"}]
+        )
+
+        assert '{"ok": true}' in prompts[0]
+        assert "{output_path}" not in prompts[0]
+
+
 class TestSoloNoSelfReview:
     def test_solo_skips_self_review(self, tmp_path, monkeypatch):
         """硬删 solo 自审：num_ccs=1 只生成一次即交付，不再有自审/修订轮。"""

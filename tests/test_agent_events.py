@@ -140,6 +140,15 @@ class TestEventLogPersistence:
         assert mgr2.event_count() == 2
         assert [e.event_id for e in mgr2.list_events()] == ids
 
+    @pytest.mark.parametrize("bad_id", ["../../etc/x", "a/b", "evt\n1", "x" * 200])
+    def test_unsafe_event_id_is_replaced(self, tmp_path, bad_id):
+        """event_id 会拼进 inbox 文件名，CC 给的不合规 id 不能原样进日志。"""
+        mgr = AgentEventManager(workspace_root=str(tmp_path))
+        ids = mgr.publish_events("producer", [{"event_id": bad_id, "content": "c"}])
+        assert len(ids) == 1
+        assert ids[0] != bad_id
+        assert re.fullmatch(r"[A-Za-z0-9_-]{1,64}", ids[0])
+
     def test_events_file_written(self, tmp_path):
         mgr = AgentEventManager(workspace_root=str(tmp_path))
         mgr.publish_events("producer", [{"content": "c1"}])

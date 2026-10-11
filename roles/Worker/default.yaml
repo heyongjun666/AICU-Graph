@@ -55,7 +55,7 @@ skills_dir: skills
 #   - 空列表 [] 表示不启用任何 skill（CC 行为与未装 skill 完全一致）
 #   - 非空列表时，AICU 会在每个 CC workspace 下创建**该 CLI 自己的**项目级 skill
 #     目录，软链接到列表中指定的 skill。目录由 CLI 决定，不是统一的 .claude/skills/：
-#       claude / internal   → .claude/skills/     codebuddy → .codebuddy/skills/
+#       claude          → .claude/skills/     codebuddy → .codebuddy/skills/
 #       kimi / codex    → .agents/skills/     qwen      → .qwen/skills/
 #       pi              → .pi/skills/         gemini    → .gemini/skills/
 #       cursor          → .cursor/skills/

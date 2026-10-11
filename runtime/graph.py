@@ -22,7 +22,7 @@ MutationCallback = Callable[[str, dict], None]
 _STRUCTURAL_FIELDS = frozenset({"parent_id", "exec_type", "role", "step_ref"})
 
 
-class DependencyError(Exception):
+class DependencyError(RuntimeError):
     """删除节点时存在被依赖关系。
 
     当 remove_node 的目标节点仍有其他节点依赖它时抛出。

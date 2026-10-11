@@ -4,9 +4,12 @@ runtime/event_bus.py — v2 事件总线模块
 提供 SSE 风格的事件发布/订阅机制，支持通配符匹配和线程安全。
 """  # """  # noqa: D202
 
+import logging
 import threading
 from dataclasses import dataclass
 from typing import Any, Callable
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Types
@@ -98,7 +101,7 @@ class EventBus:
         """发布事件。
 
         将事件广播给所有匹配的订阅者。sequence_id 会被全局覆写。
-        单个订阅者抛出的异常会被捕获并忽略，不影响其它订阅者。
+        单个订阅者抛出的异常会被捕获并记日志，不影响其它订阅者。
 
         Args:
             event: 要发布的事件对象。
@@ -118,8 +121,8 @@ class EventBus:
             try:
                 handler(event)
             except Exception:
-                # 订阅者异常隔离，不影响其它订阅者
-                pass
+                # 订阅者异常隔离，不影响其它订阅者；但要留下痕迹，否则订阅者坏了没人知道。
+                logger.exception("Event bus subscriber raised while handling %s", event.event_type)
 
 
 # ---------------------------------------------------------------------------

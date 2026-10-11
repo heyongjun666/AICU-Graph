@@ -115,9 +115,9 @@ class TestSkillsLandInTheRightDirectory:
             # 指回源目录（而不是被拷了一份、或指向一个不存在的地方）
             assert link.resolve() == (src / SKILL_NAME).resolve()
 
-    def test_claude_and_internal_keep_the_historical_path(self, tmp_path):
-        """claude / internal 是唯一**本来就已生效**的两家，路径不能变 —— 它今天就在 .claude/skills。"""
-        for cli_id in ("claude", "internal"):
+    def test_claude_keeps_the_historical_path(self, tmp_path):
+        """claude 是唯一**本来就已生效**的一家，路径不能变 —— 它今天就在 .claude/skills。"""
+        for cli_id in ("claude",):
             src = _make_skill_source(tmp_path / cli_id)
             aicu = _make_aicu(
                 tmp_path / cli_id, cli_name=cli_id, skills=[SKILL_NAME], skills_dir=src

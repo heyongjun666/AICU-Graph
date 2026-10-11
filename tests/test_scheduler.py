@@ -820,3 +820,84 @@ class TestManagerChildrenCompleted:
 
         assert "M1" not in self.delegate.completed_managers, \
             "expand 尚未完成的 Manager 不得推进 review"
+
+
+class TestSchedulerFailureIsolation:
+
+    def _scheduler(self, registry=None):
+        from runtime.scheduler import Scheduler
+        self.graph = Graph()
+        self.delegate = MockDelegate()
+        return Scheduler(
+            graph=self.graph, registry=registry or ExecutableRegistry(),
+            delegate=self.delegate, runtime_gateway=MockRuntimeGateway(),
+            max_concurrency=4,
+        )
+
+    def test_create_failure_notifies_waiting_parent_manager(self):
+        """Executable 创建失败的节点没有 Future，必须主动通知父 Manager，否则它永远 Waiting。"""
+        scheduler = self._scheduler()  # 空 registry：create() 必然抛错
+        self.graph.add_node(Node(
+            id="M1", exec_type="manager", role="coord", task="t",
+            config={}, status=NodeStatus.WAITING, manager_phase="waiting",
+        ))
+        child = Node(
+            id="A", exec_type="nonexistent", role="dev", task="t",
+            config={}, status=NodeStatus.READY, parent_id="M1",
+        )
+        self.graph.add_node(child)
+        self.graph.add_edge(Edge(id="e1", type=EdgeType.PARENT, from_node="M1", to_node="A"))
+
+        scheduler._execute_node(child)
+
+        assert self.graph.get_node("A").status == NodeStatus.FAILED
+        assert self.delegate.completed_managers == ["M1"]
+
+    def test_post_processing_error_does_not_block_other_completed_nodes(self):
+        from concurrent.futures import Future
+
+        scheduler = self._scheduler()
+        for node_id in ("A", "B"):
+            self.graph.add_node(Node(
+                id=node_id, exec_type="test", role="dev", task="t",
+                config={}, status=NodeStatus.RUNNING,
+            ))
+            future = Future()
+            future.set_result(NodeStatus.COMPLETED)
+            scheduler._futures[node_id] = future
+
+        def boom(node_id):
+            if node_id == "A":
+                raise RuntimeError("routing exploded")
+
+        scheduler._handle_routing = boom
+        scheduler._process_completed_futures()
+
+        assert self.graph.get_node("A").status == NodeStatus.COMPLETED
+        assert self.graph.get_node("B").status == NodeStatus.COMPLETED
+        assert not scheduler._futures
+
+    def test_watchdog_counter_resets_after_successful_tick(self):
+        """看门狗重试计数只统计「连续」出错：成功的 tick 之后必须清零。"""
+        from concurrent.futures import Future
+
+        scheduler = self._scheduler()
+        self.graph.add_node(Node(
+            id="A", exec_type="test", role="dev", task="t",
+            config={}, status=NodeStatus.RUNNING,
+        ))
+        scheduler._futures["A"] = Future()  # 未完成：图里始终有运行中节点，循环不会自动停
+        scheduler._watchdog_retries = 2
+        original = scheduler._publish_tick_event
+        calls = []
+
+        def publish_once_then_stop():
+            calls.append(1)
+            original()
+            scheduler._stop_event.set()
+
+        scheduler._publish_tick_event = publish_once_then_stop
+        scheduler._running = True
+        scheduler._tick_loop()
+
+        assert calls and scheduler._watchdog_retries == 0

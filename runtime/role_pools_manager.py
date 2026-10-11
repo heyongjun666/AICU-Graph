@@ -192,6 +192,8 @@ class RolePoolsManager:
             )
         return clean
 
+    validate_name = _validate_name
+
     def _normalize_roles(self, roles: Any) -> list[str]:
         """校验并归一化角色 id 列表：非空、去重保序、每个 id 必须已存在。
 

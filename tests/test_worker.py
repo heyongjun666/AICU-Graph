@@ -483,7 +483,7 @@ class TestRealMode:
                 self.call_count += 1
                 self.last_question = question
                 raise RuntimeError(
-                    "internal 执行失败 (returncode=1; stdout_tail=... "
+                    "claude 执行失败 (returncode=1; stdout_tail=... "
                     "API Error: 400 Model do not support image input. Request id: ... ; stderr=...)"
                 )
 
@@ -948,7 +948,7 @@ class TestPromptCostGuidance:
 class _RejectingAICU:
     """前 fail_times 次 ask 抛 API 400，之后成功；记录每次收到的任务体。"""
 
-    ERROR = "internal 执行失败 (returncode=1; stdout_tail=API Error: 400 Model do not support image input. Request id: abc)"
+    ERROR = "claude 执行失败 (returncode=1; stdout_tail=API Error: 400 Model do not support image input. Request id: abc)"
 
     def __init__(self, fail_times: int = 1, error: Optional[str] = None):
         self.fail_times = fail_times
@@ -997,8 +997,8 @@ class TestRetryWithPreviousError:
         assert len(aicu.questions) == 2
 
     @pytest.mark.parametrize("error", [
-        "internal 执行失败 (returncode=1; stdout_tail=API Error: 401 unauthorized)",
-        "internal 执行失败 (returncode=1; stdout_tail=API Error: 529 overloaded)",
+        "claude 执行失败 (returncode=1; stdout_tail=API Error: 401 unauthorized)",
+        "claude 执行失败 (returncode=1; stdout_tail=API Error: 529 overloaded)",
         "timeout after 600s",
     ])
     def test_non_400_errors_do_not_trigger_retry(self, error):
@@ -1038,7 +1038,7 @@ class TestRetryWithPreviousError:
     def test_error_text_is_extracted_and_bounded(self):
         long_tail = "x" * 5000
         text = worker_module._extract_error_text(
-            f"Worker execution failed: internal 执行失败 (stdout_tail=...API Error: 400 bad {long_tail}"
+            f"Worker execution failed: claude 执行失败 (stdout_tail=...API Error: 400 bad {long_tail}"
         )
         assert text.startswith("API Error: 400 bad")
         assert len(text) <= 800

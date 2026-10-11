@@ -537,7 +537,7 @@ class Worker(Executable):
             parts.append(shared_block)
 
         # ----- Agent 事件总线（Node → Router → Node 动态协作信号） -----
-        # 事件发布：config.events.publish 非空时；收件箱：event_inbox/ 已有待处理事件时。
+        # 事件发布：无条件注入；收件箱：event_inbox/ 已有待处理事件时。
         # 事件是唯一通信载体：content 只描述事件本身，由 AICU Router 统一决定给谁。
         # 事件不参与调度，只描述执行过程中发生了什么；CC 用 OS 工具直写/轮询。
         event_publish_block = Worker._build_event_publish_instructions(node)
@@ -870,8 +870,7 @@ class Worker(Executable):
         """构建续接轮任务体：激活反馈 + 事件收件箱 + 事件发布契约。
 
         续接模式（CC 已通过 --resume 保留完整对话历史）下不需要重建项目
-        目标/依赖等上下文，只注入本次的增量信息。events.publish 非空时
-        **重申**事件发布契约，保证被激活重跑的 worker 记得发事件。
+        目标/依赖等上下文，只注入本次的增量信息。并**重申**事件发布契约，保证被激活重跑的 worker 记得发事件。
 
         Args:
             node: 当前 Node。

@@ -1,10 +1,11 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { ChevronDown, Boxes, FolderTree, HelpCircle, Languages, Pencil, Plug, Plus, Save, Server, Sparkles, Trash2, Upload, Users, X } from 'lucide-react';
-import { CliInfo, EffectiveBaseUrlResponse, GlobalConfig, McpRoleRef, McpServerInfo, McpServerInput, ProviderPreset, RoleField, RoleInfo, RolePool, RoleSchema, SkillInfo } from '../types';
+import { ChevronDown, Boxes, Download, FolderTree, HelpCircle, Languages, Pencil, Plug, Plus, Save, Server, Sparkles, Trash2, Upload, Users, X } from 'lucide-react';
+import { CliInfo, EffectiveBaseUrlResponse, GlobalConfig, McpRoleRef, McpServerInfo, McpServerInput, ProviderPreset, RoleField, RoleInfo, RolePool, RolePoolImportResult, RoleSchema, SkillInfo } from '../types';
 import { useI18n } from '../i18n';
 import { useUIStateStore } from '../stores/UIStateStore';
 import { useSessionStore } from '../stores/SessionStore';
 import SearchCheckboxPicker from './SearchCheckboxPicker';
+import { RolePoolImportDialog, describeBundleWarning } from './RolePoolImportDialog';
 import { CliOptions } from './CliOptions';
 import {
   createMcpServer,
@@ -15,8 +16,8 @@ import {
   deleteRole,
   deleteRolePool,
   deleteSkill,
+  exportRolePool,
   getApiKey,
-  getInternalUsername,
   getEffectiveBaseUrl,
   getGlobalConfig,
   getMcpServers,
@@ -27,9 +28,9 @@ import {
   getSkill,
   getSkills,
   importSkill,
+  previewRolePoolExport,
   probeMcpServer,
   saveApiKey,
-  saveInternalUsername,
   testConnection,
   updateGlobalConfig,
   updateMcpServer,
@@ -38,6 +39,7 @@ import {
   updateSkill,
 } from '../utils/api';
 import { clearRoleHoverDetailCache, loadRoleHoverDetail } from '../utils/roleHoverDetail';
+import { errorMessage } from '../utils/errorMessage';
 
 type SettingsTab = 'connection' | 'workspace' | 'roles' | 'pools' | 'skills' | 'mcp' | 'language';
 type RoleType = NonNullable<RoleInfo['type']>;
@@ -453,6 +455,8 @@ const WorkbenchSettings: React.FC<WorkbenchSettingsProps> = ({ open, onClose, on
   const [poolName, setPoolName] = useState('');
   const [poolRoles, setPoolRoles] = useState<string[]>([]);
   const [poolQuery, setPoolQuery] = useState('');
+  const [poolImportFile, setPoolImportFile] = useState<File | null>(null);
+  const poolImportInput = useRef<HTMLInputElement>(null);
   // 三个资源 tab 的编辑开关。不另设 mode 枚举：selectedX === '' 本来就是「新建」的判据，
   // 再存一份 mode 会出现「编辑中但没有选中项」这类无法自洽的状态。
   const [editingRole, setEditingRole] = useState(false);
@@ -505,7 +509,6 @@ const WorkbenchSettings: React.FC<WorkbenchSettingsProps> = ({ open, onClose, on
   }, [notice]);
   const [apiKey, setApiKey] = useState('');
   const [apiKeyVendor, setApiKeyVendor] = useState<string | null>(null);
-  const [internalUsername, setInternalUsername] = useState('');
   // 后端算出的「生效地址」（非手动模式下地址框显示的就是它，随模型厂商变）。
   const [effectiveBaseUrl, setEffectiveBaseUrl] = useState<EffectiveBaseUrlResponse | null>(null);
 
@@ -522,7 +525,7 @@ const WorkbenchSettings: React.FC<WorkbenchSettingsProps> = ({ open, onClose, on
       })
       .catch((reason) => {
         setMcpServers([]);
-        setMcpError(reason instanceof Error ? reason.message : String(reason));
+        setMcpError(errorMessage(reason));
       });
     try {
       const [globalResp, nextRoles, nextSkills, schema, nextPools] = await Promise.all([
@@ -593,7 +596,7 @@ const WorkbenchSettings: React.FC<WorkbenchSettingsProps> = ({ open, onClose, on
         } catch { /* 首个 skill 详情加载失败不阻塞设置面板 */ }
       }
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : String(reason));
+      setError(errorMessage(reason));
     } finally {
       setBusy(false);
     }
@@ -624,23 +627,11 @@ const WorkbenchSettings: React.FC<WorkbenchSettingsProps> = ({ open, onClose, on
     mcpProbeGeneration.current += 1;
   }, [open]);
 
-  // 按当前 CLI 回显 Internal 账号或模型厂商 API Key。
+  // 回显当前模型厂商的 API Key。
   const loadCredential = async (
-    cliName: string | null,
     model: string | null,
-    fallbackCli: string | null,
     providerId: string | null = selectedProviderId,
   ) => {
-    if ((cliName || fallbackCli) === 'internal') {
-      setApiKey('');
-      setApiKeyVendor(null);
-      try {
-        const resp = await getInternalUsername();
-        setInternalUsername(resp.username || '');
-      } catch { setInternalUsername(''); }
-      return;
-    }
-    setInternalUsername('');
     if (!model) { setApiKey(''); setApiKeyVendor(null); return; }
     try {
       const resp = await getApiKey(model, providerId === MANUAL_PROVIDER ? null : providerId);
@@ -651,8 +642,8 @@ const WorkbenchSettings: React.FC<WorkbenchSettingsProps> = ({ open, onClose, on
 
   useEffect(() => {
     if (!open) return;
-    void loadCredential(config.cli_name, config.model, defaultCli, selectedProviderId);
-  }, [open, config.cli_name, config.model, defaultCli, selectedProviderId]);
+    void loadCredential(config.model, selectedProviderId);
+  }, [open, config.model, selectedProviderId]);
 
   const setGlobal = <K extends keyof GlobalConfig>(key: K, value: GlobalConfig[K]) =>
     setConfig((current) => ({ ...current, [key]: value }));
@@ -787,9 +778,7 @@ const WorkbenchSettings: React.FC<WorkbenchSettingsProps> = ({ open, onClose, on
   const saveConnection = async () => {
     setBusy(true); setError(''); setNotice('');
     try {
-      if ((config.cli_name || defaultCli) === 'internal') {
-        await saveInternalUsername(internalUsername);
-      } else if (config.model) {
+      if (config.model) {
         await saveApiKey(
           config.model,
           apiKey,
@@ -807,7 +796,7 @@ const WorkbenchSettings: React.FC<WorkbenchSettingsProps> = ({ open, onClose, on
       setNotice(message); addToast({ type: 'success', message });
       await refreshAfterSave();
     } catch (reason) {
-      const message = reason instanceof Error ? reason.message : String(reason);
+      const message = errorMessage(reason);
       setError(message); addToast({ type: 'error', message });
     }
     finally { setBusy(false); }
@@ -831,7 +820,7 @@ const WorkbenchSettings: React.FC<WorkbenchSettingsProps> = ({ open, onClose, on
         setError(message); addToast({ type: 'error', message });
       }
     } catch (reason) {
-      const message = reason instanceof Error ? reason.message : String(reason);
+      const message = errorMessage(reason);
       setError(message); addToast({ type: 'error', message });
     } finally { setTesting(false); }
   };
@@ -844,7 +833,7 @@ const WorkbenchSettings: React.FC<WorkbenchSettingsProps> = ({ open, onClose, on
       setNotice(message); addToast({ type: 'success', message });
       await refreshAfterSave();
     } catch (reason) {
-      const message = reason instanceof Error ? reason.message : String(reason);
+      const message = errorMessage(reason);
       setError(message); addToast({ type: 'error', message });
     }
     finally { setBusy(false); }
@@ -862,7 +851,7 @@ const WorkbenchSettings: React.FC<WorkbenchSettingsProps> = ({ open, onClose, on
       setNotice(message); addToast({ type: 'success', message });
       await refreshAfterSave();
     } catch (reason) {
-      const message = reason instanceof Error ? reason.message : String(reason);
+      const message = errorMessage(reason);
       setError(message); addToast({ type: 'error', message });
     }
     finally { setBusy(false); }
@@ -886,7 +875,7 @@ const WorkbenchSettings: React.FC<WorkbenchSettingsProps> = ({ open, onClose, on
     } catch (reason) {
       // 详情拉不到就清空表单，否则新的高亮行下面还挂着上一个角色的配置。
       setRoleId(''); setRoleConfig({});
-      setError(reason instanceof Error ? reason.message : String(reason));
+      setError(errorMessage(reason));
     }
   };
 
@@ -907,7 +896,7 @@ const WorkbenchSettings: React.FC<WorkbenchSettingsProps> = ({ open, onClose, on
       const message = t('settings.roleSaved');
       setNotice(message); addToast({ type: 'success', message });
     } catch (reason) {
-      const message = reason instanceof Error ? reason.message : String(reason);
+      const message = errorMessage(reason);
       setError(message); addToast({ type: 'error', message });
     }
     finally { setBusy(false); }
@@ -920,7 +909,7 @@ const WorkbenchSettings: React.FC<WorkbenchSettingsProps> = ({ open, onClose, on
     catch (reason) {
       // 同 chooseRole：拉不到详情就清空，别把上一个 skill 的内容留在新的高亮行下面。
       setSkillId(''); setSkillContent('# Skill\n\n'); setSkillDetail(null);
-      setError(reason instanceof Error ? reason.message : String(reason));
+      setError(errorMessage(reason));
     }
   };
 
@@ -936,7 +925,7 @@ const WorkbenchSettings: React.FC<WorkbenchSettingsProps> = ({ open, onClose, on
       setZipFile(null);
       setEditingSkill(false);
       setNotice(t('settings.skillImported'));
-    } catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)); }
+    } catch (reason) { setError(errorMessage(reason)); }
     finally { setBusy(false); }
   };
 
@@ -951,7 +940,7 @@ const WorkbenchSettings: React.FC<WorkbenchSettingsProps> = ({ open, onClose, on
       const message = t('settings.skillSaved');
       setNotice(message); addToast({ type: 'success', message });
     } catch (reason) {
-      const message = reason instanceof Error ? reason.message : String(reason);
+      const message = errorMessage(reason);
       setError(message); addToast({ type: 'error', message });
     }
     finally { setBusy(false); }
@@ -974,7 +963,7 @@ const WorkbenchSettings: React.FC<WorkbenchSettingsProps> = ({ open, onClose, on
       setEditingRole(false); setAdvancedOpen(false);
       if (next) await chooseRole(`${next.type}:${next.id}`);
       else { setSelectedRole(''); setRoleId(''); setRoleType('worker'); setRoleConfig({}); setRoleSchema(await getRoleSchema('worker')); }
-    } catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)); }
+    } catch (reason) { setError(errorMessage(reason)); }
     finally { setBusy(false); }
   };
 
@@ -1028,8 +1017,59 @@ const WorkbenchSettings: React.FC<WorkbenchSettingsProps> = ({ open, onClose, on
       const message = t('settings.poolSaved');
       setNotice(message); addToast({ type: 'success', message });
     } catch (reason) {
-      reportPoolError(reason instanceof Error ? reason.message : String(reason));
+      reportPoolError(errorMessage(reason));
     } finally { setBusy(false); }
+  };
+
+  const exportCurrentPool = async () => {
+    const target = pools.find((item) => item.id === selectedPool);
+    if (!target) return;
+    setBusy(true); setError(''); setNotice('');
+    try {
+      // 导出前先预览：MCP 的 env / headers 是原样导出的，用户必须在下载前知道哪些服务带着凭据。
+      const preview = await previewRolePoolExport(target.id);
+      const details: string[] = [];
+      if (preview.sensitive_mcp.length) {
+        details.push(`${t('poolBundle.exportCredentials')}\n${preview.sensitive_mcp
+          .map((item) => `  - ${item.name}: ${item.keys.join(', ')}`).join('\n')}`);
+      }
+      if (preview.personal_skills.length) {
+        details.push(`${t('poolBundle.exportPersonal')}\n${preview.personal_skills.map((id) => `  - ${id}`).join('\n')}`);
+      }
+      if (preview.warnings.length) {
+        details.push(`${t('poolBundle.exportWarnings')}\n${preview.warnings
+          .map((warning) => `  - ${describeBundleWarning(t, warning)}`).join('\n')}`);
+      }
+      if (details.length && !window.confirm(t('poolBundle.exportConfirm', { name: target.name, details: details.join('\n\n') }))) return;
+      await exportRolePool(target.id, target.name);
+      const message = t('poolBundle.exportDone', { name: target.name });
+      setNotice(message); addToast({ type: 'success', message });
+    } catch (reason) {
+      reportPoolError(errorMessage(reason));
+    } finally { setBusy(false); }
+  };
+
+  const onPoolImported = async (done: RolePoolImportResult) => {
+    // 导入同时动了角色 / skill / MCP / 池四处，一并重新拉；悬浮详情缓存里是旧的角色内容。
+    clearRoleHoverDetailCache();
+    try {
+      const [nextRoles, nextSkills, nextPools, nextMcp] = await Promise.all([
+        getRoles(), getSkills(), getRolePools(), getMcpServers(),
+      ]);
+      setRoles(nextRoles); setSkills(nextSkills); setPools(nextPools); setMcpServers(nextMcp);
+      const imported = nextPools.find((item) => item.name === done.pool.name);
+      if (imported && !editingPool) fillPoolForm(imported);
+      const counts = done.counts;
+      const message = t('poolBundle.resultNotice', {
+        created: counts?.created ?? 0,
+        overwritten: counts?.overwritten ?? 0,
+        skipped: counts?.skipped ?? 0,
+        unchanged: counts?.unchanged ?? 0,
+      });
+      setNotice(message); addToast({ type: 'success', message });
+    } catch (reason) {
+      setError(errorMessage(reason));
+    }
   };
 
   const deleteCurrentPool = async () => {
@@ -1046,7 +1086,7 @@ const WorkbenchSettings: React.FC<WorkbenchSettingsProps> = ({ open, onClose, on
       setNotice(t('settings.poolDeleted'));
       addToast({ type: 'success', message: t('settings.poolDeleted') });
     } catch (reason) {
-      reportPoolError(reason instanceof Error ? reason.message : String(reason));
+      reportPoolError(errorMessage(reason));
     } finally { setBusy(false); }
   };
 
@@ -1073,7 +1113,7 @@ const WorkbenchSettings: React.FC<WorkbenchSettingsProps> = ({ open, onClose, on
       setEditingSkill(false); setZipFile(null);
       if (next) await chooseSkill(next.id);
       else { setSelectedSkill(''); setSkillId(''); setSkillContent('# Skill\n\n'); setSkillDetail(null); }
-    } catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)); }
+    } catch (reason) { setError(errorMessage(reason)); }
     finally { setBusy(false); }
   };
 
@@ -1177,7 +1217,7 @@ const WorkbenchSettings: React.FC<WorkbenchSettingsProps> = ({ open, onClose, on
       const message = t('settings.mcpSaved');
       setNotice(message); addToast({ type: 'success', message });
     } catch (reason) {
-      reportMcpError(reason instanceof Error ? reason.message : String(reason));
+      reportMcpError(errorMessage(reason));
     } finally { setBusy(false); }
   };
 
@@ -1204,7 +1244,7 @@ const WorkbenchSettings: React.FC<WorkbenchSettingsProps> = ({ open, onClose, on
       setNotice(t('settings.mcpDeleted'));
       addToast({ type: 'success', message: t('settings.mcpDeleted') });
     } catch (reason) {
-      reportMcpError(reason instanceof Error ? reason.message : String(reason));
+      reportMcpError(errorMessage(reason));
     } finally { setBusy(false); }
   };
 
@@ -1223,7 +1263,7 @@ const WorkbenchSettings: React.FC<WorkbenchSettingsProps> = ({ open, onClose, on
     } catch (reason) {
       if (mcpProbeGeneration.current !== generation) return;
       // 失败原句来自后端（含命令名、超时、stderr 尾部），前端不重写。
-      const message = reason instanceof Error ? reason.message : String(reason);
+      const message = errorMessage(reason);
       setError(message); addToast({ type: 'error', message });
     } finally {
       if (mcpProbeGeneration.current === generation) setMcpTesting(false);
@@ -1403,7 +1443,7 @@ const WorkbenchSettings: React.FC<WorkbenchSettingsProps> = ({ open, onClose, on
             {error && <div className="settings-message is-error">{error}</div>}
             {notice && <div className="settings-message is-success">{notice}</div>}
             {tab === 'mcp' && mcpError && <div className="settings-message is-error">{mcpError}</div>}
-            {tab === 'connection' && <div className="settings-section"><div className="section-heading"><div><h3>{t('settings.connectionTitle')}</h3><p>{t('settings.connectionDesc')}</p></div></div><div className="form-grid"><label>{t('settings.provider')}<select id="provider-select" value={selectedProviderId} onChange={(event) => chooseProvider(event.target.value)}><option value={MANUAL_PROVIDER}>{t('settings.providerManual')}</option>{providerPresets.filter((preset) => preset.available !== false).map((preset) => <option key={preset.id} value={preset.id}>{preset.display_name}</option>)}</select><small>{manualMode ? t('settings.providerManualHint') : t('settings.providerHint')}</small></label><label>{t('settings.cli')}<select id="cli-select" value={config.cli_name || ''} onChange={(event) => chooseCli(event.target.value)}><CliOptions clis={visibleClis} defaultCli={defaultCli} /></select></label><label>{t('settings.model')}{modelIsFreeText ? <><input list="model-options" value={config.model || ''} onChange={(event) => setGlobal('model', event.target.value || null)} placeholder={t('settings.selectOrTypeModel')} /><datalist id="model-options">{allModelOptions.map((model) => <option key={model} value={model} />)}</datalist></> : <select id="model-select" value={config.model || ''} onChange={(event) => setGlobal('model', event.target.value || null)}>{modelIsForeign && <option value={config.model as string}>{t('settings.modelNotInList', { model: config.model as string })}</option>}{allModelOptions.map((model) => <option key={model} value={model}>{model}</option>)}</select>}</label><label>{t('settings.apiBaseUrl')}<input id="api-base-url" value={displayedBaseUrl} disabled={addressLocked} onChange={(event) => setGlobal('api_base_url', event.target.value || null)} placeholder={t('common.optional')} /><small>{baseUrlHint}</small></label>{(config.cli_name || defaultCli) === 'internal' ? <label>{t('settings.accountName')}<input value={internalUsername} onChange={(event) => setInternalUsername(event.target.value)} placeholder={t('settings.accountNamePlaceholder')} /><small>{t('settings.accountNameNote')}</small></label> : <label>{t('settings.apiKey')}<input type="password" value={apiKey} onChange={(event) => setApiKey(event.target.value)} placeholder={t('settings.apiKeyPlaceholder')} /><small>{apiKeyVendor ? t('settings.vendor', { vendor: apiKeyVendor }) : ''}{t('settings.localPlaintextNote')}</small></label>}</div><div className="settings-actions"><button className="secondary-button" disabled={testing || busy} onClick={runConnectionTest}>{testing ? t('settings.testing') : t('settings.testConnection')}</button><button className="primary-button" disabled={busy} onClick={saveConnection}><Save size={15} /> {t('settings.saveConnection')}</button></div></div>}
+            {tab === 'connection' && <div className="settings-section"><div className="section-heading"><div><h3>{t('settings.connectionTitle')}</h3><p>{t('settings.connectionDesc')}</p></div></div><div className="form-grid"><label>{t('settings.provider')}<select id="provider-select" value={selectedProviderId} onChange={(event) => chooseProvider(event.target.value)}><option value={MANUAL_PROVIDER}>{t('settings.providerManual')}</option>{providerPresets.filter((preset) => preset.available !== false).map((preset) => <option key={preset.id} value={preset.id}>{preset.display_name}</option>)}</select><small>{manualMode ? t('settings.providerManualHint') : t('settings.providerHint')}</small></label><label>{t('settings.cli')}<select id="cli-select" value={config.cli_name || ''} onChange={(event) => chooseCli(event.target.value)}><CliOptions clis={visibleClis} defaultCli={defaultCli} /></select></label><label>{t('settings.model')}{modelIsFreeText ? <><input list="model-options" value={config.model || ''} onChange={(event) => setGlobal('model', event.target.value || null)} placeholder={t('settings.selectOrTypeModel')} /><datalist id="model-options">{allModelOptions.map((model) => <option key={model} value={model} />)}</datalist></> : <select id="model-select" value={config.model || ''} onChange={(event) => setGlobal('model', event.target.value || null)}>{modelIsForeign && <option value={config.model as string}>{t('settings.modelNotInList', { model: config.model as string })}</option>}{allModelOptions.map((model) => <option key={model} value={model}>{model}</option>)}</select>}</label><label>{t('settings.apiBaseUrl')}<input id="api-base-url" value={displayedBaseUrl} disabled={addressLocked} onChange={(event) => setGlobal('api_base_url', event.target.value || null)} placeholder={t('common.optional')} /><small>{baseUrlHint}</small></label><label>{t('settings.apiKey')}<input type="password" value={apiKey} onChange={(event) => setApiKey(event.target.value)} placeholder={t('settings.apiKeyPlaceholder')} /><small>{apiKeyVendor ? t('settings.vendor', { vendor: apiKeyVendor }) : ''}{t('settings.localPlaintextNote')}</small></label></div><div className="settings-actions"><button className="secondary-button" disabled={testing || busy} onClick={runConnectionTest}>{testing ? t('settings.testing') : t('settings.testConnection')}</button><button className="primary-button" disabled={busy} onClick={saveConnection}><Save size={15} /> {t('settings.saveConnection')}</button></div></div>}
             {tab === 'workspace' && (
               <div className="settings-section">
                 <div className="section-heading">
@@ -1465,7 +1505,7 @@ const WorkbenchSettings: React.FC<WorkbenchSettingsProps> = ({ open, onClose, on
                 {roleMode !== 'view' && <div className="settings-actions">{roleMode === 'edit' && <button className="danger-button" disabled={busy} onClick={deleteCurrentRole}><Trash2 size={15} /> {t('settings.deleteRole')}</button>}<button className="secondary-button" disabled={busy} onClick={() => void cancelEditRole()}>{t('common.cancel')}</button><button className="primary-button" disabled={busy || !roleId.trim()} onClick={saveRole}><Save size={15} /> {t('settings.saveRole')}</button></div>}
               </>}
             </div></div></div>}
-            {tab === 'pools' && <div className="settings-section pools-editor"><div className="section-heading"><div><h3>{t('settings.poolsTitle')}</h3><p>{t('settings.poolsDesc')}</p></div><div className="section-heading-actions">{!editingPool && <button className="secondary-button" disabled={!selectedPool || busy} onClick={() => setEditingPool(true)}><Pencil size={15} /> {t('common.edit')}</button>}<button className="secondary-button" onClick={startCreatePool}><Plus size={15} /> {t('settings.newPool')}</button></div></div><div className="role-editor-layout"><aside className="resource-list"><ul className="resource-list-items">{pools.map((item) => <li key={item.id}><button type="button" className={selectedPool === item.id ? 'is-active' : ''} disabled={busy} onClick={() => requestSelectPool(item.id)}><span className="resource-list-name">{item.name}</span><span className="resource-list-type">{t('settings.poolCount', { count: item.roles.length })}</span></button></li>)}</ul><div className="resource-list-note">{pools.length ? t('settings.poolCount', { count: pools.length }) : t('settings.noPools')}</div></aside><div className="role-form">
+            {tab === 'pools' && <div className="settings-section pools-editor"><div className="section-heading"><div><h3>{t('settings.poolsTitle')}</h3><p>{t('settings.poolsDesc')}</p></div><div className="section-heading-actions">{!editingPool && <button className="secondary-button" disabled={!selectedPool || busy} onClick={() => setEditingPool(true)}><Pencil size={15} /> {t('common.edit')}</button>}{!editingPool && <button className="secondary-button" disabled={!selectedPool || busy} onClick={() => void exportCurrentPool()}><Download size={15} /> {t('poolBundle.export')}</button>}<button className="secondary-button" disabled={busy} onClick={() => poolImportInput.current?.click()}><Upload size={15} /> {t('poolBundle.import')}</button><input ref={poolImportInput} type="file" accept=".zip,application/zip" hidden data-testid="pool-import-input" onChange={(event) => { setPoolImportFile(event.target.files?.[0] || null); event.target.value = ''; }} /><button className="secondary-button" onClick={startCreatePool}><Plus size={15} /> {t('settings.newPool')}</button></div></div><div className="role-editor-layout"><aside className="resource-list"><ul className="resource-list-items">{pools.map((item) => <li key={item.id}><button type="button" className={selectedPool === item.id ? 'is-active' : ''} disabled={busy} onClick={() => requestSelectPool(item.id)}><span className="resource-list-name">{item.name}</span><span className="resource-list-type">{t('settings.poolCount', { count: item.roles.length })}</span></button></li>)}</ul><div className="resource-list-note">{pools.length ? t('settings.poolCount', { count: pools.length }) : t('settings.noPools')}</div></aside><div className="role-form">
               {poolMode === 'idle' ? <p className="detail-empty">{t('settings.selectOrCreatePool')}</p> : <>
                 <label>{t('settings.poolName')}<input value={poolName} onChange={(event) => setPoolName(event.target.value)} placeholder={t('settings.poolNamePlaceholder')} maxLength={60} disabled={poolMode === 'view'} /></label>
                 <div className="node-dialog-section"><div className="node-dialog-section-title">{t('settings.poolRoles')}</div><p className="picker-status">{t('settings.poolRolesHint')}</p><SearchCheckboxPicker items={roles.map((item) => ({ id: item.id, label: item.display_name || item.id, detail: roleTypeLabel(item.type), badge: roleTypeLabel(item.type), description: item.description, detailLoader: () => loadRoleHoverDetail(item.type, item.id) }))} selected={poolRoles} onToggle={togglePoolRole} query={poolQuery} onQueryChange={setPoolQuery} searchPlaceholder={t('dialog.searchRoles')} emptyLabel={t('dialog.noMatchingRoles')} selectedLabel={t('dialog.selectedCount')} disabled={poolMode === 'view'} /></div>
@@ -1518,6 +1558,7 @@ const WorkbenchSettings: React.FC<WorkbenchSettingsProps> = ({ open, onClose, on
           </div>
         </div>
       </section>
+      <RolePoolImportDialog file={poolImportFile} onClose={() => setPoolImportFile(null)} onImported={(done) => void onPoolImported(done)} />
     </div>
   );
 };

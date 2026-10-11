@@ -24,7 +24,7 @@ from executables.base import RuntimeGateway, SchedulerDelegate
 from executables.registry import ExecutableRegistry
 from runtime.event_bus import EventBus, SSEEvent
 from runtime.file_transfer import RevealUnsupported
-from runtime.graph import Graph
+from runtime.graph import DependencyError, Graph
 from runtime.handoff import fresh_session_fields
 from runtime.models import (
     MAX_TASK_LENGTH,
@@ -815,6 +815,15 @@ class Runtime(RuntimeGateway, SchedulerDelegate):
                     }
                     if child_cfg.get("allow_shared_output"):
                         old_shared_by_ref[child_ref]["allow_shared_output"] = True
+
+        # 评估里引用了不存在的子节点：在改任何东西之前就拒掉，否则循环中途才
+        # 解引用 None，前几个子节点已经被重置，图停在半修复状态。
+        unknown_refs = sorted(failed_step_refs - set(failed_by_ref))
+        if unknown_refs:
+            raise ValueError(
+                f"submit_fix_plan: step_ref not found under manager "
+                f"'{parent_node_id}': {unknown_refs}"
+            )
 
         # 2. 构造修复步骤（合并旧共享配置）+ PlanValidator 早期校验（任何图变更前拦截）。
         #    原地续接时 fix_role 取原角色（或 fix.role 显式指定的同角色），
@@ -1820,11 +1829,19 @@ class Runtime(RuntimeGateway, SchedulerDelegate):
         并重置 _root_manager_id 以允许后续提交新的根 Manager。
         """
         with self._lock:
-            for node_id in list(self.graph.nodes.keys()):
-                try:
-                    self.graph.remove_node(node_id)
-                except ValueError:
-                    pass
+            pending = list(self.graph.nodes.keys())
+            while pending:
+                blocked = []
+                for node_id in pending:
+                    try:
+                        self.graph.remove_node(node_id)
+                    except ValueError:
+                        pass
+                    except DependencyError:
+                        blocked.append(node_id)
+                if len(blocked) == len(pending):
+                    break
+                pending = blocked
             self._root_manager_id = None
         logger.info("Runtime: graph cleared")
 

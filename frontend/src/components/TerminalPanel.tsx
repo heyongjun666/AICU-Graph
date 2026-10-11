@@ -12,7 +12,9 @@ interface TerminalPanelProps {
 const TerminalPanel: React.FC<TerminalPanelProps> = ({ sessionId, open }) => {
   const { t } = useI18n();
   const containerRef = useRef<HTMLDivElement>(null);
-  const termRef = useRef<Terminal | null>(null);
+  // 事件回调里读最新的 t，而不把 t 放进 effect 依赖：切换语言不该断开终端连接。
+  const tRef = useRef(t);
+  tRef.current = t;
 
   useEffect(() => {
     if (!open || !containerRef.current) return;
@@ -32,10 +34,9 @@ const TerminalPanel: React.FC<TerminalPanelProps> = ({ sessionId, open }) => {
     const fit = new FitAddon();
     term.loadAddon(fit);
     term.open(containerRef.current);
-    termRef.current = term;
 
     // 与 utils/api.ts 保持一致：默认相对路径 /v1/，走 Vite dev 代理（ws: true）。
-    const apiBase: string = (import.meta as any).env?.VITE_API_BASE_URL || '/v1/';
+    const apiBase: string = import.meta.env.VITE_API_BASE_URL || '/v1/';
     const base = apiBase.endsWith('/') ? apiBase : `${apiBase}/`;
     let wsUrl: string;
     if (/^https?:\/\//.test(base)) {
@@ -48,6 +49,8 @@ const TerminalPanel: React.FC<TerminalPanelProps> = ({ sessionId, open }) => {
     }
 
     const ws = new WebSocket(wsUrl);
+    // cleanup 之后 ws 的 onerror/onclose 仍会触发，此时 term 已销毁，不能再写。
+    let disposed = false;
 
     const sendResize = () => {
       if (ws.readyState === WebSocket.OPEN) {
@@ -56,18 +59,24 @@ const TerminalPanel: React.FC<TerminalPanelProps> = ({ sessionId, open }) => {
     };
 
     ws.onopen = () => {
-      term.writeln(`\x1b[32m${t('terminal.connected')}\x1b[0m`);
+      if (disposed) return;
+      term.writeln(`\x1b[32m${tRef.current('terminal.connected')}\x1b[0m`);
       sendResize();
     };
     ws.onmessage = (event) => {
+      if (disposed) return;
       const text =
         typeof event.data === 'string'
           ? event.data
           : new TextDecoder().decode(event.data as ArrayBuffer);
       term.write(text);
     };
-    ws.onerror = () => term.writeln(`\r\n\x1b[31m${t('terminal.error')}\x1b[0m`);
-    ws.onclose = () => term.writeln(`\r\n\x1b[33m${t('terminal.disconnected')}\x1b[0m`);
+    ws.onerror = () => {
+      if (!disposed) term.writeln(`\r\n\x1b[31m${tRef.current('terminal.error')}\x1b[0m`);
+    };
+    ws.onclose = () => {
+      if (!disposed) term.writeln(`\r\n\x1b[33m${tRef.current('terminal.disconnected')}\x1b[0m`);
+    };
 
     const dataSub = term.onData((data) => {
       if (ws.readyState === WebSocket.OPEN) ws.send(data);
@@ -86,6 +95,7 @@ const TerminalPanel: React.FC<TerminalPanelProps> = ({ sessionId, open }) => {
     window.addEventListener('resize', fitNow);
 
     return () => {
+      disposed = true;
       cancelAnimationFrame(raf);
       window.removeEventListener('resize', fitNow);
       dataSub.dispose();
@@ -94,7 +104,6 @@ const TerminalPanel: React.FC<TerminalPanelProps> = ({ sessionId, open }) => {
         ws.close();
       }
       term.dispose();
-      termRef.current = null;
     };
   }, [sessionId, open]);
 

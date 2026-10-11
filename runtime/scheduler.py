@@ -419,6 +419,7 @@ class Scheduler:
 
                 # 发布 tick 事件
                 self._publish_tick_event()
+                self._watchdog_retries = 0
 
             except Exception as exc:
                 logger.error("Scheduler tick error: %s", exc)
@@ -695,8 +696,9 @@ class Scheduler:
             executable = self.registry.create(node.exec_type, ctx)
         except Exception as exc:
             logger.error("Failed to create Executable for node '%s': %s", node.id, exc)
-            self.graph.update_node(node.id, status=NodeStatus.FAILED)
-            self._notify_status_changed(node.id, NodeStatus.FAILED)
+            self._transition_node(node.id, NodeStatus.FAILED)
+            # 没有 Future 就不会走 _process_completed_futures；不在这里通知父 Manager，它会一直 Waiting。
+            self._check_manager_children_completed(node.id)
             return
 
         # 提交到线程池
@@ -749,25 +751,31 @@ class Scheduler:
                 logger.error("Future for node '%s' raised: %s", node_id, exc)
                 result_status = NodeStatus.FAILED
 
-            # 更新节点状态
-            node = self.graph.get_node(node_id)
-            if node is None:
-                continue
+            try:
+                self._finish_node(node_id, result_status)
+            except Exception:
+                logger.exception("Post-processing failed for node '%s'", node_id)
 
-            # 只有当前状态是 RUNNING 时才更新
-            if node.status == NodeStatus.RUNNING:
-                self._transition_node(node_id, result_status)
+    def _finish_node(self, node_id: str, result_status: NodeStatus) -> None:
+        """单个节点的 Future 完成后处理；异常由调用方隔离，不能连累同一 tick 的其它节点。"""
+        node = self.graph.get_node(node_id)
+        if node is None:
+            return
 
-            # 自动重试：Failed 节点且配置了 Planner 时
-            if result_status == NodeStatus.FAILED:
-                self._try_auto_retry(node_id)
+        # 只有当前状态是 RUNNING 时才更新
+        if node.status == NodeStatus.RUNNING:
+            self._transition_node(node_id, result_status)
 
-            # 检测 Manager 子节点完成情况（使用增强版本）
-            self._check_manager_children_completed(node_id)
+        # 自动重试：Failed 节点且配置了 Planner 时
+        if result_status == NodeStatus.FAILED:
+            self._try_auto_retry(node_id)
 
-            # 路由处理：节点完成后检查是否有路由决策
-            if result_status in (NodeStatus.COMPLETED, NodeStatus.FAILED):
-                self._handle_routing(node_id)
+        # 检测 Manager 子节点完成情况（使用增强版本）
+        self._check_manager_children_completed(node_id)
+
+        # 路由处理：节点完成后检查是否有路由决策
+        if result_status in (NodeStatus.COMPLETED, NodeStatus.FAILED):
+            self._handle_routing(node_id)
 
     # ========================================================================
     # 状态转换

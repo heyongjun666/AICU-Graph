@@ -1101,7 +1101,7 @@ class TestManagerEdgeCases:
 class _RejectingManagerAICU:
     """前 fail_times 次调用抛 API 400，之后成功；记录每次收到的 prompt。"""
 
-    ERROR = "internal 执行失败 (stdout_tail=API Error: 400 Model do not support image input. Request id: abc)"
+    ERROR = "claude 执行失败 (stdout_tail=API Error: 400 Model do not support image input. Request id: abc)"
 
     def __init__(self, fail_times: int = 1, error: Optional[str] = None):
         self.fail_times = fail_times
@@ -1152,7 +1152,7 @@ class TestManagerRetryWithApiError:
         assert "原始评审任务" in aicu.prompts[1]
 
     def test_non_400_failure_retries_without_error_note(self):
-        aicu = _RejectingManagerAICU(fail_times=1, error="internal timeout after 600s")
+        aicu = _RejectingManagerAICU(fail_times=1, error="claude timeout after 600s")
         self._call(aicu)
         assert aicu.prompts == ["原始评审任务", "原始评审任务"]
 

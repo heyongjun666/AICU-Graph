@@ -3,6 +3,7 @@ import { RefreshCw, X, Zap } from 'lucide-react';
 import { AgentEvent, AgentEventStatus } from '../types';
 import { getAgentEvents } from '../utils/api';
 import { useI18n } from '../i18n';
+import { errorMessage } from '../utils/errorMessage';
 
 interface EventsDialogProps {
   open: boolean;
@@ -33,7 +34,7 @@ const EventsDialog: React.FC<EventsDialogProps> = ({ open, sessionId, onClose })
     setError('');
     getAgentEvents(sessionId)
       .then(setEvents)
-      .catch((reason) => setError(reason instanceof Error ? reason.message : String(reason)))
+      .catch((reason) => setError(errorMessage(reason)))
       .finally(() => setLoading(false));
   }, [sessionId]);
 

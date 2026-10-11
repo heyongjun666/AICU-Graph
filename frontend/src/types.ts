@@ -251,11 +251,6 @@ export interface ApiKeyResponse {
   api_key: string | null;
 }
 
-export interface InternalUsernameResponse {
-  username: string | null;
-  saved?: boolean;
-}
-
 export interface RoleField {
   name: string;
   label: string;
@@ -300,6 +295,98 @@ export interface RolePool {
   id: string;
   name: string;
   roles: string[];
+}
+
+export interface BundleWarning {
+  /** missing_role | custom_skills_dir | missing_skill | missing_mcp | defaults_differ（其余按未知处理）。 */
+  kind: string;
+  ref: string;
+  role: string;
+}
+
+export interface RolePoolExportPreview {
+  pool: { id: string; name: string };
+  roles: Array<{ id: string; type: 'manager' | 'worker' }>;
+  skills: string[];
+  /** 不在项目 skills/ 目录、而是取自个人目录（~/.claude/skills）的 skill。 */
+  personal_skills: string[];
+  mcp: string[];
+  /** 只有服务名与键名（`env:KEY` / `header:KEY`），从不包含值。 */
+  sensitive_mcp: Array<{ name: string; keys: string[] }>;
+  warnings: BundleWarning[];
+}
+
+export type BundleItemStatus = 'new' | 'same' | 'conflict';
+export type BundleItemAction = 'created' | 'overwritten' | 'skipped' | 'unchanged';
+export type BundleConflictPolicy = 'skip' | 'overwrite';
+/** 逐项决定：key 取自导入计划里每一项的 `key`。 */
+export type BundleDecisions = Record<string, BundleConflictPolicy>;
+
+export interface BundleReadiness {
+  id: string;
+  type: 'manager' | 'worker';
+  ready: boolean;
+  /** kind: skill_missing | mcp_unregistered | mcp_command_missing | mcp_arg_missing | cli_missing */
+  issues: Array<{ kind: string; ref: string; detail: string }>;
+}
+
+/** 导入预览（dry_run=true）与真正导入共用的响应；`counts` 只在真正导入后出现。 */
+export interface RolePoolImportResult {
+  dry_run: boolean;
+  on_conflict: BundleConflictPolicy;
+  has_conflict?: boolean;
+  pool: {
+    name: string;
+    roles: string[];
+    status: BundleItemStatus;
+    local_id: string | null;
+    /** 决定键：逐项决定里用它，固定为 'pool'。 */
+    key: string;
+    /** 冲突时本机同名池当前的角色。 */
+    local_roles?: string[];
+    /** 冲突项最终生效的处理（全局默认或逐项决定）。 */
+    policy?: BundleConflictPolicy;
+    action?: BundleItemAction;
+  };
+  roles: Array<{
+    id: string;
+    type: 'manager' | 'worker';
+    status: BundleItemStatus;
+    key: string;
+    /** 冲突时：本机哪些池在用这个角色。 */
+    used_by?: string[];
+    policy?: BundleConflictPolicy;
+    action?: BundleItemAction;
+  }>;
+  skills: Array<{
+    id: string;
+    status: BundleItemStatus;
+    key: string;
+    file_count: number;
+    /** 包内可执行脚本文件数（按扩展名判断）。 */
+    script_count: number;
+    /** 冲突时：本机哪些角色引用了这个 skill。 */
+    used_by?: string[];
+    policy?: BundleConflictPolicy;
+    action?: BundleItemAction;
+  }>;
+  mcp: Array<{
+    name: string;
+    status: BundleItemStatus;
+    key: string;
+    /** 冲突时：本机哪些角色引用了这个 MCP。 */
+    used_by?: string[];
+    policy?: BundleConflictPolicy;
+    transport: string;
+    command: string;
+    args: string[];
+    url: string;
+    sensitive_keys: string[];
+    action?: BundleItemAction;
+  }>;
+  counts?: Record<BundleItemAction, number>;
+  readiness: BundleReadiness[];
+  warnings: BundleWarning[];
 }
 
 export interface SkillInfo {
@@ -558,30 +645,6 @@ export interface GraphSnapshot {
 // API 请求/响应类型
 // ============================================================================
 
-export interface CreateManagerRequest {
-  task: string;
-  role: string;
-  config?: NodeConfig;
-}
-
-export interface CreateManagerResponse {
-  node_id: string;
-  status: NodeStatus;
-}
-
-export interface UpdateNodeTaskRequest {
-  task?: string;
-  config?: NodeConfig;
-}
-
-export interface SearchLogsRequest {
-  node_id?: string;
-  level?: LogLevel;
-  keyword?: string;
-  offset?: number;
-  limit?: number;
-}
-
 export interface LogEntry {
   /** Server sequence/id when available; null/undefined means client-generated. */
   id?: number | null;
@@ -593,11 +656,6 @@ export interface LogEntry {
   phase?: string | null;
   event?: string | null;
   task?: string | null;
-}
-
-export interface SearchLogsResponse {
-  logs: LogEntry[];
-  total: number;
 }
 
 // ============================================================================

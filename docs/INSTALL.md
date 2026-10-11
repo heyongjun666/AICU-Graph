@@ -4,6 +4,7 @@
 
 ## 1. 环境要求
 
+- macOS 或 Linux（不支持 Windows）
 - Python 3.10 或更高版本
 - Node.js 18 或更高版本
 - Git
@@ -154,6 +155,10 @@ python3 main.py
 http://localhost:8080
 ```
 
+服务默认只监听本机 `127.0.0.1:8080`，且没有认证。需要让局域网内其它机器访问时才用 `HOST=0.0.0.0 python3 main.py`，并确保网络可信（端口用 `PORT` 修改）。
+
+服务会拒绝带有跨站 `Origin` 的写请求和 WebSocket 连接（防止网页借你本机的服务执行命令）；不带 `Origin` 的 curl / 脚本不受影响。如果前面还有改写 `Host` 的反向代理，用 `AICU_ALLOWED_ORIGINS=https://你的前端地址`（逗号分隔）放行。
+
 ## 6. 配置模型和 API Key
 
 在前端工作台的设置页完成以下操作：
@@ -191,7 +196,7 @@ export OPENROUTER_API_KEY="你的 OpenRouter API Key"
 
 也可以直接在设置页输入并保存 Key。模型名使用 OpenRouter 的完整 ID，例如 `openai/gpt-4.1` 或 `anthropic/claude-sonnet-4.5`；选择 OpenRouter 后，既可以从常用模型列表选择，也可以输入其它合法模型 ID。模型权限、计费和可用性由 OpenRouter 账户决定。
 
-## 8. 基本验证
+## 7. 基本验证
 
 服务启动后，检查 API 是否正常响应：
 
@@ -214,7 +219,7 @@ curl -X POST http://localhost:8080/v1/sessions \
 curl -X POST http://localhost:8080/v1/sessions/<session_id>/graph/resume
 ```
 
-## 9. 常见问题
+## 8. 常见问题
 
 ### 找不到 CLI
 

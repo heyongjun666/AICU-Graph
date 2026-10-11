@@ -126,6 +126,10 @@ def _iso_now() -> str:
     return datetime.now().isoformat(timespec="seconds")
 
 
+# event_id 会被拼进 inbox 文件名；CC 写的事件文件内容不可信，不合规的 id 一律重新生成。
+_SAFE_EVENT_ID = re.compile(r"[A-Za-z0-9_-]{1,64}")
+
+
 def _gen_event_id() -> str:
     """生成全局唯一事件 ID。"""
     return f"evt_{uuid.uuid4().hex[:12]}"
@@ -197,6 +201,7 @@ class AgentEventManager:
         # event_id → EventMessage（dict 保持插入序 = 全局顺序）
         self._events: dict[str, EventMessage] = {}
         self._lock = threading.Lock()
+        self._save_lock = threading.Lock()
         self._graph: Any = None
         self._router: Any = router
         self._route_attempts: dict[str, int] = {}
@@ -296,17 +301,20 @@ class AgentEventManager:
         最终保存——每次产出的 event 都即时落盘（不再只等 shutdown）。save 失败仅
         log 不抛（幂等，下次摄取/关闭会重写补齐）。
         """
-        with self._lock:
-            self._reconcile_statuses_locked()
-            items = [m.to_dict() for m in self._events.values()]
         tmp = self.events_file + ".tmp"
         try:
             os.makedirs(os.path.dirname(self.events_file), exist_ok=True)
-            with open(tmp, "w", encoding="utf-8") as f:
-                json.dump(items, f, ensure_ascii=False, indent=2)
-                f.flush()
-                os.fsync(f.fileno())
-            os.rename(tmp, self.events_file)
+            # 快照与写盘放在同一把锁里：否则两个线程共用同一个 .tmp 会互相截断，
+            # 先拍快照的线程还可能后写，用旧内容盖掉新内容。
+            with self._save_lock:
+                with self._lock:
+                    self._reconcile_statuses_locked()
+                    items = [m.to_dict() for m in self._events.values()]
+                with open(tmp, "w", encoding="utf-8") as f:
+                    json.dump(items, f, ensure_ascii=False, indent=2)
+                    f.flush()
+                    os.fsync(f.fileno())
+                os.replace(tmp, self.events_file)
         except OSError as exc:
             logger.error("Failed to save agent events: %s", exc)
 
@@ -588,7 +596,7 @@ class AgentEventManager:
             f"且 ≤{MAX_OBJECTIVE_SENTENCES} 句、≤{MAX_OBJECTIVE_CHARS} 字）。"
         )
         feedback = EventMessage(
-            event_id=f"evt_fmt_invalid_{str(ev_id)[:20]}",
+            event_id=f"evt_fmt_invalid_{re.sub(r'[^A-Za-z0-9_-]', '_', str(ev_id))[:20]}",
             producer=producer,
             objective=feedback_text,
             created_at=_iso_now(),
@@ -612,7 +620,7 @@ class AgentEventManager:
             msg = EventMessage.from_dict(raw)
             if not msg.producer:
                 msg.producer = producer
-            if not msg.event_id:
+            if not (msg.event_id and _SAFE_EVENT_ID.fullmatch(msg.event_id)):
                 msg.event_id = _gen_event_id()
             if not msg.created_at:
                 msg.created_at = _iso_now()

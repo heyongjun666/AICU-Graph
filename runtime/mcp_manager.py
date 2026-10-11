@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable, Optional
@@ -433,6 +434,61 @@ def delete_server(name: str, path: Optional[Path] = None) -> None:
         raise KeyError(f"MCP server '{name}' not found")
     del raw["servers"][name]
     atomic_write_json(str(registry_path), raw)
+
+
+def read_servers(names: Iterable[str], path: Optional[Path] = None) -> dict[str, dict]:
+    """按名字取注册表里的**原始条目**（未知键也保留）；不存在的名字不出现在结果里。
+
+    导出需要原样带走条目，``list_servers`` 会丢掉不认识的键，不能用。
+    """
+    servers = _load_raw(path)["servers"]
+    return {
+        name: json.loads(json.dumps(servers[name]))
+        for name in names
+        if name in servers
+    }
+
+
+def restore_server(name: str, spec: Optional[dict], path: Optional[Path] = None) -> None:
+    """回滚用：把条目原样写回（``spec`` 为 None 表示删掉），不做校验。
+
+    被回滚的旧条目可能本来就不合法，走 ``save_server`` 会让回滚自己失败。
+    """
+    registry_path = Path(path) if path else REGISTRY_FILE
+    raw = _load_raw(registry_path)
+    if spec is None:
+        raw["servers"].pop(name, None)
+    else:
+        raw["servers"][name] = spec
+    atomic_write_json(str(registry_path), raw)
+
+
+def launch_problems(spec: Any) -> list[dict]:
+    """本机上能否起这条 stdio 条目的静态检查（只查文件系统，不启动进程、不联网）。
+
+    返回 ``[{"kind": ..., "detail": ...}]``，空列表表示没发现问题。远程条目不查。
+    ``-`` 开头的参数是选项而非路径，不检查；绝对路径参数可能是尚未创建的数据目录，
+    同样不检查，只检查按仓库根解析的相对路径（例如自带的 ``tests/mcp_echo_server.py``）。
+    """
+    if not isinstance(spec, dict) or transport_of(spec) != TRANSPORT_STDIO:
+        return []
+    problems: list[dict] = []
+    command = str(spec.get("command") or "")
+    resolved = _resolve_path(command)
+    if resolved == command:
+        if shutil.which(command) is None:
+            problems.append({"kind": "mcp_command_missing", "detail": command})
+    elif not Path(resolved).exists():
+        problems.append({"kind": "mcp_command_missing", "detail": command})
+    args = spec.get("args")
+    for arg in args if isinstance(args, list) else []:
+        arg = str(arg)
+        if arg.startswith("-") or Path(arg).expanduser().is_absolute():
+            continue
+        resolved = _resolve_path(arg)
+        if resolved != arg and not Path(resolved).exists():
+            problems.append({"kind": "mcp_arg_missing", "detail": arg})
+    return problems
 
 
 def roles_referencing(name: str, configs: Iterable[tuple[str, str, Any]]) -> list[dict]:

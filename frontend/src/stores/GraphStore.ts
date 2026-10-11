@@ -9,7 +9,6 @@ import {
   GraphEdge,
   GraphStats,
   LogEntry,
-  NodeStatus,
   computeStats,
 } from '../types';
 
@@ -26,14 +25,6 @@ interface GraphState {
   selectedNodeId: string | null;
   /** 图统计信息 */
   stats: GraphStats;
-  /** 是否崩溃 */
-  crashed: boolean;
-  /** 崩溃时间 */
-  crashedAt: string | null;
-  /** 受影响的节点 ID 列表 */
-  affectedNodes: string[];
-  /** 根节点 ID */
-  rootNodeId: string | null;
   /** 按节点保存的日志 */
   logsByNode: Map<string, LogEntry[]>;
 }
@@ -63,14 +54,6 @@ interface GraphActions {
   selectNode: (id: string | null) => void;
   /** 获取节点 */
   getNode: (id: string) => GraphNode | undefined;
-  /** 获取根节点 */
-  getRootNode: () => GraphNode | undefined;
-  /** 获取指定节点的所有依赖节点 */
-  getNodeDependents: (id: string) => GraphNode[];
-  /** 获取指定节点的所有子节点（parent edge 指向的子节点） */
-  getChildren: (id: string) => GraphNode[];
-  /** 高亮指定节点 */
-  highlightNodes: (ids: string[]) => void;
   /** 重置图数据 */
   resetGraph: () => void;
   /** 重新计算统计信息 */
@@ -154,10 +137,6 @@ const initialState: GraphState = {
     stopped: 0,
     paused: 0,
   },
-  crashed: false,
-  crashedAt: null,
-  affectedNodes: [],
-  rootNodeId: null,
   logsByNode: new Map(),
 };
 
@@ -175,11 +154,8 @@ export const useGraphStore = create<GraphStore>((set, get) => ({
     set((state) => {
       const nodes = new Map(state.nodes);
       nodes.set(node.id, mergeNodeFields(nodes.get(node.id), node));
-      // 如果是第一个 Manager 节点，设为根节点
-      const rootNodeId = state.rootNodeId || (node.exec_type === 'M' ? node.id : null);
       return {
         nodes,
-        rootNodeId,
         stats: computeStats(nodes),
       };
     });
@@ -215,7 +191,6 @@ export const useGraphStore = create<GraphStore>((set, get) => ({
         nodes,
         edges,
         logsByNode,
-        rootNodeId: state.rootNodeId === id ? null : state.rootNodeId,
         stats: computeStats(nodes),
       };
     });
@@ -252,15 +227,9 @@ export const useGraphStore = create<GraphStore>((set, get) => ({
         edgesMap.set(edge.id, edge);
       }
 
-      // 计算根节点；如果旧根已不在完整快照中，重新选择 Manager。
-      const rootNodeId = state.rootNodeId && nodesMap.has(state.rootNodeId)
-        ? state.rootNodeId
-        : incomingNodes.find((n) => n.exec_type === 'M')?.id || null;
-
       return {
         nodes: nodesMap,
         edges: edgesMap,
-        rootNodeId,
         stats: computeStats(nodesMap),
       };
     });
@@ -282,41 +251,6 @@ export const useGraphStore = create<GraphStore>((set, get) => ({
 
   getNode: (id: string) => {
     return get().nodes.get(id);
-  },
-
-  getRootNode: () => {
-    const { nodes, rootNodeId } = get();
-    return rootNodeId ? nodes.get(rootNodeId) : undefined;
-  },
-
-  getNodeDependents: (id: string) => {
-    const { edges, nodes } = get();
-    const dependents: GraphNode[] = [];
-    for (const edge of edges.values()) {
-      if (edge.type === 'dependency' && edge.target === id) {
-        const node = nodes.get(edge.source);
-        if (node) dependents.push(node);
-      }
-    }
-    return dependents;
-  },
-
-  getChildren: (id: string) => {
-    const { edges, nodes } = get();
-    const children: GraphNode[] = [];
-    for (const edge of edges.values()) {
-      if (edge.type === 'parent' && edge.source === id) {
-        const node = nodes.get(edge.target);
-        if (node) children.push(node);
-      }
-    }
-    return children;
-  },
-
-  highlightNodes: (ids: string[]) => {
-    // 由 UI 层根据 selectedNodeId 自行高亮
-    // 此方法保留供外部调用
-    set({ selectedNodeId: ids[0] || null });
   },
 
   resetGraph: () => {

@@ -5,6 +5,7 @@ import { getRolePools, getRoles, getSessionSettings, updateSessionSettings } fro
 import { loadRoleHoverDetail } from '../utils/roleHoverDetail';
 import { useI18n } from '../i18n';
 import SearchCheckboxPicker from './SearchCheckboxPicker';
+import { errorMessage } from '../utils/errorMessage';
 
 /** 候选段固定按 manager / worker 分两个 picker，类型在调用处就是常量。 */
 type RoleType = NonNullable<RoleInfo['type']>;
@@ -86,7 +87,7 @@ export const CandidateRolesDialog: React.FC<CandidateRolesDialogProps> = ({
         if (cancelled) return;
         setPools([]);
         setRoles([]);
-        setError(reason instanceof Error ? reason.message : String(reason));
+        setError(errorMessage(reason));
       })
       .finally(() => {
         if (cancelled) return;
@@ -122,7 +123,7 @@ export const CandidateRolesDialog: React.FC<CandidateRolesDialogProps> = ({
       onSaved();
       onClose();
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : String(reason));
+      setError(errorMessage(reason));
     } finally {
       setSaving(false);
     }
@@ -136,7 +137,7 @@ export const CandidateRolesDialog: React.FC<CandidateRolesDialogProps> = ({
       onSaved();
       onClose();
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : String(reason));
+      setError(errorMessage(reason));
     } finally {
       setSaving(false);
     }

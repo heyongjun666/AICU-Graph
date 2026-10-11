@@ -538,7 +538,7 @@ class TestSpawnChildConfiguration:
 class TestIsModelImageInputError:
     def test_detects_image_input_signature(self):
         assert is_model_image_input_error(
-            "internal 执行失败 (returncode=1; stdout_tail=... "
+            "claude 执行失败 (returncode=1; stdout_tail=... "
             "API Error: 400 Model do not support image input. Request id: ...)"
         )
 
@@ -602,7 +602,7 @@ class _FakeCC:
             # 模拟 chat() 失败：图片输入限制，conversation_id 尽力保留或不可恢复
             self.conversation_id = "abc-123" if self.preserve_session else None
             raise ModelImageInputError(
-                "internal 执行失败 (returncode=1; stdout_tail=... "
+                "claude 执行失败 (returncode=1; stdout_tail=... "
                 "API Error: 400 Model do not support image input. Request id: ...)"
             )
         return "recovered"
@@ -705,7 +705,7 @@ class TestCCChatWithRetryImageRecovery:
                 self.call_count += 1
                 self.conversation_id = None
                 raise ModelImageInputError(
-                    "internal 执行失败 (returncode=1; ... support image input ...)"
+                    "claude 执行失败 (returncode=1; ... support image input ...)"
                 )
 
             def reset_conversation(self):

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import shutil
 import threading
@@ -22,6 +23,8 @@ from runtime.persistence import Persistence
 from runtime.runtime import Runtime
 from runtime.sse_manager import SSEManager
 from runtime.workspace_resolver import resolve_shared_workspace
+
+logger = logging.getLogger(__name__)
 
 
 _SESSION_CONFIG_KEYS = {
@@ -178,6 +181,7 @@ class SessionManager:
         self._index_path = os.path.join(self.root_dir, "sessions.json")
         self._config_path = os.path.join(self.root_dir, "config.json")
         self._sessions: dict[str, SessionHandle] = {}
+        self._unrestored_records: list[Any] = []
         self._lock = threading.RLock()
         # Serialize global config persistence and propagation. Runtime setters
         # intentionally run outside ``_lock`` because Scheduler callbacks can
@@ -475,15 +479,6 @@ class SessionManager:
 
     def delete_api_key(self, vendor: str) -> None:
         self.credential_store.delete(vendor)
-
-    def get_internal_username(self) -> Optional[str]:
-        return self.credential_store.get_username()
-
-    def set_internal_username(self, username: str) -> None:
-        self.credential_store.set_username(username)
-
-    def delete_internal_username(self) -> None:
-        self.credential_store.delete_username()
 
     def _load_global_config(
         self, *, fallback_max_concurrency: Optional[int] = None
@@ -914,7 +909,14 @@ class SessionManager:
         try:
             with open(self._index_path, "r", encoding="utf-8") as file:
                 records = json.load(file)
-        except (OSError, json.JSONDecodeError):
+        except (OSError, json.JSONDecodeError) as error:
+            # 索引读不出来时，后续任何一次 _save_index 都会把它覆盖成只含新会话的内容；
+            # 先留一份副本，数据才有机会手工找回。
+            logger.error("Session index %s unreadable (%s); keeping a .corrupt copy", self._index_path, error)
+            try:
+                shutil.copy2(self._index_path, self._index_path + ".corrupt")
+            except OSError:
+                pass
             return
         for record in records:
             try:
@@ -922,13 +924,16 @@ class SessionManager:
                 self._sessions[metadata.id] = self._build_handle(
                     metadata, restoring=True
                 )
-            except (TypeError, OSError, ValueError):
-                continue
+            except (TypeError, OSError, ValueError) as error:
+                # 恢复失败的记录原样保留在索引里（下次版本/环境修好后还能恢复），不静默丢弃。
+                logger.error("Failed to restore session record %r: %s", record.get("id") if isinstance(record, dict) else record, error)
+                self._unrestored_records.append(record)
         with self._lock:
             self._save_index()
 
     def _save_index(self) -> None:
         records = [asdict(handle.metadata) for handle in self._sessions.values()]
+        records.extend(self._unrestored_records)
         _atomic_write_json(self._index_path, records)
 
     def _session_dir(self, session_id: str) -> str:

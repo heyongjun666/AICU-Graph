@@ -1076,6 +1076,32 @@ class TestDeleteManualNodeProtection:
         with pytest.raises(ValueError):
             runtime.delete_manual_node("nonexistent")
 
+    def _add_dependency(self, runtime):
+        runtime.graph.add_node(Node(
+            id="a", parent_id="root", exec_type="worker", role="coder",
+            task="a", config={}, status=NodeStatus.COMPLETED,
+        ))
+        runtime.graph.add_node(Node(
+            id="b", parent_id="root", exec_type="worker", role="coder",
+            task="b", config={}, status=NodeStatus.COMPLETED,
+        ))
+        runtime.graph.add_edge(Edge(
+            id="dep", type=EdgeType.DEPENDENCY, from_node="a", to_node="b",
+        ))
+
+    def test_delete_node_with_dependents_is_rejected_as_runtime_error(self, runtime):
+        runtime.global_pause()
+        self._add_dependency(runtime)
+        with pytest.raises(RuntimeError):
+            runtime.delete_manual_node("a")
+        assert runtime.graph.get_node("a") is not None
+
+    def test_clear_graph_removes_nodes_with_dependency_edges(self, runtime):
+        runtime.global_pause()
+        self._add_dependency(runtime)
+        runtime.clear_graph()
+        assert not runtime.graph.nodes
+
 
 # ============================================================================
 # Global control tests

@@ -132,6 +132,29 @@ def test_legacy_session_concurrency_cleaned_up_on_restore(manager_factory):
     assert restored_handle.runtime.max_concurrency == DEFAULT_MAX_CONCURRENCY
 
 
+def test_unrestorable_record_survives_index_rewrite(manager_factory):
+    manager = manager_factory()
+    handle = _create(manager)
+    record = asdict(handle.metadata)
+    manager.shutdown()
+    broken = {"id": "from-a-newer-version", "unknown_field": 1}
+    Path(manager._index_path).write_text(json.dumps([record, broken]))
+
+    restored = manager_factory(root_dir=manager.root_dir, restore=True)
+    assert restored.get_session(record["id"]) is not None
+    ids = [item["id"] for item in json.loads(Path(restored._index_path).read_text())]
+    assert "from-a-newer-version" in ids
+
+
+def test_corrupt_index_leaves_a_copy(manager_factory):
+    manager = manager_factory()
+    manager.shutdown()
+    Path(manager._index_path).write_text("{not json")
+
+    manager_factory(root_dir=manager.root_dir, restore=True)
+    assert Path(manager._index_path + ".corrupt").read_text() == "{not json"
+
+
 def test_global_push_does_not_hold_manager_lock(manager_factory, monkeypatch):
     manager = manager_factory()
     handle = _create(manager)

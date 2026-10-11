@@ -7,6 +7,7 @@ import { useMcpCompatWarning } from '../hooks/useMcpCompatWarning';
 import { useI18n, translate } from '../i18n';
 import SearchCheckboxPicker from './SearchCheckboxPicker';
 import { CliOptions } from './CliOptions';
+import { errorMessage } from '../utils/errorMessage';
 
 interface NewSessionDialogProps {
   open: boolean;
@@ -48,7 +49,7 @@ export const NewSessionDialog: React.FC<NewSessionDialogProps> = ({ open, busy, 
       setError('');
       await onSubmit(title.trim(), selectedPool?.roles.length ? selectedPool.roles : undefined);
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : String(reason));
+      setError(errorMessage(reason));
     }
   };
 
@@ -117,7 +118,7 @@ export const NewNodeDialog: React.FC<NodeDialogProps> = ({
   const [selectedSkills, setSelectedSkills] = useState<string[]>([]);
   const [skillsLoading, setSkillsLoading] = useState(false);
   const roleRequestId = useRef(0);
-  const [cliName, setCliName] = useState<NodeConfig['cli_name']>('internal');
+  const [cliName, setCliName] = useState<NodeConfig['cli_name']>('claude');
   const [model, setModel] = useState('');
   const [apiBaseUrl, setApiBaseUrl] = useState('');
   const [apiKeyEnv, setApiKeyEnv] = useState('');
@@ -139,7 +140,7 @@ export const NewNodeDialog: React.FC<NodeDialogProps> = ({
     setParentId(nodes.find((node) => node.exec_type === 'M')?.id || '');
     setDependencies([]);
     setSelectedSkills([]);
-    setCliName('internal');
+    setCliName('claude');
     setModel('');
     setApiBaseUrl('');
     setApiKeyEnv('');
@@ -190,7 +191,7 @@ export const NewNodeDialog: React.FC<NodeDialogProps> = ({
         if (cancelled || requestId !== roleRequestId.current) return;
         setSelectedSkills([]);
         setSkillsLoading(false);
-        setError(reason instanceof Error ? reason.message : String(reason));
+        setError(errorMessage(reason));
       });
     return () => {
       cancelled = true;
@@ -289,7 +290,7 @@ export const NewNodeDialog: React.FC<NodeDialogProps> = ({
         config,
       });
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : String(reason));
+      setError(errorMessage(reason));
     }
   };
 

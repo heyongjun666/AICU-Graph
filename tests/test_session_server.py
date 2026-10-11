@@ -1,11 +1,13 @@
 """Tests for the multi-session graph API."""
 
 import contextlib
+import io
 import json
 import shutil
 import sys
 import threading
 import time
+import zipfile
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -1595,25 +1597,6 @@ def test_api_key_delete_by_vendor(session_client):
     ).json()["api_key"] is None
 
 
-def test_internal_username_save_and_echo(session_client):
-    resp = session_client.put("/v1/config/internal-username", json={"username": "  v-user  "})
-    assert resp.status_code == 200
-    assert resp.json() == {"username": "v-user", "saved": True}
-    assert session_client.get("/v1/config/internal-username").json() == {"username": "v-user"}
-
-
-def test_internal_username_empty_value_deletes(session_client):
-    session_client.put("/v1/config/internal-username", json={"username": "v-user"})
-    resp = session_client.put("/v1/config/internal-username", json={"username": "  "})
-    assert resp.status_code == 200
-    assert resp.json() == {"username": None, "saved": False}
-    assert session_client.get("/v1/config/internal-username").json() == {"username": None}
-
-
-# ============================================================================
-# 生效地址端点（/v1/effective-base-url）
-# ============================================================================
-
 def test_effective_base_url_follows_the_model(session_client):
     """连接表单显示「生效地址」用的端点：换模型就换地址。
 
@@ -2418,3 +2401,125 @@ class TestMcpProbeEndpointRemote:
             )
         assert failed.status_code == 400
         assert "127.0.0.1:1" in failed.json()["detail"]
+
+
+# --------------------------------------------------------------------------
+# 角色池导入 / 导出
+# --------------------------------------------------------------------------
+
+
+def _pool_bundle_app(session_manager, root: Path):
+    """隔离的 roles/ + skills/ + mcp_servers.json + role_pools.json；default.yaml 取自仓库。"""
+    repo = Path(__file__).resolve().parent.parent
+    roles_dir = root / "roles"
+    for kind in ("Manager", "Worker"):
+        (roles_dir / kind).mkdir(parents=True, exist_ok=True)
+        shutil.copy(repo / "roles" / kind / "default.yaml", roles_dir / kind / "default.yaml")
+    (root / "skills").mkdir(exist_ok=True)
+    registry = root / "mcp_servers.json"
+    registry.write_text(json.dumps({"servers": {}}), encoding="utf-8")
+    roles_manager = RolesManager(str(roles_dir))
+    app = create_session_app(
+        session_manager,
+        roles_manager,
+        SkillsManager(str(root / "skills")),
+        RolePoolsManager(str(root / "role_pools.json"), roles_manager),
+        mcp_registry_path=str(registry),
+    )
+    return app, roles_manager, registry
+
+
+def _seed_exportable_pool(client, root: Path, name="博客开发"):
+    (root / "skills" / "s1").mkdir(parents=True, exist_ok=True)
+    (root / "skills" / "s1" / "SKILL.md").write_text("---\nname: s1\n---\nhi\n", encoding="utf-8")
+    (root / "mcp_servers.json").write_text(
+        json.dumps({"servers": {"echo-probe": {"command": "python3", "args": ["tests/mcp_echo_server.py"],
+                                               "env": {"API_TOKEN": "sekrit-value"}}}}),
+        encoding="utf-8",
+    )
+    role = client.post("/v1/roles", json={
+        "role_id": "w1", "role_type": "worker",
+        "content": 'role_md: "w"\nskills: [s1]\nmcp: [echo-probe]\n',
+    })
+    assert role.status_code in (200, 201), role.text
+    created = client.post("/v1/role-pools", json={"name": name, "roles": ["w1"]})
+    assert created.status_code == 201, created.text
+    return created.json()
+
+
+class TestRolePoolBundleEndpoints:
+    def test_preview_and_download(self, session_manager, tmp_path):
+        app, _, _ = _pool_bundle_app(session_manager, tmp_path / "src")
+        with TestClient(app) as client:
+            pool = _seed_exportable_pool(client, tmp_path / "src")
+
+            preview = client.get(f"/v1/role-pools/{pool['id']}/export/preview")
+            assert preview.status_code == 200, preview.text
+            body = preview.json()
+            assert body["skills"] == ["s1"] and body["mcp"] == ["echo-probe"]
+            assert body["sensitive_mcp"] == [{"name": "echo-probe", "keys": ["env:API_TOKEN"]}]
+            assert "sekrit-value" not in preview.text
+
+            download = client.get(f"/v1/role-pools/{pool['id']}/export")
+            assert download.status_code == 200
+            assert download.headers["content-type"] == "application/zip"
+            disposition = download.headers["content-disposition"]
+            assert disposition.startswith("attachment;")
+            assert "filename*=UTF-8''" in disposition and "%E5%8D%9A%E5%AE%A2" in disposition
+            with zipfile.ZipFile(io.BytesIO(download.content)) as archive:
+                assert "manifest.json" in archive.namelist()
+
+            assert client.get("/v1/role-pools/nope/export/preview").status_code == 404
+            assert client.get("/v1/role-pools/nope/export").status_code == 404
+
+    def test_import_dry_run_then_real_import_and_conflicts(self, session_manager, tmp_path):
+        src_app, _, _ = _pool_bundle_app(session_manager, tmp_path / "src")
+        with TestClient(src_app) as client:
+            pool = _seed_exportable_pool(client, tmp_path / "src")
+            data = client.get(f"/v1/role-pools/{pool['id']}/export").content
+
+        dst_app, dst_roles, dst_registry = _pool_bundle_app(session_manager, tmp_path / "dst")
+        with TestClient(dst_app) as client:
+            plan = client.post("/v1/role-pools/import?dry_run=true", content=data)
+            assert plan.status_code == 200, plan.text
+            assert plan.json()["dry_run"] is True
+            assert plan.json()["mcp"][0]["command"] == "python3"
+            assert client.get("/v1/role-pools").json() == {"pools": []}
+            assert not (tmp_path / "dst" / "skills" / "s1").exists()
+
+            done = client.post("/v1/role-pools/import", content=data)
+            assert done.status_code == 200, done.text
+            assert done.json()["counts"]["created"] == 4
+            assert [p["name"] for p in client.get("/v1/role-pools").json()["pools"]] == ["博客开发"]
+
+            dst_roles.update_role("w1", content='role_md: "LOCAL"\n', role_type="worker")
+            skipped = client.post("/v1/role-pools/import?on_conflict=skip", content=data)
+            assert skipped.json()["counts"]["skipped"] >= 1
+            assert "LOCAL" in dst_roles.read_role_raw("w1", "worker")["content"]
+            overwritten = client.post("/v1/role-pools/import?on_conflict=overwrite", content=data)
+            assert overwritten.json()["counts"]["overwritten"] >= 1
+            assert "LOCAL" not in dst_roles.read_role_raw("w1", "worker")["content"]
+
+            assert client.post("/v1/role-pools/import?on_conflict=merge", content=data).status_code in (400, 422)
+
+            dst_roles.update_role("w1", content='role_md: "LOCAL2"\n', role_type="worker")
+            plan = client.post(
+                "/v1/role-pools/import?dry_run=true&on_conflict=skip&decide=role:worker/w1=overwrite", content=data
+            ).json()
+            assert next(r for r in plan["roles"] if r["id"] == "w1")["policy"] == "overwrite"
+            assert client.post("/v1/role-pools/import?decide=role:worker/w1=merge", content=data).status_code == 400
+            assert client.post("/v1/role-pools/import?decide=nonsense", content=data).status_code == 400
+            client.post("/v1/role-pools/import?decide=role:worker/w1=overwrite", content=data)
+            assert "LOCAL2" not in dst_roles.read_role_raw("w1", "worker")["content"]
+
+    def test_import_rejects_bad_and_oversized_bodies(self, session_manager, tmp_path, monkeypatch):
+        from runtime import session_server as server_module
+
+        app, _, _ = _pool_bundle_app(session_manager, tmp_path / "dst")
+        with TestClient(app) as client:
+            bad = client.post("/v1/role-pools/import", content=b"not a zip")
+            assert bad.status_code == 400
+            assert "zip" in bad.text
+
+            monkeypatch.setattr(server_module, "MAX_BUNDLE_BYTES", 10)
+            assert client.post("/v1/role-pools/import", content=b"x" * 11).status_code == 413

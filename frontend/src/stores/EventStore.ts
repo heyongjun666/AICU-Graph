@@ -11,7 +11,6 @@ import { getAgentEvents } from '../utils/api';
 
 interface EventState {
   events: AgentEvent[];
-  loadedSessionId: string | null;
   loading: boolean;
   /** 当前被强调的事件（其生产/消费节点与虚线边一起高亮） */
   highlightedEventId: string | null;
@@ -25,7 +24,6 @@ interface EventState {
 
 export const useEventStore = create<EventState>((set) => ({
   events: [],
-  loadedSessionId: null,
   loading: false,
   highlightedEventId: null,
   highlightedNodeIds: [],
@@ -34,16 +32,15 @@ export const useEventStore = create<EventState>((set) => ({
     set({ loading: true });
     try {
       const events = await getAgentEvents(sessionId);
-      set({ events, loadedSessionId: sessionId, loading: false });
+      set({ events, loading: false });
     } catch {
-      set({ events: [], loadedSessionId: sessionId, loading: false });
+      set({ events: [], loading: false });
     }
   },
 
   clear: () =>
     set({
       events: [],
-      loadedSessionId: null,
       highlightedEventId: null,
       highlightedNodeIds: [],
     }),

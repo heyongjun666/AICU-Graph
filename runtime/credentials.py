@@ -90,7 +90,7 @@ def api_key_env_for_vendor(vendor: Optional[str]) -> Optional[str]:
 
 
 class CredentialStore:
-    """明文凭据存储：``{username, api_keys: {vendor: sk}}``，原子写 + 0600。"""
+    """明文凭据存储：``{api_keys: {vendor: sk}}``，原子写 + 0600。"""
 
     def __init__(self, path: str):
         self._path = path
@@ -99,22 +99,18 @@ class CredentialStore:
 
     def _load(self) -> dict:
         if not os.path.exists(self._path):
-            return {"username": None, "api_keys": {}}
+            return {"api_keys": {}}
         try:
             with open(self._path, "r", encoding="utf-8") as file:
                 data = json.load(file)
         except (OSError, json.JSONDecodeError):
-            return {"username": None, "api_keys": {}}
+            return {"api_keys": {}}
         if not isinstance(data, dict):
-            return {"username": None, "api_keys": {}}
+            return {"api_keys": {}}
         api_keys = data.get("api_keys")
         if not isinstance(api_keys, dict):
             api_keys = {}
-        username = data.get("username")
-        return {
-            "username": username if isinstance(username, str) else None,
-            "api_keys": {str(k): str(v) for k, v in api_keys.items()},
-        }
+        return {"api_keys": {str(k): str(v) for k, v in api_keys.items()}}
 
     def _save(self) -> None:
         directory = os.path.dirname(self._path)
@@ -148,22 +144,6 @@ class CredentialStore:
         with self._lock:
             return sorted(self._data["api_keys"].keys())
 
-    # ---- internal username ----
-
-    def get_username(self) -> Optional[str]:
-        with self._lock:
-            return self._data.get("username")
-
-    def set_username(self, name: str) -> None:
-        with self._lock:
-            self._data["username"] = name
-            self._save()
-
-    def delete_username(self) -> None:
-        with self._lock:
-            self._data["username"] = None
-            self._save()
-
 
 # ---- 模块级单例（单进程共享，供 worker 线程 / CLI 子进程环境注入访问） ----
 
@@ -189,10 +169,3 @@ def resolve_sk_for_provider(provider: Optional[str], model: Optional[str]) -> Op
     if not vendor:
         return None
     return _store.get(vendor)
-
-
-def resolve_internal_username() -> Optional[str]:
-    """解析已保存的 Internal 账号名；store 未初始化返回 None。"""
-    if _store is None:
-        return None
-    return _store.get_username()

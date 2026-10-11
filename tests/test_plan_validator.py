@@ -361,6 +361,24 @@ class TestRuntimeWiring:
         children_after = {c.id for c in runtime.graph.children(root)}
         assert children_after == children_before
 
+    def test_submit_fix_plan_rejects_unknown_step_ref_before_mutation(self, runtime):
+        """评估里混进不存在的 step_ref：整份拒绝，已存在的失败节点不被半途重置。"""
+        root = runtime.submit_root_manager(task="root")
+        old = runtime.inject_plan(
+            root, _plan(_step("failed", exec_type="worker", role="dev_member"))
+        )[0]
+        status_before = runtime.get_node(old.id).status
+        with pytest.raises(ValueError, match="ghost"):
+            runtime.submit_fix_plan(
+                root,
+                [
+                    {"step_ref": "failed", "fix": {"task": "fix it"}},
+                    {"step_ref": "ghost", "fix": {"task": "fix it"}},
+                ],
+                1,
+            )
+        assert runtime.get_node(old.id).status == status_before
+
     def test_submit_fix_plan_derives_summary_when_child_has_none(self, runtime):
         """回归：子节点 task_summary 为空时修复计划仍可提交，不得抛 PlanValidationError。
 

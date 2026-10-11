@@ -436,7 +436,7 @@ def create_app(runtime: Any, sse_manager: SSEManager) -> FastAPI:
 def run_server(
     runtime: Any,
     sse_manager: SSEManager,
-    host: str = "0.0.0.0",
+    host: str = "127.0.0.1",
     port: int = 8080,
     log_level: str = "info",
 ) -> None:
@@ -445,7 +445,7 @@ def run_server(
     Args:
         runtime: Runtime 实例。
         sse_manager: SSEManager 实例。
-        host: 监听地址，默认 0.0.0.0。
+        host: 监听地址，默认 127.0.0.1（仅本机）。
         port: 监听端口，默认 8080。
         log_level: 日志级别，默认 info。
     """

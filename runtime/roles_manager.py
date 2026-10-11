@@ -16,6 +16,7 @@ runtime/roles_manager.py — 角色配置管理（Manager/Worker 二级目录版
 新增角色只需在对应子目录下放置 {role_id}.yaml 文件（或通过 API 创建）。
 """
 
+import hashlib
 import logging
 import os
 import re
@@ -504,7 +505,7 @@ class RolesManager:
             "model": "所有环节：Agent 调用的模型名。解析优先级：本处显式 > 角色 yaml 显式 > 系统设置 > CLI 自身默认（无代码兜底默认模型），留空表示跟随系统设置。",
             "cli_name": "所有环节：Agent 使用的 CLI 命令，留空表示用系统默认。",
             "audit_rounds": "审计阶段：对抗审查的最大轮数。每轮深度审计并自动修订，0 表示跳过审计。",
-            "skills_dir": "所有环节：Skill 源目录。Agent 从中加载 skill，按所选 CLI 落到它自己的项目级 skill 目录（claude/internal 是 .claude/skills，codebuddy 是 .codebuddy/skills，kimi 是 .agents/skills，qwen 是 .qwen/skills，pi 是 .pi/skills，依此类推）。",
+            "skills_dir": "所有环节：Skill 源目录。Agent 从中加载 skill，按所选 CLI 落到它自己的项目级 skill 目录（claude 是 .claude/skills，codebuddy 是 .codebuddy/skills，kimi 是 .agents/skills，qwen 是 .qwen/skills，pi 是 .pi/skills，依此类推）。",
             "skills": "所有环节：启用的 skill 名称列表，执行时作为 project-level skill 加载。尚未接入该机制的 CLI（grok/opencode）会照常运行但打印一行警告，本次声明的 skill 不生效。",
             "mcp": "所有环节：启用的 MCP server 名称列表，名字定义在仓库根 mcp_servers.json 中。执行前会逐个预检连通性，连不上则该节点失败。",
             "output_file": "生成阶段：单文件模式下 Agent 写入结果的文件名（如 output）。modular_output=true 时通常设为 null。",
@@ -529,7 +530,7 @@ class RolesManager:
             "model": "All phases: model name the agent calls. Resolution: explicit here > role YAML explicit > system settings > CLI default (no hardcoded fallback); leave empty to follow system settings.",
             "cli_name": "All phases: CLI command the agent uses; leave empty for the system default.",
             "audit_rounds": "Audit phase: max adversarial audit rounds. Each round deep-audits output and auto-revises; 0 skips auditing.",
-            "skills_dir": "All phases: skill source directory. The agent loads skills from it into the selected CLI's own project-level skill directory (claude/internal: .claude/skills, codebuddy: .codebuddy/skills, kimi: .agents/skills, qwen: .qwen/skills, pi: .pi/skills, and so on).",
+            "skills_dir": "All phases: skill source directory. The agent loads skills from it into the selected CLI's own project-level skill directory (claude: .claude/skills, codebuddy: .codebuddy/skills, kimi: .agents/skills, qwen: .qwen/skills, pi: .pi/skills, and so on).",
             "skills": "All phases: list of enabled skill names, loaded as project-level skills during execution. CLIs not yet wired for this (grok/opencode) still run, but print a warning that the declared skills have no effect.",
             "mcp": "All phases: list of enabled MCP server names, defined in mcp_servers.json at the repo root. Connectivity is pre-checked before execution; an unreachable server fails the node.",
             "output_file": "Generation phase: filename the agent writes its result to in single-file mode (e.g. output). Usually null when modular_output=true.",
@@ -653,7 +654,9 @@ class RolesManager:
             "schema": self.get_role_schema(role_type),
         }
 
-    def _validate_config(self, config: Any, role_type: str) -> dict[str, Any]:
+    def _validate_config(
+        self, config: Any, role_type: str, *, allow_null: bool = False
+    ) -> dict[str, Any]:
         if not isinstance(config, dict):
             raise ValueError("Role config must be a YAML mapping")
         defaults, samples = self._get_field_catalog(role_type)
@@ -663,7 +666,7 @@ class RolesManager:
         for name, value in config.items():
             expected = samples[name]
             if value is None:
-                if name in defaults and defaults[name] is None:
+                if allow_null or (name in defaults and defaults[name] is None):
                     continue
                 raise ValueError(f"Role config field '{name}' cannot be null")
             if expected is None:
@@ -681,6 +684,40 @@ class RolesManager:
             elif isinstance(expected, str) and not isinstance(value, str):
                 raise ValueError(f"Role config field '{name}' must be text")
         return config
+
+    def validate_config(self, config: Any, role_type: str) -> dict[str, Any]:
+        """校验角色配置的字段白名单与类型（导入原文 yaml 前用）。
+
+        允许已知字段显式写 null：仓库自带的 Worker 角色大量用 ``output_file: null``
+        （modular_output 模式），按 API 写入口的严格规则它们自己都过不了。
+        """
+        return self._validate_config(config, role_type, allow_null=True)
+
+    def read_role_raw(self, role_id: str, role_type: str) -> dict:
+        """轻量读取：yaml 原文 + 合并 default.yaml 后的生效配置（不构建 schema）。"""
+        file_path = self._role_path(role_id, role_type)
+        if not os.path.isfile(file_path):
+            raise KeyError(f"Role '{role_id}' not found")
+        with open(file_path, "r", encoding="utf-8") as file:
+            content = file.read()
+        return {
+            "id": role_id,
+            "type": role_type,
+            "content": content,
+            "effective_config": {**self._load_default_config(role_type), **(yaml.safe_load(content) or {})},
+        }
+
+    def default_config(self, role_type: str) -> dict[str, Any]:
+        """该类型 default.yaml 的内容（不存在则空）。"""
+        return self._load_default_config(role_type)
+
+    def default_fingerprint(self, role_type: str) -> str:
+        """default.yaml 字节的 sha256；文件不存在返回空串。"""
+        default_path = self._role_path("default", role_type)
+        if not os.path.isfile(default_path):
+            return ""
+        with open(default_path, "rb") as file:
+            return hashlib.sha256(file.read()).hexdigest()
 
     def _serialize_config(self, config: dict[str, Any], role_type: str) -> str:
         validated = self._validate_config(config, role_type)

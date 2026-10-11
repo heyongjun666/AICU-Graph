@@ -1,4 +1,5 @@
 import json
+import logging
 import subprocess
 import os
 import signal
@@ -15,6 +16,8 @@ from cli_adapters import (
     provider_route,
 )
 from runtime.credentials import resolve_sk_for_provider
+
+logger = logging.getLogger(__name__)
 
 
 class CCExecutionError(RuntimeError):
@@ -254,13 +257,13 @@ class ClaudeCodeAgent:
             if claude_md_path.exists():
                 existing = claude_md_path.read_text(encoding='utf-8').strip()
                 if existing != instruction_content:
-                    print(f"[CC] 警告: {claude_md_path} 已存在且内容不同，将被覆盖")
+                    logger.warning(f"[CC] 警告: {claude_md_path} 已存在且内容不同，将被覆盖")
 
             with open(claude_md_path, 'w', encoding='utf-8') as f:
                 f.write(instruction_content)
-            print(f"[CC] 已将角色说明写入: {claude_md_path}")
+            logger.info(f"[CC] 已将角色说明写入: {claude_md_path}")
 
-        print(f"[CC] 初始化成功，CLI: {self.cli_name}，工作目录: {self.workspace}")
+        logger.info(f"[CC] 初始化成功，CLI: {self.cli_name}，工作目录: {self.workspace}")
 
     def _build_base_command(self) -> List[str]:
         """构建基础的 CLI 命令参数（不包含 --cwd，工作目录由 subprocess.run(cwd=) 控制）"""
@@ -283,14 +286,6 @@ class ClaudeCodeAgent:
                 if not self.output_callback:
                     continue
                 message = line.rstrip("\r\n")
-                # Internal 2.1.x 当前会在 SDK 查询成功时把此兼容性告警写入
-                # stderr；它不是执行失败，不应作为任务内容转发给 AICU。
-                if (
-                    label == "stderr"
-                    and self.cli_name == "internal"
-                    and message.startswith("[claude-code:unrecognized_model]")
-                ):
-                    continue
                 if label == "stdout":
                     message = self.adapter.format_stream_event(message)
                 if message:
@@ -365,16 +360,13 @@ class ClaudeCodeAgent:
         # 这个名字同时交给 build_env：opencode 的 OPENCODE_CONFIG_CONTENT 与 pi 的
         # models.json 都把它写进自己的 provider 配置作引用，两边必须逐字一致，
         # 否则 CLI 拿不到 key（codex 的 env_key 踩过同一个坑）。
-        sk = None
-        key_env_name = None
-        if self.cli_name != "internal":  # Internal 使用 --username 认证
-            provider_id = getattr(self, "provider_id", None)
-            sk = resolve_sk_for_provider(provider_id, self.model)
-            key_env_name = (
-                self.api_key_env
-                if provider_id and self.api_key_env
-                else self.adapter.api_key_env_for_model(self.model)
-            )
+        provider_id = getattr(self, "provider_id", None)
+        sk = resolve_sk_for_provider(provider_id, self.model)
+        key_env_name = (
+            self.api_key_env
+            if provider_id and self.api_key_env
+            else self.adapter.api_key_env_for_model(self.model)
+        )
 
         base_env = os.environ.copy()
         # managed-slot CLI（例如 qwen）会在 build_env 阶段把源变量复制到自身固定变量；
@@ -426,7 +418,7 @@ class ClaudeCodeAgent:
         if prompt_cmd:
             cmd.extend(prompt_cmd)
         prompt_mode = "stdin" if prompt_via_stdin else "argv"
-        print(f"[CC] 执行命令: {' '.join(cmd)} (prompt via {prompt_mode}, {len(prompt)} chars)")
+        logger.info("[CC] 执行命令: %s（%d 个参数，prompt via %s，%d chars）", cmd[0], len(cmd) - 1, prompt_mode, len(prompt))
 
         # 用 Popen + start_new_session=True 创建独立进程组，
         # 超时时用 os.killpg kill 整个进程组，避免 CLI 子进程成为孤儿进程
@@ -469,7 +461,7 @@ class ClaudeCodeAgent:
             except ProcessLookupError:
                 pass  # 进程已退出
             proc.wait()
-            print(f"[CC] 超时（>{timeout}s），已 kill 整个进程组")
+            logger.warning(f"[CC] 超时（>{timeout}s），已 kill 整个进程组")
             # 重置对话上下文，避免续接已损坏的会话
             # （pause 场景通过 _preserve_conversation 阻止重置）
             if not self._preserve_conversation.is_set():
@@ -491,7 +483,7 @@ class ClaudeCodeAgent:
                 stderr_preview = stderr_tail[-500:] if len(stderr_tail) > 500 else stderr_tail
                 detail_parts.append(f"stderr={stderr_preview}")
             detail = "; ".join(detail_parts)
-            print(f"[CC] 执行出错: {detail}")
+            logger.warning(f"[CC] 执行出错: {detail}")
             # 模型不支持图片输入（读图触发 400）：模型能力限制而非会话损坏。
             # 尽力保留会话 ID 供上层 --resume 续接同一对话；提取不到则重置，
             # 由上层退化为带『禁读图』指令的全新会话重试。
@@ -519,7 +511,7 @@ class ClaudeCodeAgent:
             if isinstance(errors, str):
                 errors = [errors]
             error_msg = "; ".join(errors) if errors else "未知内部错误"
-            print(f"[CC] error_during_execution: {error_msg}")
+            logger.warning(f"[CC] error_during_execution: {error_msg}")
             # 防御性分支：若图片输入限制以 error_during_execution 形式出现，
             # 同样保留会话 ID 供上层续接（实测该场景走 returncode!=0 路径）。
             if is_model_image_input_error(error_msg):
@@ -537,7 +529,7 @@ class ClaudeCodeAgent:
     def reset_conversation(self):
         """重置对话上下文，下次 chat() 将开启全新会话"""
         self.conversation_id = None
-        print("[CC] 对话上下文已重置")
+        logger.info("[CC] 对话上下文已重置")
 
     def spawn_child(self,
                     sub_workspace_name: str,
@@ -572,33 +564,3 @@ class ClaudeCodeAgent:
             child_kwargs["provider_id"] = provider_id
         child_agent = ClaudeCodeAgent(**child_kwargs)
         return child_agent
-
-    def interactive(self):
-        """
-        开启交互式会话（相当于直接运行 CLI）
-        注意：这会阻塞当前进程，直到用户退出
-        """
-        cmd = self._build_base_command()
-        print(f"[CC] 启动交互会话: {' '.join(cmd)}")
-        subprocess.run(cmd, cwd=self.workspace, env=self._build_process_env())
-
-    # ---- 辅助方法 ----
-
-    def execute_bash(self, bash_command: str) -> str:
-        """在 workspace 内执行一条 Bash 命令"""
-        result = subprocess.run(
-            bash_command,
-            shell=True,
-            cwd=self.workspace,
-            capture_output=True,
-            text=True
-        )
-        return result.stdout.strip()
-
-    def read_file(self, file_path: str) -> str:
-        """读取工作目录下的文件内容"""
-        target = self.workspace / file_path
-        if target.exists():
-            with open(target, 'r', encoding='utf-8') as f:
-                return f.read()
-        return ""

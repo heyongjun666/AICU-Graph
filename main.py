@@ -135,7 +135,7 @@ def main():
     signal.signal(signal.SIGTERM, _shutdown)
 
     # 5. 启动 HTTP 服务
-    host = os.environ.get("HOST", "0.0.0.0")
+    host = os.environ.get("HOST", "127.0.0.1")
     port = int(os.environ.get("PORT", "8080"))
 
     logger.info("Starting HTTP server on %s:%s", host, port)

@@ -14,6 +14,7 @@ import {
   UploadResult,
 } from '../types';
 import { resolveBrowsePath, revealBrowsePath, uploadBrowseFile } from './api';
+import { errorMessage } from './errorMessage';
 
 /** 一次拖入的文件上限。防的是误拖一个 .app 包（会被递归成几百个文件）。 */
 export const MAX_DROP_FILES = 2000;
@@ -92,7 +93,7 @@ export async function collectDroppedFiles(
   let truncated = false;
   const roots: Array<{ entry: FileSystemEntry } | { file: File }> = [];
   const fail = (name: string, error: unknown) => {
-    failed.push({ name, reason: error instanceof Error ? error.message : String(error) });
+    failed.push({ name, reason: errorMessage(error) });
   };
 
   // 必须在第一次 await 之前捕获所有句柄（含 getAsFile 的退化路径）。
@@ -207,7 +208,7 @@ export async function uploadFiles(
         } catch (error) {
           failed.push({
             name: item.relPath,
-            reason: error instanceof Error ? error.message : String(error),
+            reason: errorMessage(error),
           });
         }
       }
@@ -225,7 +226,7 @@ export async function uploadFiles(
 /**
  * 写剪贴板。**不能直接用 `navigator.clipboard`** —— 它在非安全上下文里根本不存在。
  *
- * 服务绑的是 `0.0.0.0`，用 `http://<局域网IP>:8080` 打开就不是 secure context
+ * 服务可通过 `HOST=0.0.0.0` 绑到局域网，用 `http://<局域网IP>:8080` 打开就不是 secure context
  * （只有 https 和 localhost 算），此时 `navigator.clipboard` 是 `undefined`，
  * `navigator.clipboard.writeText(...)` 在**属性访问**那一步就抛 TypeError，连
  * 请求都没发出去，界面只显示「复制失败」而用户什么都没做错。

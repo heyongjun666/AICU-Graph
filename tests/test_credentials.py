@@ -5,7 +5,6 @@ import os
 from runtime.credentials import (
     CredentialStore,
     api_key_env_for_vendor,
-    resolve_internal_username,
     resolve_sk_for_provider,
     resolve_sk_for_model,
     set_credential_store,
@@ -66,19 +65,9 @@ class TestCredentialStore:
         path = str(tmp_path / "api_keys.json")
         store = CredentialStore(path)
         store.set("openai", "sk-openai")
-        store.set_username("v-user")
 
         reloaded = CredentialStore(path)
         assert reloaded.get("openai") == "sk-openai"
-        assert reloaded.get_username() == "v-user"
-
-    def test_username_set_get_delete(self, tmp_path):
-        store = CredentialStore(str(tmp_path / "api_keys.json"))
-        assert store.get_username() is None
-        store.set_username("v-user")
-        assert store.get_username() == "v-user"
-        store.delete_username()
-        assert store.get_username() is None
 
     def test_file_is_written_with_0600_permissions(self, tmp_path):
         path = tmp_path / "api_keys.json"
@@ -101,16 +90,6 @@ class TestResolveSingletons:
     def test_resolve_returns_none_when_store_unset(self):
         set_credential_store(None)
         assert resolve_sk_for_model("deepseek-v4-pro") is None
-        assert resolve_internal_username() is None
-
-    def test_resolve_internal_username(self, tmp_path):
-        store = CredentialStore(str(tmp_path / "api_keys.json"))
-        store.set_username("v-user")
-        set_credential_store(store)
-        try:
-            assert resolve_internal_username() == "v-user"
-        finally:
-            set_credential_store(None)
 
     def test_resolve_sk_by_explicit_provider(self, tmp_path):
         store = CredentialStore(str(tmp_path / "api_keys.json"))

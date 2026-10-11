@@ -28,7 +28,8 @@ def t(zh: str, en: str) -> str:
 
 def localized_detail(exc: BaseException) -> str:
     """把常见业务异常本地化（英文直接透传，中文做关键词映射）。"""
-    message = str(exc)
+    # str(KeyError("x")) 带一层引号，会让 "... not found" 的中文映射匹配不上。
+    message = exc.args[0] if isinstance(exc, KeyError) and exc.args and isinstance(exc.args[0], str) else str(exc)
     if _current_lang.get() != "zh":
         return message
     return _translate_to_zh(message)

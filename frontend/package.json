@@ -1,5 +1,6 @@
 {
-  "name": "graph-viewer-v5",
+  "name": "aicu-graph-frontend",
+  "license": "Apache-2.0",
   "private": true,
   "version": "5.0.0",
   "type": "module",
@@ -14,24 +15,13 @@
     "test:watch": "vitest"
   },
   "dependencies": {
-    "@codemirror/commands": "^6.3.3",
-    "@codemirror/lang-markdown": "^6.2.5",
-    "@codemirror/language": "^6.10.1",
-    "@codemirror/state": "^6.4.1",
-    "@codemirror/theme-one-dark": "^6.1.2",
-    "@codemirror/view": "^6.26.1",
-    "@types/dompurify": "^3.0.5",
     "@xterm/addon-fit": "^0.11.0",
     "@xterm/xterm": "^6.0.0",
     "dagre": "^0.8.5",
-    "dompurify": "^3.0.9",
-    "highlight.js": "^11.10.0",
     "lucide-react": "^0.468.0",
-    "marked": "^12.0.2",
     "react": "^18.2.0",
     "react-dom": "^18.2.0",
     "reactflow": "^11.10.0",
-    "recharts": "^2.12.0",
     "zustand": "^4.4.7"
   },
   "devDependencies": {
@@ -42,7 +32,6 @@
     "@types/react-dom": "^18.2.17",
     "@vitejs/plugin-react": "^5.2.0",
     "jsdom": "^23.2.0",
-    "tailwindcss": "^3.4.1",
     "typescript": "^5.3.3",
     "vite": "^8.2.2",
     "vitest": "^4.1.11"

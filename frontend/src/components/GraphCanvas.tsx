@@ -34,6 +34,7 @@ import { LayoutCache } from '../utils/layoutCache';
 import { useGraphOptimizations } from '../hooks/useGraphOptimizations';
 import { GraphNode, RFEdge } from '../types';
 import { useI18n } from '../i18n';
+import { errorMessage } from '../utils/errorMessage';
 
 // ============================================================================
 // 布局缓存实例（模块级单例）
@@ -62,7 +63,6 @@ const GraphCanvasInner: React.FC = () => {
   const { t } = useI18n();
   const graphNodes = useGraphStore((state) => state.nodes);
   const graphEdges = useGraphStore((state) => state.edges);
-  const selectedNodeId = useGraphStore((state) => state.selectedNodeId);
   const selectNode = useGraphStore((state) => state.selectNode);
   const sessionId = useSessionStore((state) => state.activeSessionId);
   const events = useEventStore((state) => state.events);
@@ -183,7 +183,7 @@ const GraphCanvasInner: React.FC = () => {
     try {
       await createDependency(sessionId, connection.source, connection.target);
     } catch (error) {
-      window.alert(error instanceof Error ? error.message : String(error));
+      window.alert(errorMessage(error));
     }
   }, [sessionId]);
 
@@ -194,7 +194,7 @@ const GraphCanvasInner: React.FC = () => {
     try {
       await deleteDependency(sessionId, edge.id);
     } catch (error) {
-      window.alert(error instanceof Error ? error.message : String(error));
+      window.alert(errorMessage(error));
     }
   }, [sessionId]);
 

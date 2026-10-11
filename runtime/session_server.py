@@ -13,11 +13,12 @@ import struct
 import subprocess
 import tempfile
 import termios
+import urllib.parse
 from pathlib import Path
 from typing import Any, Literal, Optional
 
 from fastapi import FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -29,6 +30,7 @@ from runtime.file_transfer import (
     validate_upload_name,
 )
 from runtime.i18n import LanguageMiddleware, localized_detail, t
+from runtime.origin_guard import OriginGuardMiddleware
 from runtime.mcp_client import DEFAULT_PROBE_TIMEOUT, McpProbeError, probe_server
 from runtime.mcp_manager import (
     McpConfigError,
@@ -42,6 +44,7 @@ from runtime.mcp_manager import (
 from runtime.models import LogLevel
 from runtime.repo_paths import REPO_ROOT
 from runtime.roles_manager import RolesManager
+from runtime.role_pool_bundle import BundleTooLarge, MAX_BUNDLE_BYTES, RolePoolBundle
 from runtime.role_pools_manager import RolePoolsManager
 from runtime.server import _sse_stream
 from runtime.shared_io import mime_type_for
@@ -103,10 +106,6 @@ class ApiKeyRequest(BaseModel):
     model: str = Field(min_length=1, max_length=200)
     provider_id: Optional[str] = Field(default=None, max_length=80)
     api_key: Optional[str] = Field(default=None, max_length=4096)
-
-
-class InternalUsernameRequest(BaseModel):
-    username: Optional[str] = Field(default=None, max_length=200)
 
 
 class PauseGraphRequest(BaseModel):
@@ -193,6 +192,7 @@ def create_session_app(
 ) -> FastAPI:
     app = FastAPI(title="Execution Graph Workbench API", version="2.0")
     app.add_middleware(LanguageMiddleware)
+    app.add_middleware(OriginGuardMiddleware)
     project_root = REPO_ROOT
     roles_manager = roles_manager or RolesManager(os.path.join(project_root, "roles"))
     skills_manager = skills_manager or SkillsManager(
@@ -205,6 +205,9 @@ def create_session_app(
     )
     # MCP 注册表默认是仓库根的 mcp_servers.json；参数只为测试能指向 tmp_path。
     registry_path = Path(mcp_registry_path) if mcp_registry_path else None
+    role_pool_bundle = RolePoolBundle(
+        role_pools_manager, roles_manager, skills_manager, registry_path
+    )
 
     def resolve(session_id: str) -> SessionHandle:
         try:
@@ -296,6 +299,72 @@ def create_session_app(
         except KeyError as error:
             raise _http_error(404, error) from error
 
+    # ---- 角色池导入 / 导出（连同池内角色引用的 skill 与 MCP 定义） ----
+    # 包格式与校验见 runtime/role_pool_bundle.py。服务本身无认证，但 POST /v1/mcp/servers
+    # 本来就能写入可执行命令，导入没有新增能力；dry_run 预览会把将写入的 command / args 摆出来。
+
+    @app.get("/v1/role-pools/{pool_id}/export/preview")
+    def preview_role_pool_export(pool_id: str):
+        try:
+            return role_pool_bundle.preview_export(pool_id)
+        except KeyError as error:
+            raise _http_error(404, error) from error
+        except ValueError as error:
+            raise _http_error(400, error) from error
+
+    @app.get("/v1/role-pools/{pool_id}/export")
+    def export_role_pool(pool_id: str):
+        try:
+            pool_name, data = role_pool_bundle.build_export(pool_id)
+        except KeyError as error:
+            raise _http_error(404, error) from error
+        except ValueError as error:
+            raise _http_error(400, error) from error
+        filename = urllib.parse.quote(f"{pool_name}.aicu-pool.zip", safe="")
+        return Response(
+            content=data,
+            media_type="application/zip",
+            headers={"Content-Disposition": f"attachment; filename*=UTF-8''{filename}"},
+        )
+
+    async def read_limited_body(request: Request) -> bytes:
+        """流式读请求体，超过 MAX_BUNDLE_BYTES 即 413（不先把整包读进内存）。"""
+        declared = request.headers.get("content-length", "")
+        if declared.isdigit() and int(declared) > MAX_BUNDLE_BYTES:
+            raise _http_error(413, BundleTooLarge([f"包体超过上限 {MAX_BUNDLE_BYTES} 字节"]))
+        chunks: list[bytes] = []
+        received = 0
+        async for chunk in request.stream():
+            received += len(chunk)
+            if received > MAX_BUNDLE_BYTES:
+                raise _http_error(413, BundleTooLarge([f"包体超过上限 {MAX_BUNDLE_BYTES} 字节"]))
+            chunks.append(chunk)
+        return b"".join(chunks)
+
+    @app.post("/v1/role-pools/import")
+    async def import_role_pool(
+        request: Request,
+        on_conflict: Literal["skip", "overwrite"] = "skip",
+        dry_run: bool = False,
+        decide: list[str] = Query(default=[]),
+    ):
+        # 逐项决定：重复的 ?decide=<key>=skip|overwrite，覆盖 on_conflict 对这一项的默认。
+        decisions: dict[str, str] = {}
+        for entry in decide:
+            key, sep, value = entry.rpartition("=")
+            if not sep or not key:
+                raise _http_error(400, ValueError(f"decide 参数格式应为 <key>=skip|overwrite: {entry!r}"))
+            decisions[key] = value
+        raw = await read_limited_body(request)
+        try:
+            return await asyncio.to_thread(
+                role_pool_bundle.import_bundle, raw, on_conflict, dry_run, decisions
+            )
+        except BundleTooLarge as error:
+            raise _http_error(413, error) from error
+        except (ValueError, KeyError) as error:
+            raise _http_error(400, error) from error
+
     @app.get("/v1/skills")
     def list_skills():
         return {"skills": skills_manager.list_skills()}
@@ -360,8 +429,8 @@ def create_session_app(
     @app.post("/v1/skills/import", status_code=201)
     async def import_skill(skill_id: str, request: Request):
         """从 zip 归档导入完整的多文件 skill（raw bytes body + skill_id query）。"""
+        raw = await read_limited_body(request)
         try:
-            raw = await request.body()
             return skills_manager.import_skill_zip(skill_id, raw)
         except ValueError as error:
             raise _http_error(400, error) from error
@@ -616,19 +685,6 @@ def create_session_app(
     def delete_api_key(vendor: str = Query(min_length=1, max_length=80)):
         session_manager.delete_api_key(vendor)
 
-    @app.get("/v1/config/internal-username")
-    def get_internal_username():
-        return {"username": session_manager.get_internal_username()}
-
-    @app.put("/v1/config/internal-username")
-    def put_internal_username(body: InternalUsernameRequest):
-        username = (body.username or "").strip()
-        if username:
-            session_manager.set_internal_username(username)
-            return {"username": username, "saved": True}
-        session_manager.delete_internal_username()
-        return {"username": None, "saved": False}
-
     @app.get("/v1/sessions")
     def list_sessions():
         return {"sessions": session_manager.list_sessions()}
@@ -650,10 +706,10 @@ def create_session_app(
     @app.get("/v1/sessions/{session_id}")
     def get_session(session_id: str):
         handle = resolve(session_id)
-        return next(
-            item for item in session_manager.list_sessions()
-            if item["id"] == handle.metadata.id
-        )
+        for item in session_manager.list_sessions():
+            if item["id"] == handle.metadata.id:
+                return item
+        raise HTTPException(status_code=404, detail=t(f"会话 '{session_id}' 不存在", f"Session '{session_id}' not found"))
 
     @app.patch("/v1/sessions/{session_id}")
     def update_session(session_id: str, body: UpdateSessionRequest):
@@ -1069,7 +1125,7 @@ def create_session_app(
     ):
         """在访达中选中该路径。
 
-        必须是 POST：这是有副作用的端点，而服务默认监听 ``0.0.0.0``（``main.py``），
+        必须是 POST：这是有副作用的端点，而服务可能被绑到局域网（``HOST=0.0.0.0``，见 ``main.py``），
         GET 会被 ``<img src>`` 或链接预取之类的东西触发。前端要的是「用户点了才弹」。
         """
         return _browse_reveal(resolve(session_id).runtime, "shared", None, path)
@@ -1164,7 +1220,7 @@ def create_session_app(
     async def stream_events(session_id: str, request: Request):
         handle = resolve(session_id)
         last_event_id = request.headers.get("last-event-id")
-        since_id = int(last_event_id) if last_event_id and last_event_id.isdigit() else None
+        since_id = int(last_event_id) if last_event_id and last_event_id.isascii() and last_event_id.isdigit() else None
         return await _sse_stream(
             request,
             handle.runtime,

@@ -564,3 +564,72 @@ describe('NodeInspector 任务链', () => {
     expect(document.body.textContent).not.toContain('inspector.taskReason');
   });
 });
+
+// ============================================================================
+// 编辑表单与 store 的同步：SSE 推更新不能抹掉用户正在输入的内容
+// ============================================================================
+
+describe('NodeInspector 编辑表单不被 store 更新覆盖', () => {
+  function renderEditable(): void {
+    const node = makeNode('node-1', null, 'M');
+    vi.mocked(api.getSessionNode).mockResolvedValue(node);
+    useGraphStore.setState({ nodes: new Map([['node-1', node]]) });
+    useGraphStore.getState().selectNode('node-1');
+    render(
+      <I18nProvider>
+        <NodeInspector />
+      </I18nProvider>,
+    );
+  }
+
+  const taskField = () => document.querySelector('.inspector-editor textarea') as HTMLTextAreaElement;
+  const openEditor = () => fireEvent.click(screen.getByRole('button', { name: /Edit node/i }));
+
+  it('编辑期间 store 里同一节点被更新 → 输入中的内容保留', async () => {
+    renderEditable();
+    // 等挂载时那一轮 REST 回填（它本身就会触发一次 store 更新）落定
+    await waitFor(() => expect(api.getSessionNode).toHaveBeenCalled());
+
+    openEditor();
+    expect(taskField().value).toBe('task of node-1');
+    fireEvent.change(taskField(), { target: { value: 'my unsaved edit' } });
+
+    act(() => {
+      useGraphStore.getState().updateNode('node-1', { task: 'changed by server', label: 'M node-1 v2' });
+    });
+
+    expect(taskField().value).toBe('my unsaved edit');
+  });
+
+  it('取消后再次进入编辑 → 从最新的节点重新取值', async () => {
+    renderEditable();
+    await waitFor(() => expect(api.getSessionNode).toHaveBeenCalled());
+
+    openEditor();
+    fireEvent.change(taskField(), { target: { value: 'discard me' } });
+    act(() => {
+      useGraphStore.getState().updateNode('node-1', { task: 'changed by server' });
+    });
+    fireEvent.click(document.querySelector('.inspector-editor .secondary-button') as HTMLButtonElement);
+
+    openEditor();
+    expect(taskField().value).toBe('changed by server');
+  });
+
+  it('切换选中节点 → 表单换成新节点的值', async () => {
+    renderEditable();
+    const other = makeNode('node-2', null, 'M');
+    act(() => {
+      useGraphStore.setState({ nodes: new Map([...useGraphStore.getState().nodes, ['node-2', other]]) });
+    });
+    openEditor();
+    fireEvent.change(taskField(), { target: { value: 'typed on node-1' } });
+
+    vi.mocked(api.getSessionNode).mockResolvedValue(other);
+    act(() => {
+      useGraphStore.getState().selectNode('node-2');
+    });
+
+    await waitFor(() => expect(taskField().value).toBe('task of node-2'));
+  });
+});

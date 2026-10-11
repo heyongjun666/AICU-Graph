@@ -68,11 +68,6 @@ def _remote_servers(*names, **kwargs) -> list:
 
 
 class TestRegistry:
-    def test_get_adapter_internal(self):
-        adapter = get_adapter("internal")
-        assert isinstance(adapter, ClaudeCodeAdapter)
-        assert adapter.command == "internal"
-
     def test_get_adapter_known(self):
         assert isinstance(get_adapter("claude"), ClaudeCodeAdapter)
         assert isinstance(get_adapter("codebuddy"), CodeBuddyAdapter)
@@ -90,10 +85,10 @@ class TestRegistry:
         with pytest.raises(ValueError):
             get_adapter("copilot")
 
-    def test_priority_order_prefers_internal_and_excludes_copilot(self):
+    def test_priority_order_prefers_claude_and_excludes_copilot(self):
         ids = [a.id for a in cli_adapters._ADAPTERS]
-        assert ids[0] == "internal"
-        assert ids.index("internal") < ids.index("claude")
+        assert ids[0] == "claude"
+        assert "internal" not in ids
         assert "copilot" not in ids
 
 
@@ -123,52 +118,17 @@ class TestDetect:
             detect_default()
 
 
-class TestInternalAdapter:
-    def test_base_command_includes_saved_username(self, tmp_path):
-        store = CredentialStore(str(tmp_path / "api_keys.json"))
-        store.set_username("v_test_user")
-        set_credential_store(store)
-        try:
-            cmd = get_adapter("internal").build_base_command(
-                model="Claude Sonnet 4.6",
-                skip_permissions=False,
-                enable_project_skills=False,
-            )
-            assert cmd[:4] == ["internal", "--model", "Claude Sonnet 4.6", "--username"]
-            assert cmd[4] == "v_test_user"
-        finally:
-            set_credential_store(None)
-
-    def test_base_command_falls_back_to_environment(self, monkeypatch):
-        set_credential_store(None)
-        monkeypatch.setenv("INTERNAL_USERNAME", "env_user")
-        cmd = get_adapter("internal").build_base_command(
-            model=None, skip_permissions=False, enable_project_skills=False
-        )
-        assert cmd == ["internal", "--username", "env_user"]
-
-    def test_known_models_use_internal_catalog(self):
-        assert "Claude Sonnet 4.6" in get_adapter("internal").known_models
-        assert "claude-sonnet-4-6" not in get_adapter("internal").known_models
-        assert "claude-sonnet-4-6" in get_adapter("claude").known_models
-
-    def test_base_command_normalizes_legacy_model_id(self, monkeypatch):
-        monkeypatch.delenv("INTERNAL_USERNAME", raising=False)
-        monkeypatch.delenv("CC_USERNAME", raising=False)
-        cmd = get_adapter("internal").build_base_command(
-            model="deepseek-v4-flash", skip_permissions=False, enable_project_skills=False
-        )
-        assert cmd == ["internal", "--model", "DeepSeek-V4-Flash"]
-
-    def test_agent_does_not_inject_api_key(self, tmp_path):
+class TestAdapterEnv:
+    def test_agent_does_not_inject_api_key_for_unrouted_cli(self, tmp_path):
+        """没纳入路由的 CLI（cursor）不把本机存的 key 注进环境。"""
         store = CredentialStore(str(tmp_path / "api_keys.json"))
         store.set("deepseek", "sk-secret")
         set_credential_store(store)
         try:
             agent = object.__new__(ClaudeCodeAgent)
-            agent.adapter = get_adapter("internal")
-            agent.cli_name = "internal"
-            agent.model = "DeepSeek-V4-Flash"
+            agent.adapter = get_adapter("cursor")
+            agent.cli_name = "cursor"
+            agent.model = "deepseek-v4-flash"
             agent.api_base_url = None
             agent.api_key_env = None
             agent.mcp_servers = []
@@ -183,7 +143,7 @@ def _allowed_tools(cmd: list) -> list:
 
     测的是语义（哪些工具被放行），不是某一种拼法：
 
-      - claude / internal：「空格连接成单个参数」—— claude 的文档写明认这种；
+      - claude：「空格连接成单个参数」—— claude 的文档写明认这种；
       - codebuddy：「一个名字一个 argv 项」—— 它不拆串，整串会被当成**一个**工具名，
         白名单于是整个失效（见 CodeBuddyAdapter.allowed_tools_flag）。
 
@@ -200,13 +160,13 @@ def _allowed_tools(cmd: list) -> list:
 class TestMcpAllowlist:
     """MCP 工具必须并进 --allowedTools 白名单。
 
-    实测（internal / claude 系）：--allowedTools 是**白名单**不是「先问再放行」，dontAsk
+    实测（claude 系）：--allowedTools 是**白名单**不是「先问再放行」，dontAsk
     下不在名单里的工具直接拒绝，且没有任何通配写法（`mcp__*` 实测无效）。所以声明了
     MCP 却不放行，表现是 permission_denials 里出现 mcp__<server>__<tool>、agent 拿不到
     结果后绕路或报一个与 MCP 无关的错 —— 正是预检要消除的那类失败。
     """
 
-    @pytest.mark.parametrize("cli", ["claude", "internal", "codebuddy"])
+    @pytest.mark.parametrize("cli", ["claude", "codebuddy"])
     def test_mcp_server_added_to_allowlist(self, cli):
         cmd = get_adapter(cli).build_base_command(
             model=None,
@@ -316,8 +276,7 @@ class TestClaudeAdapter:
 
         实测：改道到 deepseek 的 /anthropic 端点后，只注入 ANTHROPIC_API_KEY 时
         CLI 直接判成「Not logged in · Please run /login」并 rc=1（连请求都没发）；
-        换成 ANTHROPIC_AUTH_TOKEN 才通。get_adapter("claude") 是 internal 之外的实例，
-        这里断言同族/跨族两条路径。
+        换成 ANTHROPIC_AUTH_TOKEN 才通。这里断言同族/跨族两条路径。
         """
         adapter = get_adapter("claude")
         # 同族：Anthropic 自己的模型，认证方式不变
@@ -358,13 +317,13 @@ class TestClaudeAdapter:
 
 
 class TestCodexAdapter:
-    def test_is_installed_rejects_vendor_unrelated-tool_codex(self, monkeypatch):
-        """本机 /usr/bin/codex 是同名的无关工具，需甄别为非 OpenAI Codex。"""
+    def test_is_installed_rejects_unrelated_codex_binary(self, monkeypatch):
+        """PATH 上叫 codex 的可能是别的工具（--help 里没有 exec 子命令），需甄别为非 OpenAI Codex。"""
         monkeypatch.setattr(cli_adapters.shutil, "which", lambda cmd: "/usr/bin/codex")
         monkeypatch.setattr(
             cli_adapters.subprocess, "run",
             lambda *a, **k: types.SimpleNamespace(
-                stdout="EXAMPLE codex -b file.pb.log -p file.proto\nunrelated-tool proto sql",
+                stdout="usage: codex [-b FILE] [-p PROTO]\nsome unrelated log tool",
                 stderr="",
             ),
         )
@@ -1017,7 +976,7 @@ class TestRemoteMcpSerialization:
         """pi 的 supports_mcp 要看本机装没装扩展，这里统一当作装了（同 TestProjectFileMcp）。"""
         monkeypatch.setattr(cli_adapters, "_mcp_capability", lambda *a, **k: True)
 
-    @pytest.mark.parametrize("cli_id", ["claude", "internal", "codebuddy"])
+    @pytest.mark.parametrize("cli_id", ["claude", "codebuddy"])
     def test_cc_family_needs_the_type_discriminator(self, cli_id):
         """``type: "http"`` 是必填：claude 把「有 url 却没有 type」当配置错误，跳过整个 server。
 
@@ -1770,9 +1729,9 @@ class TestCodeBuddyAdapter:
         assert cmd[i + 5] == "mcp__echo-probe"
         assert cmd[i + 6] == "--permission-mode"
 
-    @pytest.mark.parametrize("cli", ["claude", "internal"])
+    @pytest.mark.parametrize("cli", ["claude"])
     def test_claude_family_keeps_the_joined_form(self, cli):
-        """claude / internal 保持整串形态 —— 别为 codebuddy 顺手把它们也改了。
+        """claude 保持整串形态 —— 别为 codebuddy 顺手把它们也改了。
 
         claude 的 ``--allowedTools`` 文档写明认 "comma or space-separated list"，
         真机 claude 节点用整串产物正常（端到端 passed）。形态一动，受保护的那几家
@@ -2006,7 +1965,7 @@ class TestKnownModels:
         items = cli_adapters.list_clis()
         assert all("supports_mcp" in item for item in items)
         by_id = {item["id"]: item for item in items}
-        for cli_id in ("internal", "claude", "codebuddy", "codex", "opencode", "qwen", "kimi"):
+        for cli_id in ("claude", "codebuddy", "codex", "opencode", "qwen", "kimi"):
             assert by_id[cli_id]["supports_mcp"] is True, cli_id
         # grok 是常量 False，且它在下拉里（不在隐藏名单），所以取得到 by_id。
         # 为什么关：CLI 侧验过（``grok mcp doctor`` 握手 OK、认出 1 个工具），模型侧
@@ -2377,7 +2336,7 @@ class TestSkillsSupportFlag:
 
     # 与 claude 系那套 argv 通道同名，但只有它能用这个口子：其余几家有逐字节 argv
     # 断言，加 flag 会立刻红（见 test_only_claude_family_uses_the_argv_channel）。
-    _ARGV_CHANNEL_IDS = {"claude", "internal", "codebuddy"}
+    _ARGV_CHANNEL_IDS = {"claude", "codebuddy"}
 
     @staticmethod
     def _make_skill_dir(tmp_path):
@@ -3324,15 +3283,11 @@ class TestEffectiveBaseUrl:
         ) == ("https://my-gw.corp/v1", "configured")
 
     def test_undecidable_cli_stays_honest(self):
-        """没纳入路由的 CLI（internal / cursor）不猜端点：没配就老实说不知道。"""
-        assert cli_adapters.effective_base_url("internal", "DeepSeek-V4-Flash", "") == (
-            None,
-            "cli_default",
-        )
+        """没纳入路由的 CLI（cursor）不猜端点：没配就老实说不知道。"""
         assert cli_adapters.effective_base_url("cursor", "glm-5.2", "") == (None, "cli_default")
         # 但它自己配了地址时，显示的就是那个地址
         assert cli_adapters.effective_base_url(
-            "internal", "DeepSeek-V4-Flash", "https://my-gateway.corp/v1"
+            "cursor", "glm-5.2", "https://my-gateway.corp/v1"
         ) == ("https://my-gateway.corp/v1", "configured")
         assert cli_adapters.effective_base_url(None, None, None) == (None, "cli_default")
 
@@ -3476,3 +3431,10 @@ class TestResultEventShapes:
     def test_qwen_plain_text_falls_back_to_raw(self):
         """qwen 另有纯文本模式，兜底把原文当回复（既有行为，不因数组支持而改变）。"""
         assert get_adapter("qwen").parse_result("普通文本回复")["result"] == "普通文本回复"
+
+
+@pytest.mark.parametrize("cli_id", [a.id for a in cli_adapters._ADAPTERS])
+@pytest.mark.parametrize("line", ["42", "[1, 2]", "null", "true"])
+def test_format_stream_event_tolerates_non_object_json_lines(cli_id, line):
+    """子进程偶尔吐出合法但不是对象的 JSON 行（计数、日志），不能让流式显示崩掉。"""
+    assert isinstance(cli_adapters.get_adapter(cli_id).format_stream_event(line), str)

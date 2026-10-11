@@ -45,7 +45,6 @@ from typing import Optional
 
 from runtime.credentials import (
     api_key_env_for_vendor,
-    resolve_internal_username,
     vendor_of_model,
 )
 # 只取这一个常量：传输的名字由 mcp_manager 定义，adapter 这边比较时用同一个名字，
@@ -173,8 +172,8 @@ _CLI_NATIVE: dict[str, tuple] = {
 #
 #   qwen 故意不在列：它没有可撤的退路。非交互模式强制要求显式 auth type，撤槽后
 #   ``--auth-type openai`` 会去要 OPENAI_API_KEY，不带该参数则直接报
-#   「No auth type is selected」—— 两条路都走不通（2026-09-16 本机实测，见
-#   /tmp/aicu_smoke/exp_qwen_samevendor.py 的 A/B 失败、C 通过）。所以同族也只能由
+#   「No auth type is selected」—— 两条路都走不通（2026-09-16 本机实测：撤槽的 A/B 方案失败，
+#   显式供端点的 C 方案通过）。所以同族也只能由
 #   AICU 供端点。
 _SAME_VENDOR_RELEASE_CLIS = ("codex",)
 
@@ -857,8 +856,6 @@ class CliAdapter:
         对 claude / codex / kimi 过滤掉「该 CLI 的协议没有对应原生端点」的模型
         （如 claude 选不了 gemini），让下拉里出现的都是真能连上的。
         """
-        if self.id == "internal":
-            return KNOWN_MODELS.get("internal", [])
         return [
             model
             for model in KNOWN_MODELS.get("all", [])
@@ -866,7 +863,7 @@ class CliAdapter:
         ]
 
     # 可选同名冲突甄别：(探测 argv, 必须含子串, 必须排除子串)。None 表示只用 which。
-    # 命令名可能被无关工具占用（如本机 codex 是同名的无关工具）时，设此属性以甄别。
+    # 命令名可能被无关工具占用时，设此属性以甄别。
     install_probe: Optional[tuple[list[str], list[str], list[str]]] = None
 
     def is_installed(self) -> bool:
@@ -1197,8 +1194,7 @@ def _cc_mcp_json(servers: list) -> str:
     「has a "url" but no "type"」。本地条目则不能补 ``type: "stdio"`` —— 那是改动既有
     配置的字节。
 
-    internal 与 codebuddy 走同一条路径（同一个类 / 子类），也照这个形状发。internal 的远程
-    形状没有公开文档可核，是按「同为 Claude Code 协议族」推定的 —— 未经真机验证。
+    codebuddy 走同一条路径（同一个类的子类），也照这个形状发。
     """
     entries: dict = {}
     for server in servers:
@@ -1432,7 +1428,7 @@ def _probe_pi_mcp(command: str) -> bool:
 # 改任何一处都要同步改这里，否则算出来的 key 与 kimi 查的那个对不上 —— 而那种失败是
 # **静默的**：记录写了、没人读、MCP 不加载、全程没有任何报错。
 # 黄金样本（本机真机记录，可用来校验算法是否还准）：
-#   /Users/heyongjun/Desktop/AICU/final_solution → wd_final_solution_5b262f6d586a
+#   <repo root>/final_solution → wd_final_solution_5b262f6d586a（key 里带的是目录名与路径哈希）
 # ---------------------------------------------------------------------------
 
 # 与 kimi 的 ``TRUST_SCOPE`` 常量逐字一致，是 home 下的子目录名
@@ -1608,36 +1604,13 @@ class ClaudeCodeAdapter(CliAdapter):
         self.display_name = display_name
         self.command = command
 
-    @staticmethod
-    def _internal_model_name(model: str) -> str:
-        """将旧配置中的模型 ID 兼容映射为 Internal 网关 display name。"""
-        key = re.sub(r"[^a-z0-9]", "", model.lower())
-        candidates = KNOWN_MODELS.get("internal", [])
-        # 同一模型可能同时存在内部网关名和公开 display name；保持
-        # 历史公开 ID 的语义，不把它隐式改成“内部”模型。
-        if "内部" not in model:
-            candidates = [name for name in candidates if "内部" not in name]
-        for display_name in candidates:
-            if re.sub(r"[^a-z0-9]", "", display_name.lower()) == key:
-                return display_name
-        return model
-
     def build_base_command(
         self, *, model: Optional[str], skip_permissions: bool, enable_project_skills: bool,
         mcp_servers: Optional[list] = None,
     ) -> list:
         cmd = [self.command]
         if model:
-            command_model = self._internal_model_name(model) if self.id == "internal" else model
-            cmd.extend(["--model", command_model])
-        if self.id == "internal":
-            username = (
-                resolve_internal_username()
-                or os.environ.get("INTERNAL_USERNAME")
-                or os.environ.get("CC_USERNAME")
-            )
-            if username:
-                cmd.extend(["--username", username])
+            cmd.extend(["--model", model])
         if skip_permissions:
             # root 用户下 --dangerously-skip-permissions 被禁止，
             # 用 --allowedTools 只开放必要的文件操作工具
@@ -1663,7 +1636,7 @@ class ClaudeCodeAdapter(CliAdapter):
 
         默认「空格连接成单个参数」。这是 claude CLI 自己文档里的形态：``--allowedTools
         <tools...>`` 写着 "Comma or space-separated list of tool names to allow"，
-        实测也确实认（AICU 的 claude / internal 节点一直这么跑，产物正常）。
+        实测也确实认（AICU 的 claude 节点一直这么跑，产物正常）。
 
         **CodeBuddyAdapter 覆盖了它**，因为 codebuddy 虽号称 Claude Code 协议克隆，
         这一处解析却不同：它不拆串，整串会被当成**一个**工具名。后果不是「MCP 用不了」
@@ -1690,8 +1663,8 @@ class ClaudeCodeAdapter(CliAdapter):
 
     supports_mcp = True
 
-    # claude 与 internal 的项目级 skill 目录（**codebuddy 覆盖成 ``.codebuddy/skills``**，
-    # 见 CodeBuddyAdapter —— 三个 CLI 共用这个类，目录却只有两个相同）。
+    # claude 的项目级 skill 目录（**codebuddy 覆盖成 ``.codebuddy/skills``**，
+    # 见 CodeBuddyAdapter —— 两个 CLI 共用这个类，目录不同）。
     #
     # 这一族也是唯一走 argv 通道的：目录 + ``--setting-sources project``
     # （见 build_base_command）。其余 CLI 都只走目录，因为它们的 argv 有逐字节断言
@@ -1742,8 +1715,7 @@ class ClaudeCodeAdapter(CliAdapter):
         同族（Anthropic 自己的模型）保持原变量名，本机既有登录态行为不变。
 
         只对 claude 本身生效：CodeBuddyAdapter 继承了本类，但它有自己的认证体系
-        （CODEBUDDY_API_KEY，实测可直连第三方端点），internal 走 --username，
-        两者都不做这个 Bearer 替换。
+        （CODEBUDDY_API_KEY，实测可直连第三方端点），不做这个 Bearer 替换。
         """
         if self.id != "claude":
             return self.api_key_env
@@ -1757,6 +1729,8 @@ class ClaudeCodeAdapter(CliAdapter):
             event = json.loads(line)
         except json.JSONDecodeError:
             return line
+        if not isinstance(event, dict):
+            return ""
         event_type = event.get("type")
         if event_type == "assistant":
             content = event.get("message", {}).get("content", [])
@@ -1970,9 +1944,6 @@ class CodexAdapter(CliAdapter):
     flags 依据官方 developer-commands 参考（learn.chatgpt.com/docs/developer-commands）
     核实；本环境无法访问该站（connection refused），内容由用户提供。
 
-    注意：本机 /usr/bin/codex 是同名的无关工具（与 OpenAI Codex
-    同名冲突），探测时按适配器列表顺序选择默认 CLI。
-
     关键约定：
       - ``codex exec``（简写 ``codex e``）为无头/CI 模式子命令
       - ``--json`` 输出 newline-delimited JSON 事件（每个状态变化一行）
@@ -1988,9 +1959,8 @@ class CodexAdapter(CliAdapter):
     display_name = "OpenAI Codex CLI"
     command = "codex"
     api_key_env = "OPENAI_API_KEY"
-    # 本机 /usr/bin/codex 是同名的无关工具（同名冲突）：--help 含 exec 且
-    # 不含 unrelated-tool 才是 OpenAI Codex。
-    install_probe = (["--help"], ["exec"], ["unrelated-tool"])
+    # 同名的无关工具也叫 codex：--help 里有 exec 才是 OpenAI Codex。
+    install_probe = (["--help"], ["exec"], [])
 
     supports_mcp = True
 
@@ -2096,6 +2066,8 @@ class CodexAdapter(CliAdapter):
             event = json.loads(line)
         except json.JSONDecodeError:
             return line
+        if not isinstance(event, dict):
+            return ""
         item_text = _codex_item_text(event)
         if item_text:
             return item_text
@@ -2362,6 +2334,8 @@ class KimiAdapter(CliAdapter):
             event = json.loads(line)
         except json.JSONDecodeError:
             return line
+        if not isinstance(event, dict):
+            return ""
         role = event.get("role")
         if role == "assistant":
             return _render_openai_content(event.get("content"))
@@ -2545,18 +2519,19 @@ class QwenAdapter(CliAdapter):
             event = json.loads(line)
         except json.JSONDecodeError:
             return line
-        if isinstance(event, dict):
-            # qwen 的 stream-json 用 Claude Code 同形信封，正文藏在
-            # {"type":"assistant","message":{"role":"assistant","content":[...]}} 里，
-            # 行顶层没有 role。少了这一步整个流式过程一行都吐不出来（实测回调 0 条），
-            # 界面上就只会在结束时突然显示最终答案。
-            # 复用 _extract_event_text：它只取 type=="text" 的块，thinking 块返回空串。
-            message = event.get("message")
-            if isinstance(message, dict) and message.get("role") == "assistant":
-                return _extract_event_text(message)
-            role = event.get("role")
-            if role in ("assistant", "tool"):
-                return _render_openai_content(event.get("content"))
+        if not isinstance(event, dict):
+            return ""
+        # qwen 的 stream-json 用 Claude Code 同形信封，正文藏在
+        # {"type":"assistant","message":{"role":"assistant","content":[...]}} 里，
+        # 行顶层没有 role。少了这一步整个流式过程一行都吐不出来（实测回调 0 条），
+        # 界面上就只会在结束时突然显示最终答案。
+        # 复用 _extract_event_text：它只取 type=="text" 的块，thinking 块返回空串。
+        message = event.get("message")
+        if isinstance(message, dict) and message.get("role") == "assistant":
+            return _extract_event_text(message)
+        role = event.get("role")
+        if role in ("assistant", "tool"):
+            return _render_openai_content(event.get("content"))
         for key in ("content", "text", "message", "output"):
             if isinstance(event.get(key), str) and event[key]:
                 return event[key]
@@ -2718,6 +2693,8 @@ class GenericExecAdapter(CliAdapter):
             event = json.loads(line)
         except json.JSONDecodeError:
             return line
+        if not isinstance(event, dict):
+            return ""
         for key in ("content", "text", "message", "output"):
             if isinstance(event.get(key), str) and event[key]:
                 return event[key]
@@ -3522,10 +3499,9 @@ class GrokAdapter(GenericExecAdapter):
 _HIDDEN_CLI_IDS = ("gemini", "cursor", "antigravity")
 
 
-# 优先级顺序即默认选择顺序（internal > claude > codebuddy > codex > kimi > qwen > opencode > pi > antigravity > grok）。
+# 优先级顺序即默认选择顺序（claude > codebuddy > codex > kimi > qwen > opencode > pi > antigravity > grok）。
 # 表里保留 gemini / cursor / antigravity 以维持既有下标不变，但这三项在 _HIDDEN_CLI_IDS 里，不进下拉。
 _ADAPTERS: list[CliAdapter] = [
-    ClaudeCodeAdapter("internal", "Internal", "internal"),
     ClaudeCodeAdapter("claude", "Claude Code", "claude"),
     # CodeBuddy Code（腾讯）：Claude Code 协议克隆，复用 ClaudeCodeAdapter，仅覆盖认证 env
     CodeBuddyAdapter(),

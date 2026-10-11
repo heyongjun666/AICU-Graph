@@ -18,6 +18,7 @@ import { SessionSummary, SSEClientStatus } from '../types';
 import { controlSession } from '../utils/api';
 import { useUIStateStore } from '../stores/UIStateStore';
 import { useI18n } from '../i18n';
+import { errorMessage } from '../utils/errorMessage';
 
 type SessionAction = 'pause' | 'resume' | 'stop';
 
@@ -172,7 +173,7 @@ const WorkbenchHeader: React.FC<WorkbenchHeaderProps> = ({
         addToast({ type: 'warning', message: t('header.sessionRefreshFailed') });
       }
     } catch (reason) {
-      const msg = reason instanceof Error ? reason.message : String(reason);
+      const msg = errorMessage(reason);
       setError(msg);
       addToast({ type: 'error', message: msg });
       setPendingAction(null);
@@ -222,7 +223,7 @@ const WorkbenchHeader: React.FC<WorkbenchHeaderProps> = ({
             </span>
             {lifecycleState === 'paused' && session.restart_safe && <span className="restart-safe">{t('header.safeToRestart')}</span>}
             {lifecycleState === 'recovery_required' && <span className="recovery-required">{t('header.explicitResumeRequired')}</span>}
-            <span>{session.config?.cli_name || 'internal'} · {session.config?.model || t('header.defaultModel')}</span>
+            <span>{session.config?.cli_name || 'claude'} · {session.config?.model || t('header.defaultModel')}</span>
             {session.workspace_root && <span className="workspace-meta" title={session.workspace_root}>{session.workspace_root}</span>}
             {session.failed_count > 0 && <span className="failed-count">{t('header.failed', { count: session.failed_count })}</span>}
           </div>

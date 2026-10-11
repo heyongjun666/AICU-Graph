@@ -7,6 +7,7 @@ import {
   listSessions,
   renameSession as renameSessionRequest,
 } from '../utils/api';
+import { errorMessage } from '../utils/errorMessage';
 
 interface SessionState {
   sessions: SessionSummary[];
@@ -23,6 +24,15 @@ interface SessionState {
 }
 
 const ACTIVE_SESSION_KEY = 'graph-workbench.active-session';
+
+/** localStorage 在隐私模式 / 被禁用时 getItem 会抛，读不到就当没有上次的会话。 */
+function readStoredActiveSession(): string | null {
+  try {
+    return localStorage.getItem(ACTIVE_SESSION_KEY);
+  } catch {
+    return null;
+  }
+}
 
 /**
  * 会话换人的那一刻，顺手把上个会话的视图状态清掉（图 / 选中节点 / 节点日志）。
@@ -53,7 +63,7 @@ function resetGraphIfSessionChanged(currentId: string | null, nextId: string | n
 
 export const useSessionStore = create<SessionState>((set, get) => ({
   sessions: [],
-  activeSessionId: localStorage.getItem(ACTIVE_SESSION_KEY),
+  activeSessionId: readStoredActiveSession(),
   loading: false,
   error: null,
 
@@ -70,34 +80,30 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       resetGraphIfSessionChanged(current, activeSessionId);
       set({ sessions, activeSessionId, loading: false });
     } catch (error) {
-      set({ loading: false, error: error instanceof Error ? error.message : String(error) });
+      set({ loading: false, error: errorMessage(error) });
     }
   },
 
   refreshSessions: async () => {
-    try {
-      const incoming = await listSessions();
-      set((state) => {
-        const currentById = new Map(state.sessions.map((session) => [session.id, session]));
-        return {
-          sessions: incoming.map((session) => {
-            const current = currentById.get(session.id);
-            if (
-              current?.state_version !== undefined &&
-              session.state_version !== undefined &&
-              session.state_version < current.state_version
-            ) {
-              return current;
-            }
-            return session;
-          }),
-        };
-      });
-    } catch (error) {
-      // Keep the current summary usable, while allowing action callers to
-      // distinguish an accepted command from a failed reconciliation refresh.
-      throw error;
-    }
+    // listSessions 失败时直接向上抛、不改 state：保持当前摘要可用，
+    // 同时让调用方能区分「命令已被接受」与「对账刷新失败」。
+    const incoming = await listSessions();
+    set((state) => {
+      const currentById = new Map(state.sessions.map((session) => [session.id, session]));
+      return {
+        sessions: incoming.map((session) => {
+          const current = currentById.get(session.id);
+          if (
+            current?.state_version !== undefined &&
+            session.state_version !== undefined &&
+            session.state_version < current.state_version
+          ) {
+            return current;
+          }
+          return session;
+        }),
+      };
+    });
   },
 
   updateSession: (sessionId, patch) => {

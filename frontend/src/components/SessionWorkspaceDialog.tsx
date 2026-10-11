@@ -4,6 +4,7 @@ import { SessionSummary } from '../types';
 import { updateSessionSettings } from '../utils/api';
 import { useI18n } from '../i18n';
 import { useUIStateStore } from '../stores/UIStateStore';
+import { errorMessage } from '../utils/errorMessage';
 
 interface SessionWorkspaceDialogProps {
   open: boolean;
@@ -61,7 +62,7 @@ const SessionWorkspaceDialog: React.FC<SessionWorkspaceDialogProps> = ({
       onClose();
       await refreshAfterSave();
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : String(reason));
+      setError(errorMessage(reason));
     } finally {
       setBusy(false);
     }

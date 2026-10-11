@@ -128,7 +128,8 @@ AICU-Graph 当前是一个可运行的研究与工程原型。部分 CLI、模�
 
 ### 环境要求
 
-- Python 3.10+
+- macOS 或 Linux（终端面板依赖 `pty` / `fcntl`，不支持 Windows）；
+- Python 3.10+（CI 使用 3.13）；
 - 至少一个可用的 AI Coding CLI；
 - Node.js 18+（仅构建前端时需要）。
 
@@ -155,7 +156,20 @@ python main.py
 http://localhost:8080
 ```
 
+服务默认只监听本机 `127.0.0.1:8080`，且**没有认证**。仅在完全可信的网络里才设置 `HOST=0.0.0.0`，不要暴露到不可信网络——能访问该端口的人可以通过你的 CLI 会话执行命令。端口用 `PORT` 修改。
+
 启动后可以访问前端工作台，或使用 REST API 创建会话和提交任务。API、凭证配置、CLI 安装和常见问题请参阅 [docs/INSTALL.md](docs/INSTALL.md)。
+
+## 测试
+
+仓库里有三套互不替代的测试：`python3 run_tests.py`（核心原语自带 runner，仅标准库）、`python3 -m pytest tests`（完整后端套件）、`cd frontend && npm test -- --run`（前端）。运行前先安装测试依赖：
+
+```bash
+pip install -r requirements-dev.txt
+cd frontend && npm ci
+```
+
+`pytest.ini` 把收集范围钉在 `tests/` 与 `runtime/`，避免从仓库根运行时扫进 `runtime_sessions/`。各套件覆盖范围见 [docs/ARCHITECTURE.md §10.7](docs/ARCHITECTURE.md#107-测试体系两套后端--一套前端)。
 
 ## 文档导航
 
@@ -189,4 +203,4 @@ api_keys.json
 
 ## License
 
-本项目当前未在仓库根目录提供 LICENSE 文件。正式发布前请根据项目实际授权方式补充 License 文件，并在此处更新说明。
+本项目基于 Apache License 2.0 发布，详见 [LICENSE](LICENSE)。`skills/` 下内置的 skill 来自其它开源项目，沿用各自的许可证，见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。

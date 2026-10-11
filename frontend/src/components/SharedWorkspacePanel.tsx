@@ -13,6 +13,7 @@ import { formatBytes } from '../utils/format';
 import { useWorkspaceDrop } from '../hooks/useWorkspaceDrop';
 import WorkspaceEntryRow from './WorkspaceEntryRow';
 import { useI18n } from '../i18n';
+import { errorMessage } from '../utils/errorMessage';
 
 interface SharedWorkspacePanelProps {
   sessionId: string | null;
@@ -28,7 +29,7 @@ const MAX_WIDTH = 720;
 /**
  * SharedWorkspacePanel — 会话级「共享 workspace」停靠面板。
  * 紧贴左侧会话栏；可收缩（折叠为一条竖向按钮栏）、展开，右缘可拖拽拉宽。
- * 内容复用 SessionOutputsDialog 的文件树浏览（shared 根 → 分区 → 文件预览）。
+ * 内容为文件树浏览（shared 根 → 分区 → 文件预览）。
  */
 const SharedWorkspacePanel: React.FC<SharedWorkspacePanelProps> = ({
   sessionId,
@@ -52,7 +53,7 @@ const SharedWorkspacePanel: React.FC<SharedWorkspacePanelProps> = ({
     setSelectedFile(null);
     listSessionShared(sessionId, path)
       .then(setListing)
-      .catch((reason) => setError(reason instanceof Error ? reason.message : String(reason)))
+      .catch((reason) => setError(errorMessage(reason)))
       .finally(() => setLoading(false));
   }, [sessionId]);
 
@@ -112,7 +113,7 @@ const SharedWorkspacePanel: React.FC<SharedWorkspacePanelProps> = ({
     setError('');
     readSessionSharedFile(sessionId, entry.path)
       .then(setSelectedFile)
-      .catch((reason) => setError(reason instanceof Error ? reason.message : String(reason)))
+      .catch((reason) => setError(errorMessage(reason)))
       .finally(() => setLoading(false));
   };
 

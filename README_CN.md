@@ -12,13 +12,7 @@ AICU-Graph 关注的不是一次问答，而是如何让一个 AI Agent 组织�
 
 约 3 分钟的带旁白演示：一个目标如何长成 Manager / Worker 组织，节点如何通过事件和共享工作区协作，以及项目接下来的探索方向。画面中的工作台界面来自一个真实跑完的 60 节点会话，讲解用的示意图为动画。
 
-**中文旁白**
-
 https://github.com/user-attachments/assets/64a0be86-4a83-43ab-b8c7-2d3068da5dc7
-
-**English narration**
-
-https://github.com/user-attachments/assets/ed0c9594-8b8f-49b8-9082-0755e13ab0bc
 
 ## 项目定位
 

@@ -12,13 +12,7 @@ AICU-Graph is designed for more than one-shot question answering. It is designed
 
 A ~3-minute narrated walkthrough: how a single goal grows into a Manager / Worker organization, how nodes coordinate through events and a shared workspace, and where the project is heading. The screens come from a real, completed 60-node session; the explanatory diagrams are animation.
 
-**English narration**
-
 https://github.com/user-attachments/assets/ed0c9594-8b8f-49b8-9082-0755e13ab0bc
-
-**中文旁白**
-
-https://github.com/user-attachments/assets/64a0be86-4a83-43ab-b8c7-2d3068da5dc7
 
 ## Project Scope
 

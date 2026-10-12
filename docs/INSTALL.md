@@ -256,3 +256,12 @@ npm run build
 cd ..
 python3 main.py
 ```
+
+### 找不到 `python` 或 `pip`
+
+macOS 和部分 Linux 发行版只提供 `python3`。使用 `python3` 与 `python3 -m pip`，或先激活虚拟环境：
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+```

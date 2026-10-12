@@ -12,6 +12,8 @@ AICU-Graph 是一个多 Agent 编排运行时：给它一个目标，Manager 负
 
 https://github.com/user-attachments/assets/64a0be86-4a83-43ab-b8c7-2d3068da5dc7
 
+更详细的完整版演示视频：https://b23.tv/BV1Bop96VEbv
+
 ## 快速开始
 
 下面带你从一台干净的机器走到工作台跑起来、并提交第一个任务。各 CLI 的细节、OpenRouter、凭证和故障排查见 [docs/INSTALL.md](INSTALL.md)。

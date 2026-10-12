@@ -12,6 +12,8 @@ A ~3-minute narrated walkthrough of how a goal grows into a Manager / Worker org
 
 https://github.com/user-attachments/assets/ed0c9594-8b8f-49b8-9082-0755e13ab0bc
 
+For a more detailed walkthrough, see the full-length demo video: https://youtu.be/Zw-mO_qeR20
+
 ## Quick Start
 
 This takes you from a fresh machine to a running workbench and a first task. Per-CLI details, OpenRouter, credentials and troubleshooting are in [docs/INSTALL.md](docs/INSTALL.md) (Chinese).

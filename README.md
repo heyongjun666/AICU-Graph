@@ -124,6 +124,7 @@ Contributions are welcome in areas including:
 - Dynamic agent organizations and task planning;
 - Manager / Worker Runtime;
 - Roles, skills, and capability configuration;
+- Smart role selection: the candidate-role dialog has a "Smart recommendation" option that is still a placeholder. As role pools grow, how do we pick a small set of roles that can cover a task from hundreds or thousands of candidates (retrieval, ranking, coverage checks, evaluation)? Ideas and implementations are welcome;
 - Event-driven collaboration and long-running execution;
 - Artifacts and shared workspaces;
 - CLI adapters, evaluation, and testing.

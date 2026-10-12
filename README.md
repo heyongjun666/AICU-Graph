@@ -8,6 +8,18 @@ AICU-Graph is a multi-agent orchestration runtime for complex tasks. It creates 
 
 AICU-Graph is designed for more than one-shot question answering. It is designed to keep a real, multi-stage task moving as requirements, dependencies, and execution results change.
 
+## Demo
+
+A ~3-minute narrated walkthrough: how a single goal grows into a Manager / Worker organization, how nodes coordinate through events and a shared workspace, and where the project is heading. The screens come from a real, completed 60-node session; the explanatory diagrams are animation.
+
+**English narration**
+
+https://github.com/user-attachments/assets/ed0c9594-8b8f-49b8-9082-0755e13ab0bc
+
+**中文旁白**
+
+https://github.com/user-attachments/assets/64a0be86-4a83-43ab-b8c7-2d3068da5dc7
+
 ## Project Scope
 
 AICU-Graph is the **organization and runtime layer**. It is responsible for:
@@ -119,39 +131,104 @@ AICU-Graph is currently a runnable research and engineering prototype. The avail
 
 ## Quick Start
 
-### Requirements
+This gets you from a fresh machine to a running workbench and a first task. For the full reference (every CLI, OpenRouter, credentials, troubleshooting) see [docs/INSTALL.md](docs/INSTALL.md).
 
-- macOS or Linux (the terminal panel relies on `pty` / `fcntl`; Windows is not supported);
-- Python 3.10+ (CI runs on 3.13);
-- At least one available AI coding CLI;
-- Node.js 18+ for building the frontend.
+### 1. Check the requirements
 
-### Install dependencies
+| Requirement | Check | Notes |
+|---|---|---|
+| macOS or Linux | | The terminal panel relies on `pty` / `fcntl`; Windows is not supported. |
+| Python 3.10+ | `python3 --version` | CI runs on 3.13. |
+| Node.js 18+ and npm | `node --version` | Needed to build the web workbench and to install most CLIs. |
+| Git | `git --version` | |
+| At least one AI coding CLI | see step 4 | Plus an account, API key or other credential for it. |
+
+### 2. Get the code
 
 ```bash
+git clone https://github.com/heyongjun666/AICU-Graph.git
+cd AICU-Graph
+```
+
+### 3. Install dependencies and build the frontend
+
+A virtual environment is recommended so the backend dependencies stay isolated:
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate        # run this again in every new terminal
 pip install -r requirements.txt
 
 cd frontend
 npm install
-npm run build
+npm run build                    # the server serves frontend/dist, which is not committed
 cd ..
 ```
 
-### Start the Runtime
+### 4. Install at least one AI coding CLI
+
+AICU drives real coding CLIs found on your `PATH`. Install one and finish **that CLI's own login / authentication** before continuing.
+
+| CLI | Install | Check |
+|---|---|---|
+| Claude Code | `npm install -g @anthropic-ai/claude-code` | `claude --version` |
+| Codex CLI | `npm install -g @openai/codex` | `codex --version` |
+| Gemini CLI | `npm install -g @google/gemini-cli` | `gemini --version` |
+| Qwen Code | `npm install -g @qwen-code/qwen-code` | `qwen --version` |
+| Kimi Code | `npm install -g @moonshot-ai/kimi-code` | `kimi --version` |
+| OpenCode | `npm install -g opencode-ai` | `opencode --version` |
+| Pi | `npm install -g @earendil-works/pi-coding-agent` | `pi --version` |
+| CodeBuddy Code | `npm install -g @tencent-ai/codebuddy-code` | `codebuddy --version` |
+| Cursor Agent, Antigravity, Grok CLI | follow each vendor's official instructions | `agent --version`, `agy --version`, `grok --version` |
+
+Pi needs one extra extension if your roles use MCP servers; see [docs/INSTALL.md](docs/INSTALL.md). Afterwards you can list what AICU detected:
 
 ```bash
-python main.py
+python3 -c "from cli_adapters import detect_installed; print(detect_installed())"
 ```
 
-The default server address is:
+### 5. Start the Runtime
 
-```text
-http://localhost:8080
+```bash
+python3 main.py
 ```
 
-The server listens on `127.0.0.1:8080` by default (local machine only) and has **no authentication**. Set `HOST=0.0.0.0` only on a network you fully trust, and never expose it to an untrusted one — anyone who can reach the port can run commands through your CLI sessions. `PORT` changes the port.
+Open [http://localhost:8080](http://localhost:8080). The server listens on `127.0.0.1:8080` by default (local machine only) and has **no authentication**. Set `HOST=0.0.0.0` only on a network you fully trust, and never expose it to an untrusted one — anyone who can reach the port can run commands through your CLI sessions. `PORT` changes the port.
 
-After startup, open the workbench or use the REST API to create sessions and submit tasks. For CLI installation, credential configuration, API details, and troubleshooting, see [docs/INSTALL.md](docs/INSTALL.md).
+### 6. Configure the model and API key
+
+In the workbench, open **Settings → Connection**, then:
+
+1. choose the CLI;
+2. choose the provider and model;
+3. enter the API key (or complete the CLI's own authentication);
+4. save, and click **Test connection**.
+
+Keys are stored locally in `runtime_sessions/api_keys.json`. You can also export a provider variable before starting, for example `export ANTHROPIC_API_KEY="..."`. Never put real keys in source files, `.env` files or commits.
+
+### 7. Run your first task
+
+Create a session with a task, then start it:
+
+```bash
+curl -X POST http://localhost:8080/v1/sessions \
+  -H "Content-Type: application/json" \
+  -d '{"task":"Build a small multi-stage feature that needs design, implementation and tests","title":"demo"}'
+
+# replace <session_id> with the id returned above
+curl -X POST http://localhost:8080/v1/sessions/<session_id>/graph/resume
+```
+
+Watch the graph, events and node logs in the workbench. Start with a small task: every Worker node is a real CLI run that consumes your model quota.
+
+### Common problems
+
+| Symptom | Fix |
+|---|---|
+| CLI not found | Confirm the command works in the same terminal (`which claude`, ...). After `npm install -g`, open a new terminal and check that the npm global bin directory is on `PATH`. |
+| Authentication failed | Log in with the CLI itself, or save the right provider key under Settings → Connection. |
+| Blank page or missing UI | Rebuild with `cd frontend && npm install && npm run build`, then restart `python3 main.py`. |
+| `pip` / `python` not found | Use `python3` and `python3 -m pip`, or activate the virtual environment. |
 
 ## Testing
 

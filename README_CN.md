@@ -8,6 +8,18 @@ AICU-Graph 是一个面向复杂任务的多 Agent 编排运行时。它根据�
 
 AICU-Graph 关注的不是一次问答，而是如何让一个 AI Agent 组织持续推进真实的、多阶段、会变化的任务。
 
+## 演示视频
+
+约 3 分钟的带旁白演示：一个目标如何长成 Manager / Worker 组织，节点如何通过事件和共享工作区协作，以及项目接下来的探索方向。画面中的工作台界面来自一个真实跑完的 60 节点会话，讲解用的示意图为动画。
+
+**中文旁白**
+
+https://github.com/user-attachments/assets/64a0be86-4a83-43ab-b8c7-2d3068da5dc7
+
+**English narration**
+
+https://github.com/user-attachments/assets/ed0c9594-8b8f-49b8-9082-0755e13ab0bc
+
 ## 项目定位
 
 AICU-Graph 是**组织与运行时层**，负责：
@@ -119,39 +131,104 @@ AICU-Graph 当前是一个可运行的研究与工程原型。部分 CLI、模�
 
 ## 快速开始
 
-### 环境要求
+下面带你从一台干净的机器走到工作台跑起来、并提交第一个任务。完整说明（全部 CLI、OpenRouter、凭证、故障排查）见 [docs/INSTALL.md](docs/INSTALL.md)。
 
-- macOS 或 Linux（终端面板依赖 `pty` / `fcntl`，不支持 Windows）；
-- Python 3.10+（CI 使用 3.13）；
-- 至少一个可用的 AI Coding CLI；
-- Node.js 18+（仅构建前端时需要）。
+### 1. 检查环境
 
-### 安装依赖
+| 要求 | 检查命令 | 说明 |
+|---|---|---|
+| macOS 或 Linux | | 终端面板依赖 `pty` / `fcntl`，不支持 Windows。 |
+| Python 3.10+ | `python3 --version` | CI 使用 3.13。 |
+| Node.js 18+ 与 npm | `node --version` | 用于构建前端工作台，也用于安装大多数 CLI。 |
+| Git | `git --version` | |
+| 至少一个 AI Coding CLI | 见第 4 步 | 以及该 CLI 对应的账号、API Key 或其他认证信息。 |
+
+### 2. 获取代码
 
 ```bash
+git clone https://github.com/heyongjun666/AICU-Graph.git
+cd AICU-Graph
+```
+
+### 3. 安装依赖并构建前端
+
+建议使用虚拟环境，避免污染系统 Python：
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate        # 每次新开终端都需要重新执行
 pip install -r requirements.txt
 
 cd frontend
 npm install
-npm run build
+npm run build                    # 服务直接提供 frontend/dist，该目录不在仓库中，必须自行构建
 cd ..
 ```
 
-### 启动 Runtime
+### 4. 安装至少一个 AI Coding CLI
+
+AICU 驱动的是系统 `PATH` 里真实的 Coding CLI。安装一个，并先完成**该 CLI 自己的登录或认证**，再继续。
+
+| CLI | 安装 | 检查 |
+|---|---|---|
+| Claude Code | `npm install -g @anthropic-ai/claude-code` | `claude --version` |
+| Codex CLI | `npm install -g @openai/codex` | `codex --version` |
+| Gemini CLI | `npm install -g @google/gemini-cli` | `gemini --version` |
+| Qwen Code | `npm install -g @qwen-code/qwen-code` | `qwen --version` |
+| Kimi Code | `npm install -g @moonshot-ai/kimi-code` | `kimi --version` |
+| OpenCode | `npm install -g opencode-ai` | `opencode --version` |
+| Pi | `npm install -g @earendil-works/pi-coding-agent` | `pi --version` |
+| CodeBuddy Code | `npm install -g @tencent-ai/codebuddy-code` | `codebuddy --version` |
+| Cursor Agent、Antigravity、Grok CLI | 按各自官方文档安装 | `agent --version`、`agy --version`、`grok --version` |
+
+如果角色用到 MCP，Pi 还需要多装一个扩展，见 [docs/INSTALL.md](docs/INSTALL.md)。装完后可以查看 AICU 检测到了哪些 CLI：
 
 ```bash
-python main.py
+python3 -c "from cli_adapters import detect_installed; print(detect_installed())"
 ```
 
-默认服务地址：
+### 5. 启动 Runtime
 
-```text
-http://localhost:8080
+```bash
+python3 main.py
 ```
 
-服务默认只监听本机 `127.0.0.1:8080`，且**没有认证**。仅在完全可信的网络里才设置 `HOST=0.0.0.0`，不要暴露到不可信网络——能访问该端口的人可以通过你的 CLI 会话执行命令。端口用 `PORT` 修改。
+打开 [http://localhost:8080](http://localhost:8080)。服务默认只监听本机 `127.0.0.1:8080`，且**没有认证**。仅在完全可信的网络里才设置 `HOST=0.0.0.0`，不要暴露到不可信网络——能访问该端口的人可以通过你的 CLI 会话执行命令。端口用 `PORT` 修改。
 
-启动后可以访问前端工作台，或使用 REST API 创建会话和提交任务。API、凭证配置、CLI 安装和常见问题请参阅 [docs/INSTALL.md](docs/INSTALL.md)。
+### 6. 配置模型和 API Key
+
+在工作台打开 **设置 → 连接**（Settings → Connection），依次：
+
+1. 选择 CLI；
+2. 选择服务商和模型；
+3. 填写 API Key（或完成该 CLI 自己的认证）；
+4. 保存，并点击 **测试连接**。
+
+Key 保存在本机的 `runtime_sessions/api_keys.json`。也可以在启动前导出服务商环境变量，例如 `export ANTHROPIC_API_KEY="..."`。不要把真实 Key 写进源码、`.env` 文件或提交记录。
+
+### 7. 跑第一个任务
+
+带任务创建会话，再启动它：
+
+```bash
+curl -X POST http://localhost:8080/v1/sessions \
+  -H "Content-Type: application/json" \
+  -d '{"task":"实现一个需要设计、开发和测试多阶段协作的小功能","title":"demo"}'
+
+# 把 <session_id> 换成上一步返回的 ID
+curl -X POST http://localhost:8080/v1/sessions/<session_id>/graph/resume
+```
+
+在工作台里可以实时看到任务图、事件和节点日志。建议先用小任务试：每个 Worker 节点都是一次真实的 CLI 运行，会消耗你的模型额度。
+
+### 常见问题
+
+| 现象 | 处理 |
+|---|---|
+| 找不到 CLI | 在同一个终端确认命令可用（`which claude` 等）。`npm install -g` 之后请重开终端，并检查 npm 全局 bin 目录是否在 `PATH` 中。 |
+| 认证失败 | 用 CLI 自己完成登录，或在 设置 → 连接 里保存正确的服务商 Key。 |
+| 页面空白或没有界面 | 重新构建：`cd frontend && npm install && npm run build`，然后重启 `python3 main.py`。 |
+| 找不到 `pip` / `python` | 使用 `python3` 与 `python3 -m pip`，或先激活虚拟环境。 |
 
 ## 测试
 

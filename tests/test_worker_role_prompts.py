@@ -784,7 +784,7 @@ class TestRealRepositoryRoleAndMcpContracts:
         assert "_mcp_lab_synth" not in panel
 
     def test_repository_registry_contains_only_the_valid_probe_server(self):
-        registry_path = ROOT / "mcp_servers.json"
+        registry_path = ROOT / "config" / "mcp_servers.json"
         raw = json.loads(registry_path.read_text(encoding="utf-8"))
 
         assert set(raw["servers"]) == {"echo-probe"}

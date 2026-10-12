@@ -203,7 +203,7 @@ def create_session_app(
     role_pools_manager = role_pools_manager or RolePoolsManager(
         os.path.join(session_manager.root_dir, "role_pools.json"), roles_manager
     )
-    # MCP 注册表默认是仓库根的 mcp_servers.json；参数只为测试能指向 tmp_path。
+    # MCP 注册表默认是 config/mcp_servers.json；参数只为测试能指向 tmp_path。
     registry_path = Path(mcp_registry_path) if mcp_registry_path else None
     role_pool_bundle = RolePoolBundle(
         role_pools_manager, roles_manager, skills_manager, registry_path

@@ -52,7 +52,7 @@ from runtime.credentials import (
 from runtime.mcp_manager import TRANSPORT_HTTP, McpConfigError
 
 # 各 CLI 的已知模型清单集中维护在 cli_models.json（便于后续增删模型）。
-_MODELS_FILE = Path(__file__).with_name("cli_models.json")
+_MODELS_FILE = Path(__file__).resolve().parent / "config" / "cli_models.json"
 
 
 def _load_known_models() -> dict:

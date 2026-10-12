@@ -189,7 +189,7 @@ class AICU:
                       仅当 skills 非空时此字段才生效。
 
         【mcp 配置】
-        - mcp: 该角色可用的 MCP server 名字列表（在仓库根 mcp_servers.json 中定义）。
+        - mcp: 该角色可用的 MCP server 名字列表（在 config/mcp_servers.json 中定义）。
                空列表表示不启用。与 skill 同一思路：角色只引用名字，command/args 集中在
                注册表里 —— 角色 yaml 是可以在设置页上编辑的，内联可执行命令等于在页面上
                放一个「编辑一段将被执行的命令」的输入框。
@@ -406,7 +406,7 @@ class AICU:
         self._user_skills_dir = resolve_repo_relative(skills_dir_cfg)
 
         # ---- mcp 配置 ----
-        # mcp: 要启用的 MCP server 名字列表，在仓库根 mcp_servers.json 中定义。
+        # mcp: 要启用的 MCP server 名字列表，在 config/mcp_servers.json 中定义。
         # 这里只做「名字 → server 定义」的解析（名字写错立刻报错并列出可用的），
         # 真正的连通性预检在建 CC 之前（见下方 mcp 预检）。
         raw_mcp = mcp if mcp is not None else self.role_config.get("mcp")

@@ -399,7 +399,7 @@ export interface SkillInfo {
 }
 
 /**
- * MCP server 注册表（仓库根 mcp_servers.json）里的一条定义。
+ * MCP server 注册表（config/mcp_servers.json）里的一条定义。
  *
  * 这是**与 CLI 无关**的中立表示：command 与 args 分开存，不预设哪家 CLI 要什么形状
  * （claude 系要 `{command, args}`、opencode 要 `command: [...]`、codex 要一对对 -c 键值）。

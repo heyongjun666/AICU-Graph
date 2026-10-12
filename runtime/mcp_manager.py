@@ -26,7 +26,7 @@ from urllib.parse import urlsplit
 from runtime.jsonio import atomic_write_json
 from runtime.repo_paths import REPO_ROOT, resolve_repo_relative
 
-REGISTRY_FILE = REPO_ROOT / "mcp_servers.json"
+REGISTRY_FILE = REPO_ROOT / "config" / "mcp_servers.json"
 
 # 两种传输。AICU 只支持这两种：本地 stdio（起子进程）与远程 Streamable HTTP（打一个
 # URL）。**不支持 SSE** —— 那是被 Streamable HTTP 取代的旧远程传输，见 transport_of。

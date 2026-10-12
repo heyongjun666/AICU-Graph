@@ -23,7 +23,7 @@ not_for:
 skills: []
 
 # ---- mcp ----
-# server 名字定义在仓库根 mcp_servers.json。与 skills 同一写法：这里只写名字，
+# server 名字定义在 config/mcp_servers.json。与 skills 同一写法：这里只写名字，
 # command/args 集中在注册表里，角色配置中不出现可执行命令。
 mcp: [echo-probe]
 

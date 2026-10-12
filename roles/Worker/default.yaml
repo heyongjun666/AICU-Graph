@@ -58,7 +58,7 @@ skills_dir: skills
 #   - 具体角色应按任务需要声明领域 Skill
 skills: []
 
-# mcp: 该角色 CC 可用的 MCP server 名称列表（在仓库根 mcp_servers.json 中定义）
+# mcp: 该角色 CC 可用的 MCP server 名称列表（在 config/mcp_servers.json 中定义）
 #   - 空列表 [] 表示不启用任何 MCP server（CC 行为与未配 MCP 完全一致）
 #   - 这里只写**名字**：command/args/url 等细节集中在 mcp_servers.json 一处维护，
 #     免得同一段将被执行的命令散落在每个角色文件里

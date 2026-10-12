@@ -300,7 +300,7 @@ Shared FS（共享分区）是产物单一事实源。
 | `runtime/roles_manager.py` | 扫描 `roles/Manager/` + `roles/Worker/` YAML；`list_roles`（跳过 default.yaml）、`get_role_schema`、`get_role`、`add_role/update_role`；role_id 模式 `^[a-z][a-z0-9_]*$` |
 | `runtime/skills_manager.py` | 扫描带 `SKILL.md` 的目录（主目录 + 额外目录）；`list_skills / get_skill / save_skill` |
 | `runtime/role_pool_bundle.py` | 角色池导入 / 导出（见 6.11）：`RolePoolBundle.preview_export / build_export / import_bundle` |
-| `runtime/mcp_manager.py` | MCP server 注册表（仓库根 `mcp_servers.json`）读取与名字解析：`load_registry` / `resolve_servers`；`McpServer` 中立表示（command 与 args 分开存，各 CLI 自己序列化）；相对路径按仓库根解析 |
+| `runtime/mcp_manager.py` | MCP server 注册表（`config/mcp_servers.json`）读取与名字解析：`load_registry` / `resolve_servers`；`McpServer` 中立表示（command 与 args 分开存，各 CLI 自己序列化）；相对路径按仓库根解析 |
 | `runtime/mcp_client.py` | MCP server 的 stdio 与 Streamable HTTP 预检：`probe_server`（initialize → notifications/initialized → tools/list）、`probe_servers_detailed`（返回 configured / active / tools / failures 三态报告；`required=false` 失败保留告警但不下发 CLI，空工具仍算 active）、`probe_servers`（兼容的工具映射）；stdio 子进程连完即收 |
 | `runtime/repo_paths.py` | `REPO_ROOT` 与 `resolve_repo_relative`（`~` 展开 / 绝对原样 / 相对按仓库根）—— 角色 yaml `skills_dir` 与 MCP 注册表路径共用的唯一一份实现 |
 | `runtime/persistence.py` | `graph.json` 快照的 save/load；graph_version 单调性 |
@@ -455,7 +455,7 @@ Shared FS（共享分区）是产物单一事实源。
 | 23 | **CC 活动视图（cc_activity 追踪 + 多会话 activity 端点）** | `runtime/runtime.py` `update_cc_activity/get_cc_activity`、`executables/worker.py` `_handle_cc_stream_output`、`runtime/session_server.py` `GET /v1/sessions/{session_id}/nodes/{node_id}/activity` | — |
 | 24 | **依赖按需读取（on-demand dependency reading）** | `executables/worker.py` `_build_dependency_reading_instructions` | 默认开（有依赖即生效） |
 | 25 | **CC 流式日志分流（粗粒度 log + 细粒度开关）** | `executables/worker.py` `_handle_cc_stream_output` | `AICU_NODE_LOG_STREAMING=1` 才全量写 |
-| 26 | **MCP 工具下发（角色 `mcp:` 声明 → 注册表解析 → 连通性预检 → 按各 CLI 的注入口下发）** | `runtime/mcp_manager.py` `runtime/mcp_client.py` `cli_adapters.py` | 角色 yaml `mcp` 字段；server 定义在仓库根 `mcp_servers.json` |
+| 26 | **MCP 工具下发（角色 `mcp:` 声明 → 注册表解析 → 连通性预检 → 按各 CLI 的注入口下发）** | `runtime/mcp_manager.py` `runtime/mcp_client.py` `cli_adapters.py` | 角色 yaml `mcp` 字段；server 定义在`config/mcp_servers.json` |
 
 ---
 
@@ -470,6 +470,7 @@ Shared FS（共享分区）是产物单一事实源。
 | `main.py` | **服务入口**：置 `真实 CLI 配置=real`，注册 Manager/Worker 到 ExecutableRegistry，创建 SessionManager + `create_session_app`，uvicorn 默认起 `127.0.0.1:8080`（`HOST`/`PORT` 可改），SIGINT/SIGTERM 优雅停机 |
 | `aicu.py` | **AI 执行引擎**：单 CC 执行、角色配置加载、CC 工作区创建、single-writer 约束、结果产物管理 |
 | `claude_code_agent.py` | **AI Coding CLI 程序化封装**：多轮对话（--resume）、stdin 提示、超时 killpg、`CCExecutionError` |
+| `config/` | 可编辑的数据配置：`cli_models.json`（各 CLI 的已知模型清单与协议端点）、`mcp_servers.json`（MCP server 注册表，设置页增删改查会写回这里） |
 | `conftest.py` | pytest 根级 fixture（测试 fake、临时工作区等） |
 | `run_tests.py` | **自包含测试编排器**：源码定义并收集 137 个内部测试用例，执行后产出 `test_report.md`；不等于仓库全部 pytest/Vitest 测试 |
 
@@ -496,7 +497,7 @@ Shared FS（共享分区）是产物单一事实源。
 | `workspace_resolver.py` | 共享工作区解析：`resolve_shared_workspace` / `resolve_partition` / `partition_of`（realpath+commonpath 防穿越） |
 | `roles_manager.py` | 角色配置：扫描 YAML、`list_roles` / `get_role_schema` / `get_role` / `add_role` / `update_role` |
 | `skills_manager.py` | 技能目录扫描：`list_skills` / `get_skill` / `save_skill` |
-| `mcp_manager.py` | MCP server 注册表（仓库根 `mcp_servers.json`）：`load_registry` / `resolve_servers`；`McpServer` 中立表示；相对路径按仓库根解析 |
+| `mcp_manager.py` | MCP server 注册表（`config/mcp_servers.json`）：`load_registry` / `resolve_servers`；`McpServer` 中立表示；相对路径按仓库根解析 |
 | `mcp_client.py` | MCP server stdio 预检：`probe_server` / `probe_servers`（initialize + tools/list，连完即收子进程） |
 | `repo_paths.py` | `REPO_ROOT` + `resolve_repo_relative`：仓库根相对路径的唯一实现（skills_dir 与 MCP 注册表共用） |
 | `role_pools_manager.py` | 候选角色池管理：`RolePoolsManager` |
@@ -530,7 +531,7 @@ Shared FS（共享分区）是产物单一事实源。
 | `roles/Worker/acceptance.yaml` `architecture.yaml` `backend_dev.yaml` `code.yaml` `data_analysis.yaml` `deploy.yaml` `dev_lead.yaml` `dev_member.yaml` `document.yaml` `frontend_dev.yaml` `grill.yaml` `incremental_plan.yaml` `prototype.yaml` `requirements.yaml` `test.yaml` `visual_designer.yaml` | 具体 Worker 角色 |
 | `roles/system_role/default.yaml` `roles/system_role/router.yaml` | 系统级角色配置 |
 
-MCP 联调 lab 角色使用 `roles/**/_mcp_lab_*.yaml` 命名，仅供仓库内的本地联调/回归夹具使用；下划线前缀使它们不会进入 AICU 的生产角色面板。生产面板只暴露正常角色，例如 `roles/Worker/mcp_probe.yaml`。仓库根 `mcp_servers.json` 的生产注册表同样只保留可验证的 `echo-probe` 条目，lab 需要的其它通道必须放在测试自己的临时注册表中，不能混入生产配置。
+MCP 联调 lab 角色使用 `roles/**/_mcp_lab_*.yaml` 命名，仅供仓库内的本地联调/回归夹具使用；下划线前缀使它们不会进入 AICU 的生产角色面板。生产面板只暴露正常角色，例如 `roles/Worker/mcp_probe.yaml`。`config/mcp_servers.json` 的生产注册表同样只保留可验证的 `echo-probe` 条目，lab 需要的其它通道必须放在测试自己的临时注册表中，不能混入生产配置。
 
 ### 10.7 测试体系（两套后端 + 一套前端）
 

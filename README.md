@@ -1,6 +1,6 @@
 # AICU-Graph
 
-English | [简体中文](README_CN.md)
+English | [简体中文](docs/README_CN.md)
 
 > Build dynamic AI agent organizations that collaborate on complex, long-running tasks.
 
@@ -132,4 +132,4 @@ Please read the existing documentation before submitting changes; how to run the
 
 ## License
 
-Released under the Apache License 2.0. See [LICENSE](LICENSE). Bundled skills under `skills/` keep their original licenses; see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+Released under the Apache License 2.0. See [LICENSE](LICENSE). Bundled skills under `skills/` keep their original licenses; see [THIRD_PARTY_NOTICES.md](docs/THIRD_PARTY_NOTICES.md).

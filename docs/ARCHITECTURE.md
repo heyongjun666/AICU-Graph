@@ -471,6 +471,7 @@ Shared FS（共享分区）是产物单一事实源。
 | `aicu.py` | **AI 执行引擎**：单 CC 执行、角色配置加载、CC 工作区创建、single-writer 约束、结果产物管理 |
 | `claude_code_agent.py` | **AI Coding CLI 程序化封装**：多轮对话（--resume）、stdin 提示、超时 killpg、`CCExecutionError` |
 | `config/` | 可编辑的数据配置：`cli_models.json`（各 CLI 的已知模型清单与协议端点）、`mcp_servers.json`（MCP server 注册表，设置页增删改查会写回这里） |
+| `docs/` | 文档：`INSTALL.md`（安装与故障排查）、`ARCHITECTURE.md`（本文）、`README_CN.md`（中文 README，英文版在根目录 `README.md`）、`THIRD_PARTY_NOTICES.md`（内置第三方 skill 的许可证声明） |
 | `conftest.py` | pytest 根级 fixture（测试 fake、临时工作区等） |
 | `run_tests.py` | **自包含测试编排器**：源码定义并收集 137 个内部测试用例，执行后产出 `test_report.md`；不等于仓库全部 pytest/Vitest 测试 |
 

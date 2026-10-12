@@ -1,6 +1,6 @@
 # Third-Party Notices
 
-AICU-Graph itself is released under the Apache License 2.0 (see [LICENSE](LICENSE)).
+AICU-Graph itself is released under the Apache License 2.0 (see [LICENSE](../LICENSE)).
 The bundled agent skills under `skills/` come from other open-source projects and keep
 their original licenses. All of them permit redistribution inside an Apache-2.0 project.
 

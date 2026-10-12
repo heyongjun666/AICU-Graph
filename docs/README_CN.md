@@ -1,6 +1,6 @@
 # AICU-Graph
 
-[English](README.md) | 简体中文
+[English](../README.md) | 简体中文
 
 > 实时构建动态 AI Agent 组织，让多个智能体协同完成复杂的长期任务。
 
@@ -14,7 +14,7 @@ https://github.com/user-attachments/assets/64a0be86-4a83-43ab-b8c7-2d3068da5dc7
 
 ## 快速开始
 
-下面带你从一台干净的机器走到工作台跑起来、并提交第一个任务。各 CLI 的细节、OpenRouter、凭证和故障排查见 [docs/INSTALL.md](docs/INSTALL.md)。
+下面带你从一台干净的机器走到工作台跑起来、并提交第一个任务。各 CLI 的细节、OpenRouter、凭证和故障排查见 [docs/INSTALL.md](INSTALL.md)。
 
 ### 1. 检查环境
 
@@ -58,7 +58,7 @@ AICU 驱动的是系统 `PATH` 里真实的 Coding CLI。安装一个，并先�
 | Codex CLI | `npm install -g @openai/codex` | `codex --version` |
 | Gemini CLI | `npm install -g @google/gemini-cli` | `gemini --version` |
 
-同样支持 Qwen Code、Kimi Code、OpenCode、Pi、CodeBuddy Code、Cursor Agent、Antigravity 和 Grok CLI，安装命令见 [docs/INSTALL.md](docs/INSTALL.md)。装完后可以查看 AICU 检测到了哪些 CLI：
+同样支持 Qwen Code、Kimi Code、OpenCode、Pi、CodeBuddy Code、Cursor Agent、Antigravity 和 Grok CLI，安装命令见 [docs/INSTALL.md](INSTALL.md)。装完后可以查看 AICU 检测到了哪些 CLI：
 
 ```bash
 python3 -c "from cli_adapters import detect_installed; print(detect_installed())"
@@ -98,12 +98,12 @@ curl -X POST http://localhost:8080/v1/sessions/<session_id>/graph/resume
 
 在工作台里可以实时看到任务图、事件和节点日志。建议先用小任务试：每个 Worker 节点都是一次真实的 CLI 运行，会消耗你的模型额度。
 
-遇到问题：提示"找不到 CLI"时，先在同一个终端确认命令可用（`which claude`）；页面空白说明前端没有构建（`cd frontend && npm install && npm run build`，然后重启）；认证失败说明 CLI 没登录，或 设置 → 连接 里的 Key 不对。更多见 [docs/INSTALL.md](docs/INSTALL.md)。
+遇到问题：提示"找不到 CLI"时，先在同一个终端确认命令可用（`which claude`）；页面空白说明前端没有构建（`cd frontend && npm install && npm run build`，然后重启）；认证失败说明 CLI 没登录，或 设置 → 连接 里的 Key 不对。更多见 [docs/INSTALL.md](INSTALL.md)。
 
 ## 文档导航
 
-- [安装、配置与故障排查](docs/INSTALL.md)
-- [系统架构、核心概念与测试体系](docs/ARCHITECTURE.md)
+- [安装、配置与故障排查](INSTALL.md)
+- [系统架构、核心概念与测试体系](ARCHITECTURE.md)
 
 ## 安全提示
 
@@ -126,8 +126,8 @@ api_keys.json
 - Artifact 与共享工作区；
 - CLI 适配、评估和测试。
 
-提交代码前请先阅读现有文档；后端与前端测试套件的运行方式见 [docs/ARCHITECTURE.md §10.7](docs/ARCHITECTURE.md#107-测试体系两套后端--一套前端)。请勿提交本地凭证及运行产物。
+提交代码前请先阅读现有文档；后端与前端测试套件的运行方式见 [docs/ARCHITECTURE.md §10.7](ARCHITECTURE.md#107-测试体系两套后端--一套前端)。请勿提交本地凭证及运行产物。
 
 ## License
 
-本项目基于 Apache License 2.0 发布，详见 [LICENSE](LICENSE)。`skills/` 下内置的 skill 来自其它开源项目，沿用各自的许可证，见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
+本项目基于 Apache License 2.0 发布，详见 [LICENSE](../LICENSE)。`skills/` 下内置的 skill 来自其它开源项目，沿用各自的许可证，见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。

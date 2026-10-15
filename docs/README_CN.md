@@ -7,9 +7,11 @@
 
 [English](../README.md) | 简体中文
 
-> 实时构建动态 AI Agent 组织，让多个智能体协同完成复杂的长期任务。
+> 可扩展到各个领域的多 Agent 协作平台：自动分析任务，动态组建由不同角色组成的 AI 团队，协同完成复杂任务。
 
-AICU-Graph 是一个多 Agent 编排运行时：给它一个目标，Manager 负责规划，Worker 在运行时动态组建的组织里执行，每个节点都由真实的 AI Coding CLI（Claude Code、Codex、Gemini 等）驱动。它是一个可运行的研究与工程原型，能用哪些 CLI 和模型取决于你本机的安装、账号和额度。
+AICU-Graph 将复杂任务转化为一张可视化、可持续推进的任务图：根据任务动态组建不同角色的 AI 团队，协调各节点执行真实工作，评审实际产物，并通过定向修复和跨节点协作持续推进任务。平台不局限于软件开发，也可以扩展到任何能够拆解为专业分工、并需要验证交付结果的复杂领域。
+
+![AICU-Graph 工作台](https://img.youtube.com/vi/Zw-mO_qeR20/maxresdefault.jpg)
 
 ## 演示视频
 

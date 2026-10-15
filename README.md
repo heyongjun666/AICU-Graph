@@ -7,9 +7,11 @@
 
 English | [简体中文](docs/README_CN.md)
 
-> Build dynamic AI agent organizations that collaborate on complex, long-running tasks.
+> An extensible multi-agent collaboration platform for any domain: automatically analyze tasks, dynamically assemble an AI team with different roles, and work together to complete complex tasks.
 
-AICU-Graph is a multi-agent orchestration runtime: give it a goal, and Managers plan the work while Workers carry it out inside an organization built at runtime, with every node driven by a real AI coding CLI (Claude Code, Codex, Gemini and more). It is a runnable research and engineering prototype; which CLIs and models you can use depends on your local installs, accounts and quotas.
+AICU-Graph turns a complex task into a visual, continuously running task graph. It can dynamically assemble teams with different roles, coordinate their work, review real deliverables, and keep the workflow moving through targeted revisions and cross-agent collaboration. The platform is designed to extend beyond software development to any domain where a task can be decomposed into specialized, verifiable work.
+
+![AICU-Graph workbench](https://img.youtube.com/vi/Zw-mO_qeR20/maxresdefault.jpg)
 
 ## Demo
 

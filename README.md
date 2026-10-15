@@ -1,5 +1,10 @@
 # AICU-Graph
 
+[![CI](https://img.shields.io/github/actions/workflow/status/heyongjun666/AICU-Graph/ci.yml?style=flat-square&label=CI&color=lightgrey)](https://github.com/heyongjun666/AICU-Graph/actions/workflows/ci.yml)
+[![License](https://img.shields.io/github/license/heyongjun666/AICU-Graph?style=flat-square&color=lightgrey)](LICENSE)
+![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-lightgrey?style=flat-square&logo=python&logoColor=black)
+![Node.js 18+](https://img.shields.io/badge/Node.js-18%2B-lightgrey?style=flat-square&logo=node.js&logoColor=black)
+
 English | [简体中文](docs/README_CN.md)
 
 > Build dynamic AI agent organizations that collaborate on complex, long-running tasks.

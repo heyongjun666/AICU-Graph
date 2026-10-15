@@ -11,7 +11,14 @@ English | [简体中文](docs/README_CN.md)
 
 AICU-Graph turns a complex task into a visual, continuously running task graph. It can dynamically assemble teams with different roles, coordinate their work, review real deliverables, and keep the workflow moving through targeted revisions and cross-agent collaboration. The platform is designed to extend beyond software development to any domain where a task can be decomposed into specialized, verifiable work.
 
-![AICU-Graph workbench](https://img.youtube.com/vi/Zw-mO_qeR20/maxresdefault.jpg)
+![AICU-Graph workbench](docs/images/workbench-running.en.png)
+
+Real screenshots of the workbench, captured from a running session — no mockups:
+
+| | |
+|---|---|
+| ![Node inspector](docs/images/node-inspector.en.png)<br>**Node inspector** — overview, live logs, outputs and events for any node. | ![Shared workspace](docs/images/shared-workspace.en.png)<br>**Shared workspace** — every node reads and writes the same session workspace. |
+| ![Connection settings](docs/images/settings-connection.en.png)<br>**Provider and model** — switch provider, CLI and model per session. | ![Roles, skills and MCP](docs/images/settings-roles.en.png)<br>**Roles, skills and MCP** — all of them user-extensible. |
 
 ## Demo
 

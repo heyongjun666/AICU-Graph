@@ -11,7 +11,14 @@
 
 AICU-Graph 将复杂任务转化为一张可视化、可持续推进的任务图：根据任务动态组建不同角色的 AI 团队，协调各节点执行真实工作，评审实际产物，并通过定向修复和跨节点协作持续推进任务。平台不局限于软件开发，也可以扩展到任何能够拆解为专业分工、并需要验证交付结果的复杂领域。
 
-![AICU-Graph 工作台](https://img.youtube.com/vi/Zw-mO_qeR20/maxresdefault.jpg)
+![AICU-Graph 工作台](images/workbench-running.png)
+
+以下是工作台真实运行时的截图，非效果图：
+
+| | |
+|---|---|
+| ![节点详情](images/node-inspector.png)<br>**节点详情** —— 任意节点的概览、实时日志、产出与事件。 | ![共享工作区](images/shared-workspace.png)<br>**共享工作区** —— 所有节点读写同一个会话工作区。 |
+| ![连接设置](images/settings-connection.png)<br>**Provider 与模型** —— 按会话切换 provider、CLI 和模型。 | ![角色 / Skill / MCP](images/settings-roles.png)<br>**角色 / Skill / MCP** —— 均可由用户自行扩展。 |
 
 ## 演示视频
 

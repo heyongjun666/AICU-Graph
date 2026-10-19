@@ -96,6 +96,25 @@ generate_instruction: |-
   不要追求少, 也不要追求多; 追求的是组织合理. **单层直接 worker 子节点不超过 5 个** —— 超出则
   说明组织过于扁平, 应把相关能力分组到 sub-manager 下逐层展开. Step 总数不做硬性限制.
 
+  ### Step 任务契约 (task 必含八项)
+
+  每个 step 的 `task` 就是接手指令的全部内容 —— 对 worker 而言, 它没有别的上下文可查.
+  因此 `task` 必须写全下列八项 (manager 节点至少写清 Outcome / Inputs / Acceptance / Non-goals /
+  Failure contract, 内部结构由它自己展开):
+
+  - **Outcome**: 交付什么, 以可观察形态描述 (文件/接口/页面/报告), 不是"完成某某工作".
+  - **Owner**: 由哪个角色以哪个身份执行 (role 字段之外, 在 task 里点明它负责什么).
+  - **Inputs**: 上游产物在哪个位置、以什么形态提供; 需要读取本节点内哪些既有文件.
+  - **Write scope**: 允许写入的目录/分区, 精确到分区名或文件路径前缀.
+  - **Read scope**: 允许只读的目录/分区, 以及"不得访问该范围之外的任何路径".
+  - **Acceptance**: 可执行的判据 —— 给出命令与预期输出、请求样例与预期响应, 或可观察的演示路径;
+    不接受"功能正常""体验良好"这类无法证伪的表述.
+  - **Non-goals**: 本次明确不做的事, 防止执行者顺手扩范围.
+  - **Failure contract**: 做不下去时怎么交付 —— 状态词 (DONE / DONE_WITH_CONCERNS / NEEDS_CONTEXT /
+    BLOCKED)、必须附上的最小复现与已尝试方案; 不允许静默降级或伪造结果.
+
+  这八项写进 `task` 文本, **不新增 JSON 字段** —— 计划结构只有下文 schema 中的那些键.
+
   ---
 
   ## 决策工作流 (Decision Policy)
@@ -148,8 +167,8 @@ generate_instruction: |-
   用一句话复述目标达成的成功判据(交付物形态); 圈出硬约束(技术栈/时间窗口/平台要求)与软约束(偏好).
 
   **用户意图硬约束**: 用户/上层明确指定的行为、术语、范围是硬约束 —— 组织树不得改变它们;
-  拆分中确需变更时, 先记录为待确认项而不是静默改写; 下游角色的任务要忠实保留上游明确语义,
-  只补充实现层面的细节.
+  确需变更时当场拍板, 记录决策内容、理由、影响范围与被排除的替代选项, 并让下游任务忠实保留
+  上游明确语义, 只补充实现层面的细节.
 
   ### 决策 2 · 提取必需 Capability (Capability → Role)
 
@@ -204,6 +223,9 @@ generate_instruction: |-
   - 有依赖/协作关系的节点, task 中须对齐同一个**协作锚点**(通常是上游产出的规格文档/共享契约/
     接口定义), 确保下游执行时输入输出格式与术语一致, 不各自发明一套. 若节点已分配共享工作区,
     真实共享文件本身就是协作锚点, 不强制作显式引用.
+  - **依赖边必须可命名**: 每条 `depends_on` 都要能指出它读取的上游产物; 指不出来就删掉这条边.
+  - **禁止循环依赖**: 依赖图必须无环 —— 出现 A→B→A 这类回路, 计划直接非法.
+  - **无边即并行**: 没有实质数据流的节点默认并行推进; 不要为了"顺序看起来整齐"制造依赖.
 
   ### 决策 5 · 共享工作区 (Session Shared Workspace · 自动挂载)
 
@@ -216,7 +238,8 @@ generate_instruction: |-
   ② **每节点哪个分区?** 给每个主要产出 worker 分配**不同** `output_path="<分区>"`, 并在 task 写明
      自己写入哪个分区、从哪些兄弟分区读取. **默认给 Worker 分配具体分区**; 仅当确实需要修改多个
      公共区域时才用空串 `""`(= 共享根, 全局写高权限模式, 仅在确实需要时使用) —— 不要随手把所有
-     Worker 都分配 `""`.
+     Worker 都分配 `""`. **同一分区只能有一个写入方**: 两个节点写同一分区即归属冲突,
+     应指定唯一写入方, 另一方只读.
   ③ **谁验证跨部分一致性?** 跨部分的输入输出约定和配置对齐由验收/复核节点验证共享区真实成果.
 
   规则: 执行顺序用 `depends_on` 表达 —— **分配 output_path 不隐含依赖**; 需要阶段性编排 → 用子
@@ -266,6 +289,19 @@ generate_instruction: |-
   Manager 的下层, 而它们本可作为并行兄弟节点提前展开? 若是 ⇒ 回到决策 2 拆分为并行兄弟, 除非该能力
   确实必须先读上游真实产物才能开始.
 
+  ### 组织反模式 | 纠正
+
+  | 反模式 | 纠正 |
+  |---|---|
+  | 只有 1 个 worker 子节点的 Manager | 降级为 worker, 或并入兄弟节点 |
+  | 无真实数据流的 `depends_on` | 删除该依赖, 改为并行 |
+  | 两个 step 写同一个 `output_path` 分区 | 指定唯一写入方, 另一方只读 |
+  | 用"功能正常/体验良好"当验收 | 改成可观察、可复现的判据 |
+  | 默认创建 test/acceptance 节点 | 仅当用户明确要求或验证本身是目标 |
+  | 用"待确认"逃避决策 | 不得出现该标记; 当场拍板并记录决策、理由、影响范围与被排除选项 |
+  | 把子结构写进 manager 的 task | 只写目标与成功判据, 内部结构由下层 Manager 展开 |
+  | worker task 没写读写范围 | 写全 Write scope / Read scope 与"不得越界" |
+
   ---
 
   ## 参考示例
@@ -275,6 +311,22 @@ generate_instruction: |-
     requirements(manager) 收敛成可执行规格(多份并列条目 → 非 Terminal), 再由 code(worker) 忠实实现
     (拿到明确规格后单角色可完成 → Terminal), 二者 depends_on(实质数据流: code 必须读规格才能开工);
     test 不默认创建(用户未要求验证能力).
+
+  ---
+
+  ## 自检清单 (输出前逐项确认)
+
+  ✗ 是否跳过决策 2 的 Capability 提取, 凭感觉编排了? → Role-Skip
+  ✗ 是否有任务实际需要的 Capability 被遗漏? → Missing-Role
+  ✗ 是否有未满足 T1-T4 的步骤被标为 worker? → 过早触底
+  ✗ 是否对 Terminal 任务开了不必要的 Manager? → 过度递归
+  ✗ 是否有无真实数据流的假依赖 depends_on? → Phantom-Deps
+  ✗ 是否有可独立并行的能力被错误串行合并? → Over-Serialization
+  ✗ worker task 是否足够具体可独立执行? → VagueTask
+  ✗ 是否有 task 未写明可读写范围, 或计划本身默许了访问工作区之外的路径? → Path-Overreach
+  ✗ 每个 task 的八项契约是否写全 (至少 Outcome / Inputs / Write scope / Read scope /
+     Acceptance / Non-goals / Failure contract)? → Incomplete-Task-Contract
+  ✗ 是否存在循环依赖, 或两个 step 共用同一个 output_path 分区? → Bad-Dependency-Graph
 
   ---
 
@@ -340,19 +392,6 @@ generate_instruction: |-
   4. 每个 step 的 exec_type 选择严格遵守决策 1-7 及 T1-T4 判据与组织反问约束;
   5. steps 不得为空 —— 唯一例外是增量续跑(决策 0 ①)判定本轮无需本子树行动, 此时输出空 steps 并附 reason;
   6. 最终只输出纯 JSON 文本无 markdown 围栏无解释文字.
-
-  ---
-
-  ## 自检清单 (输出前逐项确认)
-
-  ✗ 是否跳过决策 2 的 Capability 提取, 凭感觉编排了? → Role-Skip
-  ✗ 是否有任务实际需要的 Capability 被遗漏? → Missing-Role
-  ✗ 是否有未满足 T1-T4 的步骤被标为 worker? → 过早触底
-  ✗ 是否对 Terminal 任务开了不必要的 Manager? → 过度递归
-  ✗ 是否有无真实数据流的假依赖 depends_on? → Phantom-Deps
-  ✗ 是否有可独立并行的能力被错误串行合并? → Over-Serialization
-  ✗ worker task 是否足够具体可独立执行? → VagueTask
-  ✗ 是否有 task 未写明可读写范围, 或计划本身默许了访问工作区之外的路径? → Path-Overreach
 
 # ---- 领域角色（可编辑） ----
 # Manager 的 role_md 现在只承载「领域角色」部分（如「项目组长，负责组织各成员工作」）。

@@ -179,6 +179,30 @@ export ANTHROPIC_API_KEY="你的 API Key"
 
 不要把真实 API Key 写入源码、README、`.env` 文件或 Git 提交中。
 
+### OpenCode Console
+
+设置页的 **OpenCode Console** 是 OpenCode 自家的模型网关（`opencode.ai`），不是 OpenRouter。它提供 OpenAI Chat 兼容端点，所以下拉里能配的是会说 Chat 协议的 CLI：OpenCode、Pi、Qwen Code、Kimi Code、CodeBuddy。
+
+```bash
+export OPENCODE_API_KEY="你的 OpenCode API Key"
+```
+
+也可以在设置页直接填写 Key。生效端点是 `https://opencode.ai/inference/openai/v1`，模型名用 Console 目录里的原始 ID（如 `deepseek-v4.1-flash-free`、`claude-sonnet-5`、`gpt-5.6-sol`）。常用模型已内置在预置里，新模型也可以手输。
+
+Console 的账户权限是 **按模型** 授权的：免费模型只在 opencode 进程内可用（AICU 拉起的正是 opencode 子进程，所以没问题），而付费模型要求账户确实有该模型权限——否则接口返回 `Model access is disabled`。预置默认选 `deepseek-v4.1-flash-free` 就是为了开箱即用；要用付费模型，先在 Console 确认账户有权限。
+
+如果要走 OpenCode 原生的登录态（`opencode auth login` 写进 `~/.local/share/opencode/auth.json` 的那份凭据），不要选这个预置——改用 **手动配置**，模型填 `opencode/<model-id>`，让 CLI 自己带凭据。
+
+### Google Gemini（免费额度）
+
+设置页的 **Google Gemini（免费额度 · 走 OpenCode）** 直连 Google 的 OpenAI 兼容端点 `https://generativelanguage.googleapis.com/v1beta/openai`，不经过任何聚合网关，也不依赖已经停用的 antigravity / gemini CLI。
+
+```bash
+export GEMINI_API_KEY="你的 Google AI Studio API Key"
+```
+
+Gemini API 有免费额度层，`gemini-3.8-flash`、`gemini-3.6-flash`、`gemini-3.5-flash` / `flash-lite`、`gemini-2.5-pro` / `flash` 等模型都在免费层内（Gemini 4 Argon 等不免费）。免费层有速率限制，且**免费层的内容可能会被 Google 用于改进其产品**——不要用它处理敏感内容。配额与限流以 Google 官方文档为准。
+
 ### OpenRouter
 
 设置页中的 **OpenRouter** 是一个聚合网关，不是模型原厂商。AICU 按 CLI 使用的 wire protocol 选择对应 route：

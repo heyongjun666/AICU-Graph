@@ -17,6 +17,7 @@ import pytest
 
 from executables.base import Executable, ExecutableContext, RuntimeGateway
 from executables.manager import Manager
+from executables.manager_parsing import parse_review_assessments
 from executables.registry import ExecutableRegistry, RegistryError
 from runtime.models import (
     ErrorObject,
@@ -827,14 +828,14 @@ class TestManagerReviewDegradation:
                  "fix": {"role": "dev", "task": "rework"}},
             ],
         }
-        assessments, status = Manager._parse_review_assessments(raw, children)
+        assessments, status = parse_review_assessments(raw, children)
         assert status == "parsed"
         assert [a["passed"] for a in assessments] == [True, False]
 
     def test_parse_non_json_string_status_unparseable(self):
         """不可解析字符串 → 全量失败 + status='unparseable'。"""
         children = [{"step_ref": "s1", "role": "dev", "task": "t1"}]
-        assessments, status = Manager._parse_review_assessments(
+        assessments, status = parse_review_assessments(
             "## Review\n这不是 JSON\njust narrative", children
         )
         assert status == "unparseable"
@@ -847,7 +848,7 @@ class TestManagerReviewDegradation:
             {"step_ref": "s1", "role": "dev", "task": "t1"},
             {"step_ref": "s2", "role": "dev", "task": "t2"},
         ]
-        assessments, status = Manager._parse_review_assessments(
+        assessments, status = parse_review_assessments(
             {"review_passed": True, "summary": "All good", "defects": []},
             children,
         )
@@ -857,7 +858,7 @@ class TestManagerReviewDegradation:
     def test_parse_verdict_failed_maps_to_full_fail(self):
         """dict 带 review_passed=False → 全量失败 + status='parsed'（走迭代修复）。"""
         children = [{"step_ref": "s1", "role": "dev", "task": "t1"}]
-        assessments, status = Manager._parse_review_assessments(
+        assessments, status = parse_review_assessments(
             {"review_passed": False, "defects": ["issue_1"]},
             children,
         )
@@ -868,7 +869,7 @@ class TestManagerReviewDegradation:
     def test_parse_overall_passed_false_without_assessments_status_parsed(self):
         """dict 带 overall_passed=False 但无 assessments → 全量失败 + status='parsed'。"""
         children = [{"step_ref": "s1", "role": "dev", "task": "t1"}]
-        assessments, status = Manager._parse_review_assessments(
+        assessments, status = parse_review_assessments(
             {"overall_passed": False},
             children,
         )
@@ -878,7 +879,7 @@ class TestManagerReviewDegradation:
     def test_parse_no_verdict_no_assessments_status_unparseable(self):
         """dict 无 assessments 且无 verdict/audit 信号 → status='unparseable'。"""
         children = [{"step_ref": "s1", "role": "dev", "task": "t1"}]
-        assessments, status = Manager._parse_review_assessments(
+        assessments, status = parse_review_assessments(
             {"steps": [{"step_id": "x"}]},
             children,
         )

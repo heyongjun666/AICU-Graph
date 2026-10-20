@@ -19,7 +19,7 @@ from runtime.sse_manager import (
     SSEManager,
     format_sse,
 )
-from runtime.server import _sse_generator, _sse_stream
+from runtime.sse_http import _sse_generator, _sse_stream
 
 # D6 A 类 8 个状态事件（M3 构造 · forward 客户端）
 A_CLASS_TYPES = [

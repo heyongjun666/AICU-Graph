@@ -47,6 +47,7 @@ import uuid
 from datetime import datetime
 from typing import Any, Optional
 
+from runtime.jsonio import atomic_write_json
 from runtime.models import EventMessage, NodeStatus
 
 logger = logging.getLogger(__name__)
@@ -143,6 +144,15 @@ def _node_workspace(node: Any) -> str:
     return os.path.realpath(os.path.join(root, relpath))
 
 
+def _queue_dirs_in(workspace: str) -> dict[str, str]:
+    """给定节点工作区，返回三队列物理路径（路径契约的唯一拼接口）。"""
+    return {
+        "outbox": os.path.join(workspace, "events"),       # Producer 发布入口
+        "inbox":  os.path.join(workspace, "event_inbox"),   # 持久 Consumer queue
+        "live":   os.path.join(workspace, "events_inbox"),  # RUNNING 实时目录
+    }
+
+
 def event_queue_dirs(node: Any) -> dict[str, str]:
     """节点私有事件队列目录（V3.1 P0#4 EventQueue 统一契约）。
 
@@ -156,21 +166,20 @@ def event_queue_dirs(node: Any) -> dict[str, str]:
 
     worker/manager prompt 构建器与投递侧共用此契约，保证路径单一事实来源。
     """
-    ws = _node_workspace(node)
-    return {
-        "outbox": os.path.join(ws, "events"),       # Producer 发布入口
-        "inbox":  os.path.join(ws, "event_inbox"),   # 持久 Consumer queue
-        "live":   os.path.join(ws, "events_inbox"),  # RUNNING 实时目录
-    }
+    return _queue_dirs_in(_node_workspace(node))
 
 
-def list_inbox(node: Any) -> list[dict]:
+def list_inbox(node: Any, *, workspace: Optional[str] = None) -> list[dict]:
     """只读列出节点 event_inbox 中的待处理事件（解析后的 dict）。
+
+    ``workspace`` 供 Runtime 解析过工作区的调用方传入（此时以 Runtime 的解析
+    结果为准）；不传则按节点 config 推导。
 
     不删除文件——消费由调用方负责（Scheduler 桥转换后删除 / CC 处理后删除）。
     目录不存在或文件损坏时静默跳过，与投递侧容错一致。
     """
-    inbox_dir = event_queue_dirs(node)["inbox"]
+    dirs = _queue_dirs_in(workspace) if workspace else event_queue_dirs(node)
+    inbox_dir = dirs["inbox"]
     if not os.path.isdir(inbox_dir):
         return []
     out: list[dict] = []
@@ -301,7 +310,6 @@ class AgentEventManager:
         最终保存——每次产出的 event 都即时落盘（不再只等 shutdown）。save 失败仅
         log 不抛（幂等，下次摄取/关闭会重写补齐）。
         """
-        tmp = self.events_file + ".tmp"
         try:
             os.makedirs(os.path.dirname(self.events_file), exist_ok=True)
             # 快照与写盘放在同一把锁里：否则两个线程共用同一个 .tmp 会互相截断，
@@ -310,11 +318,7 @@ class AgentEventManager:
                 with self._lock:
                     self._reconcile_statuses_locked()
                     items = [m.to_dict() for m in self._events.values()]
-                with open(tmp, "w", encoding="utf-8") as f:
-                    json.dump(items, f, ensure_ascii=False, indent=2)
-                    f.flush()
-                    os.fsync(f.fileno())
-                os.replace(tmp, self.events_file)
+                atomic_write_json(self.events_file, items)
         except OSError as exc:
             logger.error("Failed to save agent events: %s", exc)
 
@@ -923,12 +927,8 @@ class AgentEventManager:
     @staticmethod
     def _write_json(path: str, data: dict) -> None:
         """原子写 inbox 文件（tmp + rename），避免 CC 读到半成品。"""
-        tmp = path + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False)
-            f.flush()
-            os.fsync(f.fileno())
-        os.replace(tmp, path)
+        # 机器读的投递文件保持紧凑格式；原子写实现与 events.json 共用一份。
+        atomic_write_json(path, data, indent=None)
 
     # ------------------------------------------------------------------
     # 只读访问（日志查询 / 测试断言）

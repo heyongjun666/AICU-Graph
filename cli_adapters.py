@@ -32,14 +32,10 @@ flags 依据（截至 2026-08；MCP 那一侧的核实情况另见各 adapter �
     的 docstring 为准，别照这一行判断
 """
 
-import hashlib
 import json
 import os
-import re
 import shutil
 import subprocess
-import threading
-import time
 from pathlib import Path
 from typing import Optional
 
@@ -49,797 +45,45 @@ from runtime.credentials import (
 )
 # 只取这一个常量：传输的名字由 mcp_manager 定义，adapter 这边比较时用同一个名字，
 # 免得两处各写一份 "http" 字面量。
-from runtime.mcp_manager import TRANSPORT_HTTP, McpConfigError
-
-# 各 CLI 的已知模型清单集中维护在 cli_models.json（便于后续增删模型）。
-_MODELS_FILE = Path(__file__).resolve().parent / "config" / "cli_models.json"
-
-
-def _load_known_models() -> dict:
-    """从 cli_models.json 读取各 CLI 的已知模型清单；缺失/损坏时回退空 dict。"""
-    try:
-        data = json.loads(_MODELS_FILE.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return {}
-    if not isinstance(data, dict):
-        return {}
-    return {
-        str(cli_id): [str(model) for model in models]
-        for cli_id, models in data.items()
-        if isinstance(models, list)
-    }
-
-
-KNOWN_MODELS = _load_known_models()
-
-
-def list_provider_presets() -> list[dict]:
-    """Return public provider metadata for the settings UI; never include secrets."""
-    try:
-        data = json.loads(_MODELS_FILE.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return []
-    presets = data.get("provider_presets", [])
-    return [item for item in presets if isinstance(item, dict) and item.get("id")]
-
-
-def provider_route(provider_id: Optional[str], cli_name: Optional[str]) -> Optional[dict]:
-    """Resolve a provider's CLI-specific connection profile.
-
-    Legacy presets only have top-level connection fields, so they continue to return
-    a synthesized profile. Gateway presets may override protocol and endpoint per CLI.
-    """
-    provider = (provider_id or "").strip().lower()
-    cli = (cli_name or "").strip().lower()
-    if not provider or not cli:
-        return None
-    preset = next((item for item in list_provider_presets() if str(item.get("id", "")).lower() == provider), None)
-    if not preset:
-        return None
-    routes = preset.get("routes")
-    if isinstance(routes, dict) and cli not in routes:
-        return None
-    route = routes.get(cli) if isinstance(routes, dict) else None
-    if route is not None and not isinstance(route, dict):
-        return None
-    if route is not None and route.get("enabled") is False:
-        return None
-    result = {
-        "provider_id": provider,
-        "cli_name": cli,
-        "api_base_url": preset.get("api_base_url"),
-        "api_key_env": preset.get("api_key_env"),
-        "wire_api": preset.get("wire_api"),
-    }
-    if isinstance(route, dict):
-        result.update({key: value for key, value in route.items() if value is not None})
-    return result
-
-
-# ---- 跨厂商模型：直连厂商对应协议的原生端点 ------------------------------------
-#
-# 背景：每个 CLI 只认自己那一种协议（claude 只会说 Anthropic Messages，
-# codex 只会说 OpenAI Responses，kimi 只会说 OpenAI Chat），而多数厂商同时提供
-# 这三种协议的原生端点。于是「claude 用上 GLM」不需要任何协议翻译，
-# 只要把 base_url 指向该厂商的 Anthropic 端点即可。
-# 协议对应关系表本身是纯数据，维护在 cli_models.json 的 protocol_endpoints 里。
-
-# 键是 CLI id，值是 (原生厂商, 该 CLI 说的协议)。这是 CLI 的硬事实而非配置项 ——
-# CodexAdapter 里硬编码的 wire_api = "responses"（见 _provision_codex_config）即是佐证。
-#
-# 多厂商网关型 CLI（codebuddy / opencode / pi）自身是网关，没有「原生厂商」——
-# 任何厂商的模型都该按本 CLI 的协议改道。用 _MULTI_VENDOR 占位：vendor_of_model
-# 只会返回 None 或真实厂商名，所以这个值永远匹配不上，同族短路逻辑自然不生效。
-_MULTI_VENDOR = "__multi_vendor__"
-
-# AICU 在各 CLI 配置里注册第三方端点用的 provider id（codex 的 model_providers、
-# qwen 的 modelProviders、opencode / pi 的自定义 provider 都用它）。opencode 与 pi
-# 要求 --model 写成 ``<provider>/<model>``，这个 id 就是那个前缀。
-_CUSTOM_PROVIDER_ID = "aicu"
-
-# claude CLI 走第三方 Anthropic 兼容端点时用的认证变量名（Bearer 头）。
-# 只给 ANTHROPIC_API_KEY 会被 CLI 判成「未登录」，见 ClaudeCodeAdapter.api_key_env_for_model。
-_ANTHROPIC_AUTH_TOKEN_ENV = "ANTHROPIC_AUTH_TOKEN"
-
-_CLI_NATIVE: dict[str, tuple] = {
-    "claude": ("anthropic", "messages"),
-    "codex": ("openai", "responses"),
-    "kimi": ("moonshot", "chat"),
-    "qwen": ("aliyun", "chat"),
-    "codebuddy": (_MULTI_VENDOR, "chat"),
-    "opencode": (_MULTI_VENDOR, "chat"),
-    "pi": (_MULTI_VENDOR, "chat"),
-    # 下面三个统统领的是自家协议，跨厂商改道对它们没有意义，所以协议名取 "native"：
-    # 数据表里不存在这个协议键，于是既不会改道（protocol_endpoint 恒为 None），
-    # 又能在 known_models 里把异族模型滤掉（下拉不再列连不上的模型）。
-    #   gemini / antigravity：只说 Gemini 原生 generateContent，不是 OpenAI Chat，
-    #     指向别家端点没有任何意义；
-    #   grok：保守取 native —— 本机没有 XAI_API_KEY，改道这条路没验过。真要试，
-    #     入口是它自己的 --xai-api-base-url（换的是 xAI API 的后端，未必换成别家协议）。
-    "gemini": ("google", "native"),
-    "antigravity": ("google", "native"),
-    "grok": ("xai", "native"),
-}
-
-# 同族（模型厂商就是该 CLI 自己的原生厂商）、且用户没指定端点时，**撤掉 AICU 写过的槽**
-# 而不是照写自家端点的 CLI。没列在这里的托管槽 CLI（qwen）同族照样接管。
-#
-#   codex 在此列，依据是它自己的登录态：``codex login`` 拿到的 ChatGPT 订阅写在
-#   ~/.codex/auth.json（本机就是这种状态，tokens 非空），是 codex 的主用法。AICU 若照写
-#   ``requires_openai_auth = false`` + ``env_key = OPENAI_API_KEY``，订阅用户会被踢到
-#   API-key 路径上，报「Missing environment variable: OPENAI_API_KEY」。
-#   撤槽则让 codex 回到它自己的 provider 与认证，与「AICU 没插手」逐字节一致。
-#
-#   qwen 故意不在列：它没有可撤的退路。非交互模式强制要求显式 auth type，撤槽后
-#   ``--auth-type openai`` 会去要 OPENAI_API_KEY，不带该参数则直接报
-#   「No auth type is selected」—— 两条路都走不通（2026-09-16 本机实测：撤槽的 A/B 方案失败，
-#   显式供端点的 C 方案通过）。所以同族也只能由
-#   AICU 供端点。
-_SAME_VENDOR_RELEASE_CLIS = ("codex",)
-
-
-def _load_protocol_endpoints() -> dict:
-    """从 cli_models.json 读取「厂商 → 协议 → base_url」；缺失/损坏时回退空 dict。
-
-    厂商键与 runtime.credentials.vendor_of_model 的返回值一致，所以拿到模型判出
-    厂商后可以直接查表。某个协议没有条目就是「该厂商不支持该协议」——
-    不写空串占位，查不到即不可用。
-
-    表格取值来自本机 curl 实测（每条都带伪造路径对照组，伪造 404 / 真实 401
-    才算「端点存在」）。两处例外，因为探测不可判（厂商鉴权先于路由，伪造路径
-    也返回 401），采信其官方文档 / 官方 helper 包：deepseek 的 messages 与
-    responses。
-
-    zhipu.responses 曾按官方 helper 包填了 https://open.bigmodel.cn/api/coding/paas/v4，
-    2026-09-16 用真实调用证伪：codex + glm-5.2 稳定 404，报
-    `.../api/coding/paas/v4/responses`；换成非 coding 基址 /api/paas/v4 同样 404。
-    即智谱没有实现 OpenAI Responses API，故删掉该键 —— 删键即「该组合不可用」，
-    codex 的模型下拉于是不再列出 glm。同批验过的 deepseek / moonshot / aliyun
-    三个 responses 端点都是真实可用的（各跑通一次 codex 调用）。
-
-    anthropic.chat 是个兼容垫片而非原生实现：Anthropic 官方说明它「primarily
-    intended to test and compare model capabilities, and is not considered a
-    long-term or production-ready solution」，工具调用可用但 `strict` 被忽略、
-    prompt caching 不支持。留着它是为了让 kimi CLI 也能选 Claude——
-    要撤掉只需删掉 cli_models.json 里这一个键。
-    """
-    try:
-        data = json.loads(_MODELS_FILE.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return {}
-    endpoints = data.get("protocol_endpoints", {})
-    if not isinstance(endpoints, dict):
-        return {}
-    return {
-        str(vendor): {
-            str(protocol): str(url)
-            for protocol, url in protocols.items()
-            if isinstance(url, str) and url
-        }
-        for vendor, protocols in endpoints.items()
-        if isinstance(protocols, dict)
-    }
-
-
-PROTOCOL_ENDPOINTS = _load_protocol_endpoints()
-
-
-def protocol_endpoint(vendor: Optional[str], protocol: str) -> Optional[str]:
-    """厂商在某协议下的原生端点；该厂商不支持该协议时返回 None。"""
-    if not vendor:
-        return None
-    return PROTOCOL_ENDPOINTS.get(vendor, {}).get(protocol)
-
-
-def _preset_base_urls() -> set:
-    """provider preset 声明用过的 api_base_url —— 用来分辨「预设值」与「用户自定义端点」。"""
-    return {
-        str(preset["api_base_url"])
-        for preset in list_provider_presets()
-        if preset.get("api_base_url")
-    }
-
-
-def _gateway_preset_base_urls() -> set:
-    """返回显式网关预置地址，模型原厂商路由不得覆盖这些地址。"""
-    return {
-        str(preset["api_base_url"])
-        for preset in list_provider_presets()
-        if preset.get("api_base_url")
-        and (preset.get("provider_kind") == "gateway" or preset.get("id") == "openrouter")
-    }
-
-
-def native_base_url(
-    cli_name: Optional[str], model: Optional[str], configured_base_url: Optional[str],
-    provider_id: Optional[str] = None,
-) -> Optional[str]:
-    """该 (CLI, 模型) 组合应当直连的厂商原生端点；不需要改写时返回 None。
-
-    claude_code_agent 在构造 CLI 子进程前调用它，把返回值写回 api_base_url。
-
-    返回 None 的四种情形，都表示「保持现状、什么都不动」：
-      - CLI 不在 _CLI_NATIVE 里（opencode / pi / qwen / gemini / grok …）
-      - 模型判不出厂商（auto 等内部模型）
-      - 模型厂商就是该 CLI 的原生厂商 —— 同族直连，行为与改动前逐字节一致
-      - 该厂商没有本 CLI 所需协议的原生端点（如 Anthropic 没有 /responses）
-    另外，用户手填的非预设 api_base_url 一律尊重 —— 那种用户可能自己架了中转。
-    """
-    native = _CLI_NATIVE.get(cli_name or "")
-    if not native:
-        return None
-    # Gateway routes are already explicit and must never be rerouted by the
-    # model's original vendor (e.g. openrouter/anthropic/* -> api.anthropic.com).
-    if provider_route(provider_id, cli_name):
-        return None
-
-    if configured_base_url and str(configured_base_url) not in _preset_base_urls():
-        return None
-    if configured_base_url and str(configured_base_url) in _gateway_preset_base_urls():
-        return None
-
-    native_vendor, protocol = native
-    vendor = vendor_of_model(model or "")
-    if not vendor or vendor == native_vendor:
-        return None
-
-    return protocol_endpoint(vendor, protocol)
-
-
-def model_supported_by_cli(cli_name: Optional[str], model: Optional[str]) -> bool:
-    """该 CLI 能不能用这个模型 —— 同族直连，异族得有本协议的原生端点。
-
-    供 known_models 过滤掉选不中的组合（如 claude + gemini）。判不出的情形
-    （未纳入的 CLI、判不出厂商的内部模型）一律返回 True，即保持现状不过滤。
-    """
-    native = _CLI_NATIVE.get(cli_name or "")
-    if not native:
-        return True
-    vendor = vendor_of_model(model or "")
-    if not vendor:
-        return True
-    native_vendor, protocol = native
-    return vendor == native_vendor or protocol_endpoint(vendor, protocol) is not None
-
-
-def _has_managed_slot(cli_name: Optional[str]) -> bool:
-    """该 CLI 是否有一份 AICU 托管的配置文件槽（未知 id 视为没有）。"""
-    try:
-        return get_adapter(cli_name or "").managed_slot
-    except ValueError:
-        return False
-
-
-def provider_slot_base_url(
-    cli_name: Optional[str], model: Optional[str], configured_base_url: Optional[str],
-    provider_id: Optional[str] = None,
-) -> Optional[str]:
-    """本次运行 AICU 托管槽该持有的端点；返回 None 表示「把自己上次写的撤掉」。
-
-    与 native_base_url 是两回事，别混：
-      - ``native_base_url`` 管「CLI 自身寻址」（环境变量 / 内联配置）。同族返回 None
-        是对的 —— 不设变量，CLI 就用自己的认证。
-      - 本函数管「AICU 写在 CLI 配置文件里的那个槽」（codex 的 ``model_providers.aicu``、
-        qwen 的 ``modelProviders.aicu``、pi 的 ``providers.aicu``）。那个槽**只有 AICU
-        会写**，上一次运行留下的值会被这一次当成事实 —— 所以每次运行都必须给出确定
-        答案：要么按当前模型所属厂商重写，要么撤掉自己写过的。留着旧值是最坏的一种。
-
-    只有 ``managed_slot`` 为 True 的 CLI 有槽，其余一律返回 None（它们的 provision 是
-    no-op，没有可撤的东西）。
-
-    返回 None 的三种情形：没有托管槽；模型判不出厂商（无从下手，撤槽好过留残值）；
-    同族且该 CLI 属于 _SAME_VENDOR_RELEASE_CLIS（交还 CLI 自己的认证）。
-
-    用户自己指定的 api_base_url（无论手填还是选了 preset）一律原样写进槽 ——
-    那种用户可能自己架了中转，也可能就是要 AICU 走这个端点。
-    """
-    if not _has_managed_slot(cli_name):
-        return None
-    if provider_route(provider_id, cli_name):
-        return str(configured_base_url) if configured_base_url else None
-    if configured_base_url:
-        return str(configured_base_url)
-    native = _CLI_NATIVE.get(cli_name or "")
-    if not native:
-        # 有槽却不在 _CLI_NATIVE 里 = 声明漏了（有测试守着），这里不做无声猜测。
-        return None
-    native_vendor, protocol = native
-    vendor = vendor_of_model(model or "")
-    if not vendor:
-        return None
-    if vendor == native_vendor and cli_name in _SAME_VENDOR_RELEASE_CLIS:
-        return None
-    return protocol_endpoint(vendor, protocol)
-
-
-def effective_base_url(
-    cli_name: Optional[str], model: Optional[str], configured_base_url: Optional[str],
-    provider_id: Optional[str] = None,
-) -> tuple[Optional[str], str]:
-    """这次运行**真正会用到**的端点，以及它是怎么定下来的 —— 给界面看的那个答案。
-
-    返回值 ``(url, source)``，``source`` 取值：
-      - ``"configured"``：用的就是用户配置里存着的那个地址（预置厂商自家端点，或用户
-        自己填的网关）—— 换模型不会改它。
-      - ``"model_vendor"``：AICU 按**当前模型所属厂商**改写了地址 —— 换模型就会跟着变。
-      - ``"cli_default"``：谁都没指定，CLI 用自己的默认端点（url 可能为 None，表示
-        连默认端点都无从得知，例如 google 系 CLI 只认自家原生协议）。
-
-    存在的理由是「界面上显示的地址」和「请求实际发往的地址」必须是同一个来源。
-    所以这里不另立规则，而是把 claude_code_agent 建子进程前调用那两个函数的**顺序与取值**
-    照搬过来（改动那处接线时必须回来同步这里，否则两边又分家）：
-      1. ``native_base_url`` 先按模型厂商改写「CLI 自身寻址」（环境变量 / 内联配置）；
-      2. 托管槽（codex 的 ``model_providers.aicu``、qwen 的 ``modelProviders.aicu``、
-         pi 的 ``providers.aicu``）用**上一步改写后**的值去写 —— 槽是 CLI 真正读的那份
-         （codex 顶层 ``model_provider = "aicu"`` 指过去就是它），照抄配置里的预置地址
-         会让「选了 OpenAI 预置再把模型换成 deepseek」打到 openai 去。
-    """
-    route = provider_route(provider_id, cli_name)
-    if route:
-        route_url = route.get("api_base_url") or configured_base_url
-        return (str(route_url) if route_url else None), "configured"
-
-    configured = str(configured_base_url) if configured_base_url else None
-
-    endpoint = native_base_url(cli_name, model, configured, provider_id=provider_id)
-    addressed = endpoint or configured
-
-    slot = provider_slot_base_url(cli_name, model, addressed, provider_id=provider_id)
-    if slot:
-        return slot, "configured" if slot == configured else "model_vendor"
-
-    if endpoint:
-        return endpoint, "configured" if endpoint == configured else "model_vendor"
-
-    # 两条路都没改写：要么用户自己的端点原样生效，要么压根没指定过端点。
-    if configured:
-        return configured, "configured"
-
-    native = _CLI_NATIVE.get(cli_name or "")
-    if not native:
-        return None, "cli_default"
-    # 同族直连时 CLI 走的就是自家端点，替它把话说全（判不出就是判不出，不猜）。
-    return protocol_endpoint(native[0], native[1]), "cli_default"
-
-
-def _provision_codex_config(api_base_url: str, api_key_env: Optional[str], model: Optional[str]) -> None:
-    """把第三方端点注册进 ``~/.codex/config.toml`` 的 ``model_providers``（幂等）。
-
-    结构依据 openai/codex 源码 ``codex-rs/config/src/config_toml.rs`` 与
-    ``codex-rs/model-provider-info/src/lib.rs`` 核实：
-      - ``model_providers.<id>`` 为 provider 定义（name/base_url/env_key/wire_api）
-      - ``wire_api`` 仅支持 ``responses``（``chat`` 已移除）
-      - ``requires_openai_auth = false`` 跳过登录，API key 从 ``env_key`` 指定的环境变量读
-      - 顶层 ``model_provider`` 选择使用哪个 provider
-    只管理名为 ``aicu`` 的 provider 块，保留用户其它配置。
-    """
-    config_path = Path.home() / ".codex" / "config.toml"
-    env_key = api_key_env or "OPENAI_API_KEY"
-    block = (
-        "[model_providers.aicu]\n"
-        'name = "AICU"\n'
-        f'base_url = {json.dumps(api_base_url, ensure_ascii=False)}\n'
-        f'env_key = {json.dumps(env_key, ensure_ascii=False)}\n'
-        'wire_api = "responses"\n'
-        'requires_openai_auth = false\n'
-    )
-    existing = ""
-    if config_path.exists():
-        try:
-            existing = config_path.read_text(encoding="utf-8")
-        except OSError:
-            existing = ""
-    # 替换已存在的 [model_providers.aicu] 块，否则追加到末尾。
-    # 该块不能包含顶层 model_provider，否则 TOML 会把它解析为 provider 字段。
-    pattern = re.compile(r"(?m)^\[model_providers\.aicu\]\s*\n(?:^[^\[]+\n)*")
-    if pattern.search(existing):
-        text = pattern.sub(block, existing)
-    else:
-        text = f"{existing.rstrip()}\n\n{block}" if existing.strip() else block
-
-    def _set_top_level(text: str, key: str, value: str) -> str:
-        line = f"{key} = {json.dumps(value, ensure_ascii=False)}"
-        # 顶层设置必须位于第一个 [table] 之前；追加到文件末尾会落入上一张表。
-        table_match = re.search(r"(?m)^\s*\[[^\n]+\]\s*$", text)
-        prefix = text[:table_match.start()] if table_match else text
-        suffix = text[table_match.start():] if table_match else ""
-        pat = re.compile(r"(?m)^" + re.escape(key) + r"\s*=.*$", re.MULTILINE)
-        if pat.search(prefix):
-            prefix = pat.sub(line, prefix)
-        else:
-            prefix = f"{prefix.rstrip()}\n{line}\n"
-        return prefix + suffix
-
-    if model:
-        text = _set_top_level(text, "model", model)
-    text = _set_top_level(text, "model_provider", "aicu")
-
-    config_path.parent.mkdir(parents=True, exist_ok=True)
-    config_path.write_text(text, encoding="utf-8")
-
-
-def _release_codex_config() -> None:
-    """撤掉 AICU 写进 ``~/.codex/config.toml`` 的东西（幂等，文件不存在就什么都不做）。
-
-    删两样，且都只删属于自己的：
-      - ``[model_providers.aicu]`` 块：没有 ``model_provider`` 指着它就是死配置，
-        留着只会让下一个读它的人以为 AICU 还生效；
-      - 顶层 ``model_provider``，**仅当其值就是 AICU 的 id**。别的值是用户自己设的，
-        不能碰。
-
-    顶层 ``model`` 不动：它没有「值即归属」的判据，分不清是 AICU 写的还是用户写的，
-    宁可留着（AICU 每次都用 ``--model`` 覆盖它，运行期无影响）。
-    """
-    config_path = Path.home() / ".codex" / "config.toml"
-    if not config_path.exists():
-        return
-    try:
-        text = config_path.read_text(encoding="utf-8")
-    except OSError:
-        return
-    released = re.sub(
-        r"(?m)^\[model_providers\." + re.escape(_CUSTOM_PROVIDER_ID) + r"\]\s*\n(?:^[^\[]+\n)*",
-        "",
-        text,
-    )
-    released = re.sub(
-        r'(?m)^model_provider\s*=\s*"' + re.escape(_CUSTOM_PROVIDER_ID) + r'"\s*\n',
-        "",
-        released,
-    )
-    if released != text:
-        config_path.write_text(released, encoding="utf-8")
-
-
-def _provision_qwen_config(api_base_url: str, api_key_env: Optional[str], model: Optional[str]) -> None:
-    """把第三方端点注册进 ``~/.qwen/settings.json`` 的 ``modelProviders``（幂等）。
-
-    结构依据 QwenLM/qwen-code 源码 ``packages/core/src/models/types.ts`` 核实：
-      - ``modelProviders`` 的 value 是 ``ModelConfig[]``（模型数组，非 provider 对象）
-      - ``ModelConfig`` 字段：``id``（模型名）/``envKey``（读 API key 的环境变量名）/
-        ``baseUrl``（端点）；``--model <id>`` 按 ``id`` 命中注册项
-    只管理名为 ``aicu`` 的 provider 条目，保留用户其它配置。
-    """
-    config_path = Path.home() / ".qwen" / "settings.json"
-    data: dict = {}
-    if config_path.exists():
-        try:
-            loaded = json.loads(config_path.read_text(encoding="utf-8"))
-            if isinstance(loaded, dict):
-                data = loaded
-        except (OSError, json.JSONDecodeError):
-            data = {}
-    providers = data.get("modelProviders")
-    if not isinstance(providers, dict):
-        providers = {}
-    entry: dict = {}
-    if model:
-        entry["id"] = model
-    if api_key_env:
-        entry["envKey"] = api_key_env
-    if api_base_url:
-        entry["baseUrl"] = api_base_url
-    providers["aicu"] = [entry]
-    data["modelProviders"] = providers
-    # 新版 Qwen Code 要求显式声明自定义 provider 的协议类型；
-    # aicu 使用 OpenAI-compatible endpoint。
-    protocols = data.get("providerProtocol")
-    if not isinstance(protocols, dict):
-        protocols = {}
-    protocols["aicu"] = "openai"
-    data["providerProtocol"] = protocols
-    config_path.parent.mkdir(parents=True, exist_ok=True)
-    config_path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-
-
-def _release_qwen_config() -> None:
-    """撤掉 AICU 写进 ``~/.qwen/settings.json`` 的 aicu 条目（幂等）。
-
-    只删 ``modelProviders`` / ``providerProtocol`` 里 key 为 ``_CUSTOM_PROVIDER_ID``
-    的两项，用户自己的 provider 原样保留；文件或分区不存在时不创建。
-    """
-    config_path = Path.home() / ".qwen" / "settings.json"
-    if not config_path.exists():
-        return
-    try:
-        loaded = json.loads(config_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return
-    if not isinstance(loaded, dict):
-        return
-    changed = False
-    for section_name in ("modelProviders", "providerProtocol"):
-        section = loaded.get(section_name)
-        if isinstance(section, dict) and _CUSTOM_PROVIDER_ID in section:
-            del section[_CUSTOM_PROVIDER_ID]
-            changed = True
-    if changed:
-        config_path.write_text(
-            json.dumps(loaded, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
-        )
-
-
-def _provision_pi_config(api_base_url: str, api_key_env: Optional[str], model: Optional[str]) -> None:
-    """把第三方端点注册进 ``~/.pi/agent/models.json`` 的 ``providers``（幂等）。
-
-    结构依据 pi 的 ``dist/core/model-config.d.ts`` 核实：顶层 ``providers`` 是
-    provider id → ProviderConfig 的映射，ProviderConfig 含 name/baseUrl/apiKey/api/
-    models。``api`` 取 ``openai-completions``（OpenAI Chat 协议，baseUrl 含 /v1）。
-
-    apiKey 不写字面量，写 ``$ENV_NAME`` —— pi 的 dist/core/resolve-config-value.js
-    会把 ``$VAR`` / ``${VAR}`` 插值成环境变量值（本机实测通过）。键是 AICU 注入的，
-    落盘的就只是一个变量名。
-
-    只管理 ``aicu`` 这一项，保留用户其它 provider 配置。
-    """
-    config_path = Path.home() / ".pi" / "agent" / "models.json"
-    data: dict = {}
-    if config_path.exists():
-        try:
-            loaded = json.loads(config_path.read_text(encoding="utf-8"))
-            if isinstance(loaded, dict):
-                data = loaded
-        except (OSError, json.JSONDecodeError):
-            data = {}
-    providers = data.get("providers")
-    if not isinstance(providers, dict):
-        providers = {}
-    entry: dict = {"name": "AICU", "baseUrl": api_base_url, "api": "openai-completions"}
-    if api_key_env:
-        entry["apiKey"] = f"${api_key_env}"
-    if model:
-        entry["models"] = [{"id": model, "name": model}]
-    providers[_CUSTOM_PROVIDER_ID] = entry
-    data["providers"] = providers
-    config_path.parent.mkdir(parents=True, exist_ok=True)
-    config_path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-
-
-def _release_pi_config() -> None:
-    """撤掉 AICU 写进 ``~/.pi/agent/models.json`` 的 aicu provider（幂等）。
-
-    用户自己的 provider 原样保留；文件或 ``providers`` 不存在时不创建。
-    """
-    config_path = Path.home() / ".pi" / "agent" / "models.json"
-    if not config_path.exists():
-        return
-    try:
-        loaded = json.loads(config_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return
-    if not isinstance(loaded, dict):
-        return
-    providers = loaded.get("providers")
-    if isinstance(providers, dict) and _CUSTOM_PROVIDER_ID in providers:
-        del providers[_CUSTOM_PROVIDER_ID]
-        config_path.write_text(
-            json.dumps(loaded, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
-        )
-
-
-def _opencode_config_content(
-    api_base_url: Optional[str],
-    models: list,
-    api_key_env: Optional[str],
-    servers: Optional[list] = None,
-) -> str:
-    """opencode 的 ``OPENCODE_CONFIG_CONTENT`` 取值 —— 内联配置，不落任何文件。
-
-    opencode 支持用该环境变量直接传配置 JSON（二进制里的 OPENCODE_CONFIG_CONTENT），
-    于是不需要像 codex / qwen 那样改写用户的 ``~/.config/opencode/opencode.json``，
-    也不会往 agent 的工作目录里塞文件。本机实测通过。
-
-    结构依据 opencode 官方配置格式：``provider.<id>`` 含 npm/name/options/models；
-    ``options.baseURL`` 已含 /v1，走 OpenAI Chat 协议；``{env:VAR}`` 是 opencode 自己的
-    环境变量插值语法（与 pi 的 ``$VAR`` 不同）。
-
-    ``models`` 必须把选择器里可能出现的模型都列上，否则 opencode 找不到该 id。
-    这里直接取 ``KNOWN_MODELS["all"]`` —— 与下拉候选同源，改一处两边同步。
-
-    **provider 与 mcp 必须拼在同一个 JSON 里**，因为两者共用同一个环境变量：分两次
-    设置只会让后写的把先写的整个盖掉。这也是 MCP 的注入点必须落在这个函数里、
-    而不是另开一个 mcp 专用 env 的原因。
-
-    ``api_base_url`` 为空表示本次不改道（只可能出现在「有 mcp、无自定义端点」时）：
-    那时不加 ``provider`` 段，只下发 ``mcp``。
-    """
-    config: dict = {"$schema": "https://opencode.ai/config.json"}
-    if api_base_url:
-        options: dict = {"baseURL": api_base_url}
-        if api_key_env:
-            options["apiKey"] = "{env:" + api_key_env + "}"
-        config["provider"] = {
-            _CUSTOM_PROVIDER_ID: {
-                "npm": "@ai-sdk/openai-compatible",
-                "name": "AICU",
-                "options": options,
-                "models": {model: {"name": model} for model in models},
-            }
-        }
-    if servers:
-        # opencode 的本地 server 条目：`command` 是**数组**（程序 + 参数一起放），
-        # 与 claude 系的 `command` 字符串 + `args` 数组不是一回事，所以不能复用
-        # _cc_mcp_json。`type` 与 `enabled` 都是必填/推荐项。
-        #
-        # 远程条目是 `type: "remote"` + url + headers —— 与 `local` 是两个形状不同的
-        # 联合类型（`command` 与 `url` 各自只属于其中一支），所以这里也必须分支而不是
-        # 统一塞键。注意顶层键是 `mcp`（**不是** `mcpServers`），这是 opencode 独有的
-        # 写法，见 _opencode_config_content 的调用方。
-        entries: dict = {}
-        for server in servers:
-            if server.transport == TRANSPORT_HTTP:
-                entries[server.name] = {
-                    "type": "remote",
-                    **_remote_fields(server, "url"),
-                    "enabled": True,
-                }
-                continue
-            entries[server.name] = {
-                "type": "local",
-                "command": [server.command, *server.args],
-                "enabled": True,
-                **({"environment": dict(server.env)} if server.env else {}),
-            }
-        config["mcp"] = entries
-    return json.dumps(config, ensure_ascii=False)
-
-
-def _result_events(raw: str) -> list:
-    """把 CLI 的 JSON 输出拆成事件列表，顺序不变。
-
-    同一个 ``--output-format json`` 在不同 CLI 下有三种形态，这里统一归一：
-      - 单个 JSON 对象（claude）
-      - 事件数组（codebuddy / qwen —— 实测两者都把事件装进一个 JSON 数组）
-      - 每行一个对象的 JSONL（各家 stream-json）
-    整段不是 JSON（纯文本回复）时返回空列表，由调用方兜底。
-    """
-    text = raw.strip()
-    if not text:
-        return []
-    try:
-        value = json.loads(text)
-    except json.JSONDecodeError:
-        value = None
-    if isinstance(value, dict):
-        return [value]
-    if isinstance(value, list):
-        return [event for event in value if isinstance(event, dict)]
-    events = []
-    for line in text.splitlines():
-        try:
-            event = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(event, dict):
-            events.append(event)
-    return events
-
-
-def _claude_style_result(raw: str) -> Optional[dict]:
-    """取 Claude Code 风格的结果对象并归一化（claude / codebuddy / qwen 同形）。
-
-    ``--output-format json`` 在 claude 下就是单个结果对象，直接归一化；codebuddy /
-    qwen 输出事件数组（末条 ``type=result``），stream-json 则每行一个事件 ——
-    后两种取最后一条 result 事件。取不到返回 None，调用方退回原始输出。
-    """
-    text = raw.strip()
-    if not text:
-        return None
-    events = _result_events(raw)
-    candidates = [
-        event
-        for event in events
-        if event.get("type") == "result" or "result" in event
-    ]
-    # 单个对象且没有 result 字段时它就是结果对象本身（如只有 subtype/errors 的
-    # error_during_execution），不能因为挑不出 result 事件就丢掉。
-    if len(events) == 1 and not candidates:
-        candidates = events
-    if not candidates:
-        return None
-    event = candidates[-1]
-    return {
-        "result": event.get("result") or event.get("text"),
-        "session_id": event.get("session_id") or event.get("conversation_id"),
-        "subtype": event.get("subtype"),
-        "errors": _coerce_errors(event.get("errors")),
-    }
-
-
-def _coerce_errors(errors_value) -> list:
-    """把各类 errors 表示归一化为字符串列表。"""
-    if errors_value is None:
-        return []
-    if isinstance(errors_value, str):
-        return [errors_value]
-    if isinstance(errors_value, list):
-        return [str(item) for item in errors_value]
-    return [str(errors_value)]
-
-
-def _render_openai_content(content) -> str:
-    """把 OpenAI 风格 message.content（str 或 list）渲染为纯文本。"""
-    if isinstance(content, str):
-        return content
-    if isinstance(content, list):
-        parts = []
-        for item in content:
-            if isinstance(item, str):
-                parts.append(item)
-            elif isinstance(item, dict):
-                if item.get("type") == "text":
-                    parts.append(item.get("text", ""))
-                elif item.get("type") in ("tool_use", "tool_call", "function"):
-                    name = item.get("name") or (item.get("function") or {}).get("name", "unknown")
-                    parts.append(f"Tool: {name}")
-        return "\n".join(parts)
-    return ""
-
-
-def _extract_event_text(event: dict) -> str:
-    """从通用 JSONL 事件 dict 提取文本（OpenCode / Pi / Gemini 等 json 事件）。"""
-    for key in ("text", "content", "output", "response"):
-        value = event.get(key)
-        if isinstance(value, str) and value:
-            return value
-        # 内容也可能是 OpenAI 风格的内容块数组（如 {"content":[{"type":"text",...}]}）
-        if isinstance(value, list):
-            rendered = _render_openai_content(value)
-            if rendered:
-                return rendered
-    msg = event.get("message")
-    if isinstance(msg, dict):
-        for key in ("content", "text"):
-            content = msg.get(key)
-            if isinstance(content, str) and content:
-                return content
-            if isinstance(content, list):
-                rendered = _render_openai_content(content)
-                if rendered:
-                    return rendered
-    parts = event.get("parts")
-    if isinstance(parts, list):
-        chunks = [
-            part.get("text", "")
-            for part in parts
-            if isinstance(part, dict) and part.get("type") == "text" and part.get("text")
-        ]
-        if chunks:
-            return "\n".join(chunks)
-    # OpenCode 的事件把内容包在单个 part 里：
-    # {"type":"text","part":{"type":"text","text":"..."}}（实测）
-    part = event.get("part")
-    if isinstance(part, dict):
-        return _extract_event_text(part)
-    return ""
-
-
-def _format_json_event(line: str, extract=_extract_event_text) -> str:
-    """把一行 JSONL 事件渲染成可见文本（OpenCode / Pi / Gemini 等同形 CLI）。
-
-    两种回退语义故意不对称，缺一不可：
-      - 解析不出 JSON → **原样返回该行**，非 JSONL 的原始输出（启动日志、报错）仍能显示；
-      - 解析出来但不是对象 → 返回空串，这种行没有可展示的正文，返回原文只会刷屏。
-
-    ``extract`` 由各 CLI 给：Pi 需要 ``_assistant_text``（它的 ``--mode json`` 会把
-    用户消息也回显，通用提取器会把提问当成回复），其余用默认的通用提取器。
-    """
-    try:
-        event = json.loads(line)
-    except json.JSONDecodeError:
-        return line
-    if not isinstance(event, dict):
-        return ""
-    return extract(event)
-
-
-def _extract_session_id(event: dict) -> Optional[str]:
-    """从通用 JSONL 事件 dict 提取会话 id（OpenCode / Pi 等）。"""
-    for key in ("sessionID", "sessionId", "session_id", "session", "conversation_id"):
-        value = event.get(key)
-        if isinstance(value, str) and value:
-            return value
-    return None
+from runtime.mcp_manager import TRANSPORT_HTTP
+
+# 这个模块只留 adapter 策略本身：厂商/端点在 cli_providers，输出解析在 cli_results，
+# MCP 配置落盘在 mcp_codecs。下面只导入本文件真正用到的名字 —— 其余调用方直接从
+# 拥有它的模块导入，避免再造一层「看起来在这、其实在别处」的再导出。
+from cli_providers import (
+    KNOWN_MODELS,
+    _ANTHROPIC_AUTH_TOKEN_ENV,
+    _CLI_NATIVE,
+    _CUSTOM_PROVIDER_ID,
+    _opencode_config_content,
+    _provision_codex_config,
+    _provision_pi_config,
+    _provision_qwen_config,
+    _release_codex_config,
+    _release_pi_config,
+    _release_qwen_config,
+    list_provider_presets,
+    model_supported_by_cli,
+)
+from cli_results import (
+    _claude_style_result,
+    _coerce_errors,
+    _extract_event_text,
+    _extract_session_id,
+    _format_json_event,
+    _render_openai_content,
+    _result_events,
+)
+from mcp_codecs import (
+    _cc_mcp_json,
+    _grok_mcp_toml,
+    _mcp_capability,
+    _mcp_servers_project_json,
+    _mcp_servers_settings_json,
+    _probe_pi_mcp,
+    _write_kimi_trust,
+    _write_pi_trust,
+)
 
 
 class CliAdapter:
@@ -915,6 +159,8 @@ class CliAdapter:
         return []
 
     def max_turns_flag(self, n: int) -> list:
+        # 默认不加：codex / kimi / opencode / pi / gemini / cursor 的文档都没有
+        # max-turns 类轮次 flag（kimi 的 --max-steps-per-turn 语义不同，不能混用）。
         return []
 
     def prompt_args(self, prompt: str) -> tuple[list, bool]:
@@ -1101,6 +347,35 @@ class CliAdapter:
         """
         return "尚未接入 AICU"
 
+    def _inject_api_key(
+        self,
+        env: dict,
+        key_env: Optional[str],
+        target_env: Optional[str] = None,
+    ) -> None:
+        """把 ``key_env`` 指向的密钥值写进子进程环境。
+
+        ``api_key_env`` 是「AICU 从哪个变量取 key」，CLI 真正读的变量名可能不同
+        （例如 codex 固定读 ``OPENAI_API_KEY``），所以目标变量单独传。缺失时
+        什么都不写 —— 保持 CLI 自己的登录态，而不是塞一个空字符串把它顶掉。
+        """
+        if not key_env:
+            return
+        api_key = os.environ.get(key_env)
+        if api_key:
+            env[target_env or self.api_key_env] = api_key
+
+    def _env_with_api_key(self, base_env: dict, key_env: Optional[str]) -> dict:
+        """复制一份环境并注入本次 API key。
+
+        给「只换 key、不改端点」的 adapter 共用：qwen 的端点由 settings.json 决定，
+        gemini 直连官方、没有统一的 base URL 变量 —— 两边都不需要通过环境变量改道，
+        但都要把本次的 key 交给 CLI。
+        """
+        env = dict(base_env)
+        self._inject_api_key(env, key_env or self.api_key_env)
+        return env
+
     def build_env(
         self,
         base_env: dict,
@@ -1164,434 +439,6 @@ class CliAdapter:
         return None
 
 
-def _remote_fields(server, url_key: str) -> dict:
-    """远程（Streamable HTTP）条目里那不变的两样：地址与请求头。
-
-    键名由调用方给，因为**各家对「远程地址」的键名并不统一**，这是接远程 MCP 最容易
-    写错的一处：claude/codebuddy/codex/kimi/pi/cursor/opencode 用 ``url``，
-    gemini/qwen 用 ``httpUrl``。后者尤其要小心 —— 它们没有 type 字段、传输由键名决定，
-    ``url`` 在那边表示的是 **SSE**（被 Streamable HTTP 取代的旧传输），写错会静默
-    走成另一种传输。
-
-    ``headers`` 为空时整个键都不写，与 stdio 那边 ``env`` 的处理一致。
-    """
-    entry = {url_key: server.url}
-    if server.headers:
-        entry["headers"] = dict(server.headers)
-    return entry
-
-
-def _cc_mcp_json(servers: list) -> str:
-    """Claude Code 协议族的 ``mcpServers`` 配置串。
-
-    本地形状是 ``{"mcpServers": {<name>: {command, args, env?}}}`` —— ``command`` 是
-    字符串、参数单独放 ``args``。注意这**不是**通用形状：opencode 要的是
-    ``command: [程序, ...参数]`` 的数组形式，所以那边另写一份（见
-    ``_opencode_config_content``）。共用一个序列化器只会让两边都错。
-
-    远程形状是 ``{"type": "http", "url": ..., "headers": {...}}``。``type`` **必须写**：
-    claude 把「有 url 却没有 type」的条目当成配置错误，会跳过整个 server 并报一句
-    「has a "url" but no "type"」。本地条目则不能补 ``type: "stdio"`` —— 那是改动既有
-    配置的字节。
-
-    codebuddy 走同一条路径（同一个类的子类），也照这个形状发。
-    """
-    entries: dict = {}
-    for server in servers:
-        if server.transport == TRANSPORT_HTTP:
-            entries[server.name] = {"type": "http", **_remote_fields(server, "url")}
-            continue
-        entry: dict = {"command": server.command, "args": list(server.args)}
-        if server.env:
-            entry["env"] = dict(server.env)
-        entries[server.name] = entry
-    return json.dumps({"mcpServers": entries}, ensure_ascii=False)
-
-
-def _mcp_servers_project_json(servers: list, url_key: str = "url") -> str:
-    """项目级 ``mcpServers`` 配置文件的内容（gemini / cursor / pi / kimi 同形）。
-
-    本地形状与 ``_cc_mcp_json`` 一样是 ``command`` 字符串 + ``args`` 数组 + 可选 ``env``，
-    差别只在渲染：这里是**落盘给 CLI 解析的文件**，所以缩进 2 空格并带尾换行（与
-    ``_mcp_servers_settings_json`` 的落盘风格一致）。
-
-    远程形状是 ``{"<url_key>": ..., "headers": {...}}``，**没有 type 字段**：这四家都
-    按「给了哪个连接字段」推传输。``url_key`` 因此是参数而不是写死的 —— gemini 用
-    ``httpUrl``（``url`` 在它那里表示 SSE，见 ``GeminiAdapter``），其余三家用 ``url``。
-    两家的差异收敛成一个类属性，与 ``mcp_workspace_config`` 同一思路。
-
-    为什么另起一份而不是复用/参数化上面那两个：
-
-      - 不复用 ``_cc_mcp_json``：它绑在 claude 系的 argv 路径上（``--mcp-config=<紧凑
-        JSON>``），改它等于动那四家已经接好的 CLI，而这一批的前提是「现有行为一个
-        字节都不变」。
-      - 不参数化 qwen 的 ``trust``：``trust: true`` 是 qwen 自己的无头批准语义
-        （见 ``_mcp_servers_settings_json`` 的说明）。gemini 也有 ``trust`` 字段，但
-        含义完全不同（"trusted servers may gain additional capabilities"，不是批准
-        门禁）；cursor / pi / kimi 根本没有这个键。合并只会让某一方多写一个自己
-        不认识或不期望的字段。
-
-    四家同形是**核实过的事实**（各自的官方文档或发行包），不是「看着像」——
-    所以这里共用一份是诚实的；哪天某一家分叉，就照 ``_opencode_config_content`` 的
-    先例给它单独写一份。grok 走的是同一个钩子但内容是 TOML，另行渲染。
-    """
-    entries: dict = {}
-    for server in servers:
-        if server.transport == TRANSPORT_HTTP:
-            entries[server.name] = _remote_fields(server, url_key)
-            continue
-        entry: dict = {"command": server.command, "args": list(server.args)}
-        if server.env:
-            entry["env"] = dict(server.env)
-        entries[server.name] = entry
-    return json.dumps({"mcpServers": entries}, ensure_ascii=False, indent=2) + "\n"
-
-
-# ---- grok 的 TOML 发射 ---------------------------------------------------------
-#
-# grok 读的是 TOML（``.grok/config.toml``），仓库里没有 TOML 库，codex 那份也是手写
-# 正则（见 :func:`_codex_mcp_args`），这里同样手写 —— 要写的形状是固定的，不需要
-# 通用序列化器。
-#
-# **不能拿 json.dumps 冒充 TOML**：两者的转义规则不重合，而差集正好是会被静默吞掉的
-# 那一类 ——
-#   - U+007F(DEL)：JSON 允许直接写在字符串里（json.dumps 默认就不转义它），TOML 里
-#     它是非法字面字符，只能写成 ``\u007F``；
-#   - 代理对：JSON 那种 ``😀`` 写法在 TOML 里非法，所以非 ASCII 一律原样
-#     输出，一个 ``\u`` 都不发。
-# 用 fullmatch 而不是 ``^...$``：Python 的 ``$`` 也匹配「结尾换行之前」，于是名字里
-# 带尾随 ``\n`` 时（``mcp_servers.json`` 里写 ``"echo-probe\n"``）会被判成裸键、把换行
-# 原样吐进表名，整份 TOML 解析失败 —— 而且是**同文件里其它 server 一起丢**，
-# grok 那边只表现为「工具不存在」。``\Z``/fullmatch 没有这个缺口。
-_TOML_BARE_KEY = re.compile(r"[A-Za-z0-9_-]+\Z")
-_TOML_ESCAPES = {
-    "\\": "\\\\", '"': '\\"', "\n": "\\n", "\r": "\\r", "\t": "\\t", "\b": "\\b", "\f": "\\f",
-}
-
-
-def _toml_string(value: str) -> str:
-    """渲染一个 TOML 基本字符串（含两侧引号）。"""
-    out = []
-    for ch in value:
-        escaped = _TOML_ESCAPES.get(ch)
-        if escaped is not None:
-            out.append(escaped)
-        elif ch < "\x20" or ch == "\x7f":
-            # 其余控制符 + DEL：TOML 只认 \uXXXX 形式
-            out.append("\\u%04X" % ord(ch))
-        else:
-            out.append(ch)
-    return '"' + "".join(out) + '"'
-
-
-def _toml_key(key: str) -> str:
-    """表名/键名：裸键只在 ``[A-Za-z0-9_-]+`` 时安全，其余一律加引号。
-
-    加引号不是洁癖：server 名里的 ``.`` 会让 ``[mcp_servers.my.server]`` 被解析成
-    三层嵌套表（mcp_servers → my → server），而不是一个叫 ``"my.server"`` 的 server。
-    grok 那边于是找不到它，而且不会有任何报错 —— 正是要避免的那种静默失败。
-    """
-    return key if _TOML_BARE_KEY.match(key) else _toml_string(key)
-
-
-def _grok_mcp_toml(servers: list) -> str:
-    """grok ``.grok/config.toml`` 里的 ``[mcp_servers.<name>]`` 段。
-
-    形状取自 grok 自带的用户手册（``~/.grok/docs/user-guide/07-mcp-servers.md``，
-    由二进制解出）：
-
-        [mcp_servers.github]
-        command = "npx"
-        args = ["-y", "@modelcontextprotocol/server-github"]
-        env = { GITHUB_PERSONAL_ACCESS_TOKEN = "ghp_xxx" }
-
-    ``env`` 用**行内表**，与手册一致。这不只是抄格式：写成子表
-    ``[mcp_servers.x.env]`` 之后父表就不能再补键，顺序写错即非法。
-    env 的值直接写解析好的字面量，**不套 grok 自己的 ``${VAR}`` 插值** ——
-    那会让 grok 再查一次环境变量，而 AICU 给的已经是解析好的值。
-
-    远程条目在这里**直接抛错**。这不是可达路径：grok 的 ``supports_mcp`` 是 False，
-    基类的门禁根本走不到这个函数（见 ``mcp_workspace_files`` 的第一个 if）。留着它
-    是为了让以后有人把 ``supports_mcp`` 翻成 True 时**当场炸** —— 那时若不拦，下面几行
-    会照常执行，写出一份 ``command = ""``、``args = []`` 的配置：grok 读得进去、不报错、
-    server 永远连不上，而用户手里唯一的线索是一个空命令。远程的 TOML 形状（grok 是否
-    用 ``url``、要不要 ``transport`` 键）没有核实过，所以这里不猜着写，只拦住。
-    """
-    lines: list = []
-    for server in servers:
-        if server.transport == TRANSPORT_HTTP:
-            raise McpConfigError(
-                f"grok 的远程（Streamable HTTP）MCP 尚未接入 AICU：server '{server.name}' "
-                f"只有 url 没有 command，写进 config.toml 会变成一条空命令。"
-                f"请改用已支持远程的 CLI，或把这个 server 配成本地型"
-            )
-        lines.append(f"[mcp_servers.{_toml_key(server.name)}]")
-        lines.append(f"command = {_toml_string(server.command)}")
-        lines.append("args = [" + ", ".join(_toml_string(a) for a in server.args) + "]")
-        if server.env:
-            pairs = ", ".join(
-                f"{_toml_key(k)} = {_toml_string(v)}" for k, v in server.env.items()
-            )
-            lines.append(f"env = {{ {pairs} }}")
-        lines.append("")
-    return "\n".join(lines)
-
-
-# ---- MCP 能力探测：supports_mcp 得先问本机二进制才能回答的 CLI -------------------
-#
-# 多数 adapter 的 ``supports_mcp`` 是个常量：AICU 接线了就是 True。pi 是唯一的例外 ——
-# 它的 MCP 入口**取决于本机装没装那个扩展**，写常量会说假话：
-#
-#   pi —— pi 本体没有 MCP。0.84.2 的 ``dist/`` 里 ``mcpServers`` 命中数为 0，
-#         配置是由外部扩展 pi-mcp-adapter 读的（``pi install npm:pi-mcp-adapter``）。
-#         扩展没装时 ``.pi/mcp.json`` 是个死文件。
-#
-# 这层探测的门槛得拿捏：它探的必须是**本机的能力**，而不是「CLI 有没有某个子命令」。
-# kimi 曾经也挂在这里，探的正是后者（``kimi --help`` 里有没有 ``mcp``），而那个子命令
-# 0.43.1 与 2.0.0 都没有 —— 门禁于是恒为假，把一条本来能用的链路整个挡掉。真正挡着
-# 项目级配置的是 workspace trust，那是 AICU 自己就能写的（见 KimiAdapter）。
-#
-# 门禁判否时的对外表现与「还没接线」完全一致（守卫照常报错、前端标未接入）——
-# 这正是 ``supports_mcp`` 注释里那条原则：**宁可报错说没接线，也不要写一个不生效的
-# 文件还让用户以为配好了。**
-_MCP_CAPABILITY: dict = {}
-_MCP_CAPABILITY_LOCK = threading.Lock()
-
-
-def _probe_stdout(argv: list, timeout: int = 15) -> Optional[str]:
-    """跑一条探测命令并把 stdout+stderr 一起返回；跑不起来一律返回 None。
-
-    两条流合并是有意的：CLI 报「不认这个子命令」时走 stderr 还是 stdout 各家不同
-    （kimi 0.43.1 的 ``unknown command 'mcp'`` 就未必在 stdout），而探测要问的问题
-    只有一个 ——「这段输出里有没有那个东西」。
-
-    ``errors="replace"`` 不能省：默认的严格解码遇到非 UTF-8 字节会抛
-    ``UnicodeDecodeError``，而它**既不是 OSError 也不是 SubprocessError**，会直接穿过
-    下面的 except、再穿过 ``_mcp_capability`` 与 ``supports_mcp`` 一路冒到
-    ``/v1/config`` 上去（设置页打不开）。探测的设计是「探不出来就判否」，不该有一条
-    路径是「探不出来就炸」；换成替换解码还有个好处：CLI 只是往 help 里混了一个坏字节
-    时，剩下的输出照样能判。
-    """
-    try:
-        proc = subprocess.run(
-            argv, capture_output=True, text=True,
-            encoding="utf-8", errors="replace", timeout=timeout,
-        )
-    except (OSError, subprocess.SubprocessError):
-        # 二进制不在、没权限、卡住超时 —— 一律当作「探测不出来」，也就是判否
-        return None
-    return (proc.stdout or "") + (proc.stderr or "")
-
-
-def _mcp_capability(command: str, probe) -> bool:
-    """跑一次 ``probe`` 并按**解析后的二进制路径**缓存结果。
-
-    键取路径而不是命令名：同一个 CLI 完全可能装着多个版本（npm 全局一份、nvm 或
-    项目本地又一份），按名字缓存会把 A 版本上探到的结果用到 B 版本上 —— 而这两个
-    版本的 MCP 能力差异正是要区分的东西。
-
-    加锁是必需的：``mcp_enabled_clis()`` 会在 Web 请求线程里挨个读这些属性，
-    而首次访问要起子进程。
-    """
-    path = shutil.which(command) or command
-    with _MCP_CAPABILITY_LOCK:
-        if path not in _MCP_CAPABILITY:
-            _MCP_CAPABILITY[path] = probe(path)
-        return _MCP_CAPABILITY[path]
-
-
-def _probe_pi_mcp(command: str) -> bool:
-    """``pi list`` 里有没有 pi-mcp-adapter —— 有扩展才谈得上收 MCP 配置。
-
-    查的是**全局**安装（``pi list`` 不带 ``-l`` 读全局设置）。项目级安装对 AICU 没有
-    意义：每次运行的 workspace 都是新生成的，装在里面的扩展下次就没了。
-    """
-    output = _probe_stdout([command, "list"])
-    return output is not None and "pi-mcp-adapter" in output
-
-
-# ---------------------------------------------------------------------------
-# kimi 的 workspace 信任记录
-#
-# kimi 引擎加载 MCP 分两层（``loadMcpServers``）：
-#   user 层    ``$KIMI_CODE_HOME/mcp.json``    —— 无条件加载
-#   project 层 ``<cwd>/.kimi-code/mcp.json``   —— 只在 ``trust.isTrusted()`` 为真时加载
-# 而 trust 只能由交互式 TUI 的授权提示授予，``kimi -p`` 永远走不到那一步 —— 所以 AICU
-# 落一份 project 层配置却不补信任记录，等于什么都没做（这正是 2026-09-17 那次 A/B 里
-# project 臂全 0 的原因）。
-#
-# 好在这个 trust 是**纯落盘记录**：``readWorkspaceTrust`` 的判据是
-# ``docs.get("workspace-trust", trustKey(root)) !== void 0`` —— 只认 key 在不在，
-# 内容不校验、不签名、不看时间。于是 AICU 可以把这条记录直接写出来。
-#
-# 下面两个函数逐行复刻 kimi 的 ``canonicalWorkspaceRoot`` + ``encodeWorkDirKey``，
-# 改任何一处都要同步改这里，否则算出来的 key 与 kimi 查的那个对不上 —— 而那种失败是
-# **静默的**：记录写了、没人读、MCP 不加载、全程没有任何报错。
-# 黄金样本（本机真机记录，可用来校验算法是否还准）：
-#   <repo root>/final_solution → wd_final_solution_5b262f6d586a（key 里带的是目录名与路径哈希）
-# ---------------------------------------------------------------------------
-
-# 与 kimi 的 ``TRUST_SCOPE`` 常量逐字一致，是 home 下的子目录名
-_KIMI_TRUST_SCOPE = "workspace-trust"
-# ``slugifyWorkDirName`` 里的 MAX_WORKDIR_SLUG_LENGTH；截断之后还要再剥一次首尾短横线
-_KIMI_SLUG_MAX = 40
-
-
-def _kimi_workspace_root(workspace) -> str:
-    """kimi 眼里的 workspace 根 —— 对齐 Node 的 ``path.resolve`` + ``workspaceRootKey``。
-
-    **必须用 ``realpath`` 而不是 ``abspath``**：key 的输入是子进程的 ``process.cwd()``，
-    而 ``getcwd()`` 返回的是**物理路径**（软链已被化解），Node 的 ``path.resolve`` 又不会
-    再解析一次 —— 所以含软链的 workspace 上两者算出的 key 不同。macOS 的
-    ``/tmp → /private/tmp`` 就是现成例子。
-
-    2026-09-18 三臂对照实测（唯一变量 = 记录怎么写）：不写记录全 0、abspath 写的全 0、
-    realpath 写的 拉起=1 握手=1 tools/list=1 真调用=1。**这不是推理出来的，是测出来的。**
-    """
-    return os.path.realpath(str(workspace)).replace("\\", "/").rstrip("/")
-
-
-def _kimi_trust_key(workspace) -> str:
-    """``wd_<目录名小写化≤40>_<sha256(规范化路径)[:12]>``，与 kimi 的 ``encodeWorkDirKey`` 同形。"""
-    root = _kimi_workspace_root(workspace)
-    name = root.split("/")[-1] or root
-    slug = re.sub(r"[^a-z0-9._-]+", "-", name.lower()).strip("-")[:_KIMI_SLUG_MAX].strip("-")
-    digest = hashlib.sha256(root.encode("utf-8")).hexdigest()[:12]
-    return f"wd_{slug or 'workspace'}_{digest}"
-
-
-def _write_kimi_trust(workspace) -> Optional[Path]:
-    """写一条 workspace 信任记录并返回路径；**已经存在则返回 None**。
-
-    返回 None 那一条是有意的：记录已经在那儿，说明用户自己在 TUI 里授过信、或者上一次
-    AICU 运行留下的 —— 两种情况都不该由本次运行删掉。调用方按「返回了才删」处理
-    （见 ``CliAdapter.mcp_workspace_files`` 的返回值契约）。
-
-    home 按 ``resolveKimiHome`` 的同序取：``KIMI_CODE_HOME`` 优先，否则 ``~/.kimi-code``。
-    跟着这个变量走是必须的 —— kimi 从同一个 home 读 mcp.json 与信任记录，写岔了等于没写。
-    """
-    home = os.environ.get("KIMI_CODE_HOME") or str(Path.home() / ".kimi-code")
-    record = Path(home).joinpath(_KIMI_TRUST_SCOPE, _kimi_trust_key(workspace))
-    if record.exists():
-        return None
-    try:
-        record.parent.mkdir(parents=True, exist_ok=True)
-        # 紧凑 JSON、无尾换行、trustedAt 毫秒 int —— 与 kimi 自己写的那条逐字同形
-        record.write_text(
-            json.dumps({"root": _kimi_workspace_root(workspace),
-                        "trustedAt": int(time.time() * 1000)},
-                       separators=(",", ":")),
-            encoding="utf-8")
-    except OSError:
-        # 写不进去（home 只读 / 权限不足）不该让整次运行失败，退化成「MCP 不生效」，
-        # 与改动前一致。不吞的话，一个可选的增强会变成硬故障。
-        return None
-    return record
-
-
-def _write_pi_trust(workspace) -> Optional[Path]:
-    """写一条 pi 的 workspace 信任记录并返回路径；**已经是 true 则返回 None**。
-
-    为什么需要它 —— 源码级证据在 ``dist/core/project-trust.js`` 的 resolveProjectTrusted：
-
-        if (options.trustOverride !== undefined) return options.trustOverride;
-        if (!hasTrustRequiringProjectResources(cwd)) return true;
-        const decision = trustStore.get(cwd);      // 查 trust.json 里最近的一条
-        if (decision !== null) return decision;
-        switch (options.defaultProjectTrust ?? "ask") { ... }
-        if (!options.projectTrustContext.hasUI) return false;   // ← 无头模式走到这里
-
-    而 ``hasTrustRequiringProjectResources``（同上目录的 trust-manager.js）看的是
-    ``<cwd>/.pi/<entry>``，entry 来自 ``TRUST_REQUIRING_PROJECT_CONFIG_RESOURCES`` ——
-    里面**明写着 "skills"**。也就是说：项目里一有 ``.pi/skills/``，这个项目就变成
-    「需要授信」；AICU 跑的 ``pi -p`` 没有 UI，于是 ``hasUI`` 为假、直接返回 false，
-    **项目技能一个都不加载**。
-
-    实测与此吻合（2026-09-20，同一份 ``.pi/skills/`` 软链，只差这条记录）：
-      没有记录 → A 组 8 轮全空，连内置清单都没列出来（正是「整个项目层被跳过」的样子）
-      有记录   → A 组答出金丝雀，B 组没有
-
-    ``defaultProjectTrust`` 那个设置项能把默认值改成 always，但它是**用户级**的、
-    且会作用于用户的所有项目 —— 为了跑通 AICU 去改用户的安全默认值，不是我们该做的事。
-    按项目写一条精确的记录才是等价的、更窄的动作。
-
-    顺带解释了「为什么这个问题一直没被发现」：受信清单里**没有 mcp.json**，所以 pi 的
-    MCP 一路都正常，只有 skill 撞上这道门禁 —— 而它撞上之后的症状是「目录建了、
-    ``ls`` 看着对、永远不生效」。
-
-    信任库是 ``<agent dir>/trust.json``，形状 ``{"<canonical 绝对路径>": true}``；
-    判定时从 cwd 一路往上找最近的一条（``findNearestTrustEntry``）。
-
-    agent dir 按 ``getAgentDir`` 的同序取：``PI_CODING_AGENT_DIR`` 优先，否则
-    ``~/.pi/agent``。跟着这个变量走是必须的 —— pi 从同一个目录读 settings 与信任记录。
-
-    与 ``_write_kimi_trust`` 的两处差别，都是有意的：
-      - **不删**。kimi 那条跟着一次性 MCP 配置被删掉；skill 是长期留存的，删了下次
-        运行还得再写一遍，而它必须在 CLI 启动前就在。代价是 ``trust.json`` 会随运行
-        次数攒下条目 —— 每条形如一行 ``"<workspace>": true``，且指向的是 AICU 自己的
-        workspace，不是用户的项目。
-      - **不认识的文件不动**。``trust.json`` 是 pi 自己的文件（用户可能手工编辑过、
-        也可能来自更新的 pi 版本）。读不出 dict 就整体放弃，绝不覆盖 —— 它是用户的
-        数据，我们只是往里加一行。
-    """
-    agent_dir = os.environ.get("PI_CODING_AGENT_DIR") or str(Path.home() / ".pi" / "agent")
-    trust_path = Path(agent_dir) / "trust.json"
-    # pi 的 canonicalizePath 就是 realpathSync：解软链再比。AICU 给的 workspace 本来
-    # 就是 resolve 过的，这里再 resolve 一次是为了让「探针直接传原串」也成立。
-    key = os.path.realpath(str(workspace))
-    try:
-        data = {}
-        if trust_path.exists():
-            data = json.loads(trust_path.read_text(encoding="utf-8") or "{}")
-            if not isinstance(data, dict):
-                return None
-        if data.get(key) is True:
-            return None
-        data[key] = True
-        trust_path.parent.mkdir(parents=True, exist_ok=True)
-        # 缩进 2 + 尾换行 —— 与 pi 自己 writeTrustFile 的写法同形（它还会按键排序，
-        # 这里不排：键的先后 pi 不关心，而排序会把用户的原有顺序也一并改掉）
-        trust_path.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n",
-                              encoding="utf-8")
-    except (OSError, ValueError):
-        # 与 _write_kimi_trust 同一条纪律：写不进去不该让整次运行失败，退化成
-        # 「skill 不生效」（用户会收到 AICU 的告警），而不是变成一个硬故障。
-        return None
-    return trust_path
-
-
-def _mcp_servers_settings_json(servers: list) -> str:
-    """qwen 项目级 ``.qwen/settings.json`` 里的 ``mcpServers`` 段。
-
-    与 ``_cc_mcp_json`` 只差一个 ``trust``：本地形状同样是 ``command`` 字符串 +
-    ``args`` 数组（**不是** opencode 那种数组合一形式），但必须带 ``trust: true``。
-
-    ``trust`` 不是可选项。qwen 把项目级 server 默认置为 "Pending approval" 状态
-    （``qwen mcp list`` 实测），而 AICU 跑的是无头模式 —— 没有人在旁边点批准，
-    不写 trust 等于下发了一个永远批不下来的工具。``trust`` 的语义是「在受信任的
-    工作区里跳过该 server 的工具调用确认」，与 ``--yolo`` 是两回事。
-
-    形状按 qwen 自己 ``mcp add -s project`` 写出来的文件对齐（已实测比对）。
-
-    远程条目用 **``httpUrl``**，不是 ``url`` —— qwen 没有 type 字段，传输**由键名决定**：
-    ``url`` 表示 SSE（已被 Streamable HTTP 取代的旧传输），``httpUrl`` 才是 Streamable
-    HTTP。写成 ``url`` 不会报错，只会静默连到一条我们并不支持的传输上，然后以一句与
-    传输无关的超时告终。``trust`` 在远程条目上同样要写（批准门禁与传输无关）。
-    """
-    entries: dict = {}
-    for server in servers:
-        if server.transport == TRANSPORT_HTTP:
-            entries[server.name] = {**_remote_fields(server, "httpUrl"), "trust": True}
-            continue
-        entry: dict = {
-            "command": server.command,
-            "args": list(server.args),
-            "trust": True,
-        }
-        if server.env:
-            entry["env"] = dict(server.env)
-        entries[server.name] = entry
-    return json.dumps({"mcpServers": entries}, ensure_ascii=False, indent=2) + "\n"
 
 
 class ClaudeCodeAdapter(CliAdapter):
@@ -2013,10 +860,6 @@ class CodexAdapter(CliAdapter):
         # resume 是 exec 的子命令（codex exec resume <id>），非 --resume flag
         return ["resume", session_id]
 
-    def max_turns_flag(self, n: int) -> list:
-        # 文档未见 codex 的 --max-turns，保守不加
-        return []
-
     def prompt_args(self, prompt: str) -> tuple[list, bool]:
         # codex exec 支持位置参数与 stdin 两种传 prompt 方式；走 stdin 更稳
         # （避免长 prompt 超 ARG_MAX，与 claude/kimi 一致）。
@@ -2034,10 +877,8 @@ class CodexAdapter(CliAdapter):
         env = dict(base_env)
         if api_base_url:
             env["OPENAI_BASE_URL"] = api_base_url
-        if api_key_env:
-            api_key = os.environ.get(api_key_env)
-            if api_key:
-                env["OPENAI_API_KEY"] = api_key
+        # codex 只认 OPENAI_API_KEY，不认 api_key_env 本身的名字
+        self._inject_api_key(env, api_key_env, "OPENAI_API_KEY")
         return env
 
     def api_key_env_for_model(self, model: Optional[str]) -> Optional[str]:
@@ -2286,10 +1127,6 @@ class KimiAdapter(CliAdapter):
     def resume_flag(self, session_id: str) -> list:
         return ["--session", session_id]
 
-    def max_turns_flag(self, n: int) -> list:
-        # kimi 无 --max-turns（仅 --max-steps-per-turn，语义不同），保守不加
-        return []
-
     def prompt_args(self, prompt: str) -> tuple[list, bool]:
         # 当前 Kimi Code 要求 prompt 通过 -p/--prompt 传入。
         return (["--prompt", prompt], False)
@@ -2483,14 +1320,8 @@ class QwenAdapter(CliAdapter):
         model: Optional[str] = None,
         mcp_servers: Optional[list] = None,
     ) -> dict:
-        env = dict(base_env)
         # qwen 的 base URL 由 settings.json 的 modelProviders 决定，CLI 不通过 env 覆盖
-        key_env = api_key_env or self.api_key_env
-        if key_env:
-            api_key = os.environ.get(key_env)
-            if api_key:
-                env[self.api_key_env] = api_key
-        return env
+        return self._env_with_api_key(base_env, api_key_env)
 
     managed_slot = True
 
@@ -2681,11 +1512,7 @@ class GenericExecAdapter(CliAdapter):
         env = dict(base_env)
         if api_base_url and self.base_url_env:
             env[self.base_url_env] = api_base_url
-        key_env = api_key_env or self.api_key_env
-        if key_env:
-            api_key = os.environ.get(key_env)
-            if api_key:
-                env[self.api_key_env] = api_key
+        self._inject_api_key(env, api_key_env or self.api_key_env)
         return env
 
     def format_stream_event(self, line: str) -> str:
@@ -2816,10 +1643,6 @@ class OpenCodeAdapter(CliAdapter):
 
     def resume_flag(self, session_id: str) -> list:
         return ["--session", session_id]
-
-    def max_turns_flag(self, n: int) -> list:
-        # 文档未见 max-turns 类轮次 flag，保守不加
-        return []
 
     def prompt_args(self, prompt: str) -> tuple[list, bool]:
         # run 用位置参数传 message
@@ -2987,10 +1810,6 @@ class PiAdapter(CliAdapter):
     def resume_flag(self, session_id: str) -> list:
         return ["--session", session_id]
 
-    def max_turns_flag(self, n: int) -> list:
-        # 文档未见 max-turns 类轮次 flag，保守不加
-        return []
-
     def prompt_args(self, prompt: str) -> tuple[list, bool]:
         # 位置参数传 message
         return ([prompt], False)
@@ -3140,10 +1959,6 @@ class GeminiAdapter(CliAdapter):
     def resume_flag(self, session_id: str) -> list:
         return ["--resume", session_id]
 
-    def max_turns_flag(self, n: int) -> list:
-        # 文档未见 max-turns 类轮次 flag，保守不加
-        return []
-
     def prompt_args(self, prompt: str) -> tuple[list, bool]:
         # 无头模式经 --prompt 传 prompt
         return (["--prompt", prompt], False)
@@ -3157,14 +1972,9 @@ class GeminiAdapter(CliAdapter):
         model: Optional[str] = None,
         mcp_servers: Optional[list] = None,
     ) -> dict:
-        env = dict(base_env)
-        # Gemini API / Vertex 各有独立 endpoint，无统一 base URL env；api_base_url 未接线（直连官方）
-        key_env = api_key_env or self.api_key_env
-        if key_env:
-            api_key = os.environ.get(key_env)
-            if api_key:
-                env[self.api_key_env] = api_key
-        return env
+        # Gemini API / Vertex 各有独立 endpoint，无统一 base URL env；api_base_url
+        # 未接线（直连官方）
+        return self._env_with_api_key(base_env, api_key_env)
 
     def format_stream_event(self, line: str) -> str:
         return _format_json_event(line)
@@ -3246,9 +2056,6 @@ class CursorAdapter(CliAdapter):
 
     def resume_flag(self, session_id: str) -> list:
         return ["--resume", session_id]
-
-    def max_turns_flag(self, n: int) -> list:
-        return []
 
     def prompt_args(self, prompt: str) -> tuple[list, bool]:
         # -p 后跟位置参数 prompt
@@ -3352,7 +2159,7 @@ class GrokAdapter(GenericExecAdapter):
     握手通不通）。再往上一层 —— 模型真的去调那个工具、把回显写进产物 —— **没测过**，因为
     本机没有 ``XAI_API_KEY``（``provider_presets`` 里 xai 那条 ``available: false`` 正是
     这个原因），认证那条路根本走不到模型。而这个仓库对「MCP 已接入」的口径是
-    **端到端跑通**（见 ``tests/mcp_echo_server.py`` 的说明），不是「配置写得对」。
+    **端到端跑通**（见 ``tools/mcp_echo_server.py`` 的说明），不是「配置写得对」。
 
     所以按 kimi 同一套处理：**实现与单测都留着，先把 ``supports_mcp`` 关掉**。
     关掉之后它在 ``mcp_enabled_clis()`` 里消失、前端标「（MCP 未接入）」、角色声明到

@@ -1,6 +1,6 @@
 """runtime/mcp_client.py 单元测试：真走一遍握手。
 
-stdio 那条路对着 tests/mcp_echo_server.py 起真进程，HTTP 那条路对着
+stdio 那条路对着 tools/mcp_echo_server.py 起真进程，HTTP 那条路对着
 ``http.server.ThreadingHTTPServer`` 起真端点 —— 两边都**刻意不 mock 传输**：握手是
 时序协议，mock 掉就等于只测了「我们以为的协议」，而这正是最容易写错的地方。
 
@@ -29,9 +29,9 @@ from runtime.mcp_client import (
 )
 from runtime.mcp_manager import TRANSPORT_HTTP, McpServer
 
-# 绝对路径：相对写法 "tests/mcp_echo_server.py" 是相对 **cwd** 解析的，
+# 绝对路径：相对写法 "tools/mcp_echo_server.py" 是相对 **cwd** 解析的，
 # 从别的目录跑 pytest 就会变成「找不到文件」，看上去像 MCP 预检坏了。
-ECHO_ARGS = [str(Path(__file__).resolve().parent / "mcp_echo_server.py")]
+ECHO_ARGS = [str(Path(__file__).resolve().parents[1] / "tools" / "mcp_echo_server.py")]
 
 REMOTE_URL = "https://mcp.example.com/mcp"
 TOOLS = [{"name": "probe_echo", "description": "回显"}, {"name": "other"}]

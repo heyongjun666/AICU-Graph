@@ -7,14 +7,8 @@ import threading
 from pathlib import Path
 from typing import Callable, Optional, List
 
-from cli_adapters import (
-    detect_default,
-    get_adapter,
-    mcp_enabled_clis,
-    native_base_url,
-    provider_slot_base_url,
-    provider_route,
-)
+from cli_adapters import detect_default, get_adapter, mcp_enabled_clis
+from cli_providers import native_base_url, provider_route, provider_slot_base_url
 from runtime.credentials import resolve_sk_for_provider
 
 logger = logging.getLogger(__name__)

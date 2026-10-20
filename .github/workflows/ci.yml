@@ -30,7 +30,7 @@ jobs:
       - name: 安装依赖
         run: pip install -r requirements-dev.txt
 
-      # 收集范围由 pytest.ini 的 testpaths 钉死（tests/ + runtime/test_sse_push.py）。
+      # 收集范围由 pytest.ini 的 testpaths 钉死（tests/）。
       # 本地与 CI 收集数对不上，说明有测试被漏收或误收，先看那个文件。
       - name: 运行测试
         run: python -m pytest -q

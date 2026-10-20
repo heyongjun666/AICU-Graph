@@ -30,6 +30,16 @@ class NodeStatus(str, Enum):
     PAUSED = "Paused"
 
 
+# 终态集合：进入这三个状态后调度器不再推进该节点。调度器、状态机、恢复逻辑
+# 共用同一份定义 —— 任何一处漏写一个状态，节点都会卡在「看起来结束、但父节点
+# 永远收不到完成通知」的位置。
+TERMINAL_STATUSES = frozenset({
+    NodeStatus.COMPLETED,
+    NodeStatus.FAILED,
+    NodeStatus.STOPPED,
+})
+
+
 class EdgeType(str, Enum):
     """边类型。"""
     PARENT = "parent"

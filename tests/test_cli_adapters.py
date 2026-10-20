@@ -8,6 +8,8 @@ import types
 import pytest
 
 import cli_adapters
+import cli_providers
+import mcp_codecs
 from cli_adapters import (
     AntigravityAdapter,
     ClaudeCodeAdapter,
@@ -1215,7 +1217,7 @@ class TestGrokToml:
         ],
     )
     def test_string_escaping(self, raw, expected):
-        assert cli_adapters._toml_string(raw) == '"' + expected + '"'
+        assert mcp_codecs._toml_string(raw) == '"' + expected + '"'
 
     @pytest.mark.parametrize(
         "name,expected",
@@ -1235,7 +1237,7 @@ class TestGrokToml:
         ],
     )
     def test_table_keys_are_quoted_when_they_have_to_be(self, name, expected):
-        assert cli_adapters._toml_key(name) == expected
+        assert mcp_codecs._toml_key(name) == expected
 
     def test_dotted_server_name_does_not_become_a_nested_table(self, tmp_path):
         assert '[mcp_servers."my.server"]\n' in self._text(tmp_path, _mcp_servers("my.server"))
@@ -1477,7 +1479,7 @@ class TestKimiWorkspaceTrust:
         assert get_adapter("kimi").supports_mcp is True
 
     def test_key_matches_a_real_record_from_the_machine(self):
-        assert cli_adapters._kimi_trust_key(self._GOLDEN_ROOT) == self._GOLDEN_KEY
+        assert mcp_codecs._kimi_trust_key(self._GOLDEN_ROOT) == self._GOLDEN_KEY
 
     @pytest.mark.parametrize("name, expected_slug", [
         ("final_solution", "final_solution"),
@@ -1488,13 +1490,13 @@ class TestKimiWorkspaceTrust:
     ])
     def test_slug_rules(self, tmp_path, name, expected_slug):
         """slug 段要与 kimi 的 ``slugifyWorkDirName`` 同规则；key 形如 ``wd_<slug>_<hash12>``。"""
-        key = cli_adapters._kimi_trust_key(tmp_path / name)
+        key = mcp_codecs._kimi_trust_key(tmp_path / name)
         assert key.startswith("wd_") and len(key) - len("wd_") - 13 == len(expected_slug)
         assert key[3:-13] == expected_slug
 
     def test_a_root_that_slugs_to_nothing_falls_back(self):
         """兜底串那一路：``/`` 的目录名是空的，kimi 用 ``"workspace"`` 顶上。"""
-        assert cli_adapters._kimi_trust_key("/")[3:-13] == "workspace"
+        assert mcp_codecs._kimi_trust_key("/")[3:-13] == "workspace"
 
     def test_key_follows_the_physical_path_not_the_literal_one(self, tmp_path):
         """key 必须按**物理路径**算 —— 这条是实测出来的，不是推理。
@@ -1511,10 +1513,10 @@ class TestKimiWorkspaceTrust:
         link = tmp_path / "link"
         link.symlink_to(real, target_is_directory=True)
 
-        assert cli_adapters._kimi_trust_key(link) == cli_adapters._kimi_trust_key(real)
+        assert mcp_codecs._kimi_trust_key(link) == mcp_codecs._kimi_trust_key(real)
         physical = os.path.realpath(str(link))
         assert physical != str(link)  # 前提：这个断言成立才谈得上区分两者
-        assert cli_adapters._kimi_trust_key(link).endswith(
+        assert mcp_codecs._kimi_trust_key(link).endswith(
             hashlib.sha256(physical.encode()).hexdigest()[:12])
 
     def test_nothing_is_written_without_mcp_servers(self, tmp_path, _isolated_home):
@@ -1532,7 +1534,7 @@ class TestKimiWorkspaceTrust:
         assert project in paths
         assert json.loads(project.read_text(encoding="utf-8"))["mcpServers"].keys() == {"echo-probe"}
 
-        record = _isolated_home / "workspace-trust" / cli_adapters._kimi_trust_key(ws)
+        record = _isolated_home / "workspace-trust" / mcp_codecs._kimi_trust_key(ws)
         assert record in paths
 
     def test_the_record_is_byte_for_byte_like_kimis_own(self, tmp_path, _isolated_home):
@@ -1545,10 +1547,10 @@ class TestKimiWorkspaceTrust:
         ws = tmp_path / "ws"
         get_adapter("kimi").mcp_workspace_files(ws, _mcp_servers("echo-probe"))
 
-        raw = (_isolated_home / "workspace-trust" / cli_adapters._kimi_trust_key(ws)).read_text("utf-8")
+        raw = (_isolated_home / "workspace-trust" / mcp_codecs._kimi_trust_key(ws)).read_text("utf-8")
         data = json.loads(raw)
         assert sorted(data) == ["root", "trustedAt"]
-        assert data["root"] == cli_adapters._kimi_workspace_root(ws)
+        assert data["root"] == mcp_codecs._kimi_workspace_root(ws)
         assert isinstance(data["trustedAt"], int) and data["trustedAt"] > 10 ** 12  # 毫秒而非秒
         assert raw == json.dumps(data, separators=(",", ":"))  # 紧凑，没有缩进
         assert not raw.endswith("\n")
@@ -1560,7 +1562,7 @@ class TestKimiWorkspaceTrust:
         把别人的记录放进返回值，等于一次 AICU 运行顺手撤销了用户的授权。
         """
         ws = tmp_path / "ws"
-        record = _isolated_home / "workspace-trust" / cli_adapters._kimi_trust_key(ws)
+        record = _isolated_home / "workspace-trust" / mcp_codecs._kimi_trust_key(ws)
         record.parent.mkdir(parents=True)
         record.write_text('{"root":"x","trustedAt":1}', encoding="utf-8")
 
@@ -1603,13 +1605,13 @@ class TestProbeStdoutRobustness:
     def test_non_utf8_output_does_not_escape(self, tmp_path):
         """CLI 往输出里混了坏字节：既不崩，也不是整段丢掉。"""
         binary = self._binary(tmp_path, 'printf "\\377\\376"; echo " mcp: Manage MCP servers."\n')
-        output = cli_adapters._probe_stdout([binary])
+        output = mcp_codecs._probe_stdout([binary])
         assert output is not None, "坏字节不该让探测抛异常"
         # 替换解码之后，坏字节后面的内容照样能判 —— 否则等于因为一个字节丢掉整段 help
         assert "mcp" in output
 
     def test_a_missing_binary_still_returns_none(self, tmp_path):
-        assert cli_adapters._probe_stdout([str(tmp_path / "definitely-not-here")]) is None
+        assert mcp_codecs._probe_stdout([str(tmp_path / "definitely-not-here")]) is None
 
 
 class TestPiAdapter:
@@ -2056,20 +2058,20 @@ class TestKnownModels:
         assert by_id["grok"]["priority"] == index["grok"]
 
     def test_load_known_models_missing_file_returns_empty(self, monkeypatch, tmp_path):
-        monkeypatch.setattr(cli_adapters, "_MODELS_FILE", tmp_path / "missing.json")
-        assert cli_adapters._load_known_models() == {}
+        monkeypatch.setattr(cli_providers, "_MODELS_FILE", tmp_path / "missing.json")
+        assert cli_providers._load_known_models() == {}
 
     def test_load_known_models_invalid_json_returns_empty(self, monkeypatch, tmp_path):
         bad = tmp_path / "bad.json"
         bad.write_text("{not json", encoding="utf-8")
-        monkeypatch.setattr(cli_adapters, "_MODELS_FILE", bad)
-        assert cli_adapters._load_known_models() == {}
+        monkeypatch.setattr(cli_providers, "_MODELS_FILE", bad)
+        assert cli_providers._load_known_models() == {}
 
     def test_load_known_models_non_dict_returns_empty(self, monkeypatch, tmp_path):
         f = tmp_path / "list.json"
         f.write_text("[1, 2, 3]", encoding="utf-8")
-        monkeypatch.setattr(cli_adapters, "_MODELS_FILE", f)
-        assert cli_adapters._load_known_models() == {}
+        monkeypatch.setattr(cli_providers, "_MODELS_FILE", f)
+        assert cli_providers._load_known_models() == {}
 
 
 class TestProvision:
@@ -2552,8 +2554,8 @@ class TestManagedSlot:
                 assert adapter.id in cli_adapters._CLI_NATIVE, adapter.id
 
     def test_provider_slot_base_url_matrix(self):
-        slot = cli_adapters.provider_slot_base_url
-        aliyun_chat = cli_adapters.protocol_endpoint("aliyun", "chat")
+        slot = cli_providers.provider_slot_base_url
+        aliyun_chat = cli_providers.protocol_endpoint("aliyun", "chat")
 
         # 没有托管槽的 CLI 恒为 None —— 端点走环境变量或内联配置，盘上无痕可撤
         for cli in ("claude", "kimi", "codebuddy", "opencode"):
@@ -2561,9 +2563,9 @@ class TestManagedSlot:
 
         # 异族：按模型所属厂商写
         assert slot("codex", "deepseek-v4-flash", None) == (
-            cli_adapters.protocol_endpoint("deepseek", "responses")
+            cli_providers.protocol_endpoint("deepseek", "responses")
         )
-        assert slot("pi", "glm-5.2", None) == cli_adapters.protocol_endpoint("zhipu", "chat")
+        assert slot("pi", "glm-5.2", None) == cli_providers.protocol_endpoint("zhipu", "chat")
 
         # 同族：qwen 接管（它撤槽后没有可用的 auth type），codex 撤槽（订阅登录是主用法）
         assert slot("qwen", "qwen3-coder-plus", None) == aliyun_chat
@@ -2588,7 +2590,7 @@ class TestManagedSlot:
                           api_key_env=None, model="deepseek-v4-flash")
         # 这一次跑同族模型、且用户没选 preset（app 里 api_base_url 默认为空）
         adapter.provision(
-            api_base_url=cli_adapters.provider_slot_base_url("qwen", "qwen3-coder-plus", None),
+            api_base_url=cli_providers.provider_slot_base_url("qwen", "qwen3-coder-plus", None),
             api_key_env=None,
             model="qwen3-coder-plus",
         )
@@ -2596,7 +2598,7 @@ class TestManagedSlot:
             (tmp_path / ".qwen" / "settings.json").read_text(encoding="utf-8")
         )["modelProviders"]["aicu"][0]
         assert entry["id"] == "qwen3-coder-plus"
-        assert entry["baseUrl"] == cli_adapters.protocol_endpoint("aliyun", "chat")
+        assert entry["baseUrl"] == cli_providers.protocol_endpoint("aliyun", "chat")
         assert entry["envKey"] == "BAILIAN_API_KEY"
 
     def test_codex_stale_slot_released_for_native_model(self, monkeypatch, tmp_path):
@@ -2626,7 +2628,7 @@ class TestManagedSlot:
             encoding="utf-8",
         )
         get_adapter("codex").provision(
-            api_base_url=cli_adapters.provider_slot_base_url("codex", "gpt-5.6", None),
+            api_base_url=cli_providers.provider_slot_base_url("codex", "gpt-5.6", None),
             api_key_env=None,
             model="gpt-5.6",
         )
@@ -2664,7 +2666,7 @@ class TestManagedSlot:
 
         for cli in ("qwen", "pi"):
             get_adapter(cli).provision(
-                api_base_url=cli_adapters.provider_slot_base_url(cli, "手工填的模型名", None),
+                api_base_url=cli_providers.provider_slot_base_url(cli, "手工填的模型名", None),
                 api_key_env=None,
                 model="手工填的模型名",
             )
@@ -2693,7 +2695,7 @@ class TestManagedSlot:
         entry = json.loads(
             (tmp_path / ".qwen" / "settings.json").read_text(encoding="utf-8")
         )["modelProviders"]["aicu"][0]
-        assert entry["baseUrl"] == cli_adapters.protocol_endpoint("aliyun", "chat")
+        assert entry["baseUrl"] == cli_providers.protocol_endpoint("aliyun", "chat")
         assert entry["envKey"] == "BAILIAN_API_KEY"
 
     def test_agent_wires_rewritten_endpoint_into_slot(self, monkeypatch, tmp_path):
@@ -2893,7 +2895,7 @@ class TestKimiEnvChannel:
             agent.adapter = get_adapter("kimi")
             agent.cli_name = "kimi"
             agent.model = "glm-5.2"
-            agent.api_base_url = cli_adapters.protocol_endpoint("zhipu", "chat")
+            agent.api_base_url = cli_providers.protocol_endpoint("zhipu", "chat")
             agent.api_key_env = "KIMI_API_KEY"
             agent.mcp_servers = []
             env = agent._build_process_env()
@@ -2909,7 +2911,7 @@ class TestKimiEnvChannel:
             workspace_path=str(tmp_path), model="deepseek-v4-flash", cli_name="kimi",
             skip_permissions=False,
         )
-        assert agent.api_base_url == cli_adapters.protocol_endpoint("deepseek", "chat")
+        assert agent.api_base_url == cli_providers.protocol_endpoint("deepseek", "chat")
         assert agent.cli_model_arg is None
         cmd = agent._build_base_command()
         assert "--model" not in cmd and "-m" not in cmd
@@ -2990,7 +2992,7 @@ class TestCrossVendorEndpoint:
         ],
     )
     def test_matrix(self, cli, model, expected):
-        assert cli_adapters.native_base_url(cli, model, "") == expected
+        assert cli_providers.native_base_url(cli, model, "") == expected
 
     @pytest.mark.parametrize(
         "cli,model",
@@ -3003,13 +3005,13 @@ class TestCrossVendorEndpoint:
     )
     def test_native_family_is_untouched(self, cli, model):
         """同族直连：返回 None 表示一个字节都不改，保证今天的行为不变。"""
-        assert cli_adapters.native_base_url(cli, model, "") is None
-        assert cli_adapters.native_base_url(cli, model, "https://api.anthropic.com") is None
+        assert cli_providers.native_base_url(cli, model, "") is None
+        assert cli_providers.native_base_url(cli, model, "https://api.anthropic.com") is None
 
     @pytest.mark.parametrize("cli", ["gemini", "antigravity", "grok", "cursor"])
     def test_protocol_locked_clis_are_untouched(self, cli):
         """只说自家协议的 CLI（gemini / antigravity / grok）与未接线的 cursor 都不改道。"""
-        assert cli_adapters.native_base_url(cli, "glm-5.2", "") is None
+        assert cli_providers.native_base_url(cli, "glm-5.2", "") is None
 
     @pytest.mark.parametrize(
         "cli,model,configured",
@@ -3021,19 +3023,19 @@ class TestCrossVendorEndpoint:
         ],
     )
     def test_undecidable_cases_are_untouched(self, cli, model, configured):
-        assert cli_adapters.native_base_url(cli, model, configured) is None
+        assert cli_providers.native_base_url(cli, model, configured) is None
 
     def test_custom_endpoint_is_respected(self):
         """用户自己架了中转的，不能被劫持。"""
         assert (
-            cli_adapters.native_base_url("claude", "glm-5.2", "https://my-proxy.example.com/v1")
+            cli_providers.native_base_url("claude", "glm-5.2", "https://my-proxy.example.com/v1")
             is None
         )
 
     def test_known_preset_endpoint_is_still_rerouted(self):
         """预设端点不算自定义端点 —— claude 选 deepseek 时要把 chat 端点换成 anthropic 端点。"""
         assert (
-            cli_adapters.native_base_url(
+            cli_providers.native_base_url(
                 "claude", "deepseek-v4-pro", "https://api.deepseek.com/v1"
             )
             == "https://api.deepseek.com/anthropic"
@@ -3048,7 +3050,7 @@ class TestCrossVendorEndpoint:
         /chat/completions（实测 404），而 kimi 要的是 host + /v1 + /chat/completions。
         """
         checked = 0
-        for preset in cli_adapters.list_provider_presets():
+        for preset in cli_providers.list_provider_presets():
             if preset.get("provider_kind") == "gateway":
                 continue
             native = cli_adapters._CLI_NATIVE.get(preset.get("cli_name", ""))
@@ -3058,7 +3060,7 @@ class TestCrossVendorEndpoint:
                 # preset 里的 api_base_url 眼下还没有任何 adapter 会去读它。
                 continue
             vendor = vendor_of_model(preset["model"])
-            expected = cli_adapters.protocol_endpoint(vendor, native[1])
+            expected = cli_providers.protocol_endpoint(vendor, native[1])
             assert expected == url, f"{preset['id']}: preset 写 {url}，协议表写 {expected}"
             checked += 1
         assert checked >= 7, f"只校验到 {checked} 条预设，覆盖不足"
@@ -3087,7 +3089,7 @@ class TestCrossVendorEndpoint:
         """
         visible = {cli["id"] for cli in cli_adapters.list_clis()}
         checked = 0
-        for preset in cli_adapters.list_provider_presets():
+        for preset in cli_providers.list_provider_presets():
             if preset.get("available") is False:
                 continue
             assert preset.get("cli_name") in visible, (
@@ -3119,7 +3121,7 @@ class TestCrossVendorEndpoint:
         assert gemini_ids, "目录里一个 gemini 模型都没有？"
         for model in gemini_ids:
             assert vendor_of_model(model) == "google", f"{model} 判不出是 google"
-            assert cli_adapters.model_supported_by_cli("kimi", model), (
+            assert cli_providers.model_supported_by_cli("kimi", model), (
                 f"{model} 在 chat 协议下应当可用（google 有 /v1beta/openai 端点）"
             )
 
@@ -3145,12 +3147,12 @@ class TestCrossVendorEndpoint:
 
     def test_table_covers_exactly_every_known_vendor(self):
         """表里的厂商键必须与 vendor_of_model 的取值一一对应，不多不少。"""
-        assert set(cli_adapters.PROTOCOL_ENDPOINTS) == set(self.VENDOR_MODELS)
+        assert set(cli_providers.PROTOCOL_ENDPOINTS) == set(self.VENDOR_MODELS)
         for vendor, model in self.VENDOR_MODELS.items():
             assert vendor_of_model(model) == vendor, f"{model} 应当判为 {vendor}"
 
     def test_every_endpoint_is_a_real_https_url(self):
-        for vendor, protocols in cli_adapters.PROTOCOL_ENDPOINTS.items():
+        for vendor, protocols in cli_providers.PROTOCOL_ENDPOINTS.items():
             assert protocols, f"{vendor} 一个协议端点都没有"
             for protocol, url in protocols.items():
                 assert protocol in {"messages", "responses", "chat"}, f"{vendor}/{protocol} 协议名不认识"
@@ -3158,14 +3160,14 @@ class TestCrossVendorEndpoint:
                 assert url == url.strip() and url, f"{vendor}/{protocol} 是空串或有空白"
 
     def test_protocol_endpoint_lookup(self):
-        assert cli_adapters.protocol_endpoint("zhipu", "messages") == "https://open.bigmodel.cn/api/anthropic"
+        assert cli_providers.protocol_endpoint("zhipu", "messages") == "https://open.bigmodel.cn/api/anthropic"
         # 智谱没有实现 OpenAI Responses API：真实调用（codex + glm-5.2）稳定 404，
         # coding 与非 coding 两个基址都试过。删键即「该组合不可用」。
-        assert cli_adapters.protocol_endpoint("zhipu", "responses") is None
-        assert cli_adapters.protocol_endpoint("anthropic", "responses") is None
-        assert cli_adapters.protocol_endpoint("google", "messages") is None
-        assert cli_adapters.protocol_endpoint(None, "chat") is None
-        assert cli_adapters.protocol_endpoint("不存在的厂商", "chat") is None
+        assert cli_providers.protocol_endpoint("zhipu", "responses") is None
+        assert cli_providers.protocol_endpoint("anthropic", "responses") is None
+        assert cli_providers.protocol_endpoint("google", "messages") is None
+        assert cli_providers.protocol_endpoint(None, "chat") is None
+        assert cli_providers.protocol_endpoint("不存在的厂商", "chat") is None
 
     # ------------------------------------------------------------ 下拉过滤
 
@@ -3193,10 +3195,10 @@ class TestCrossVendorEndpoint:
 
     def test_supported_helper_keeps_undecidable_cases(self):
         """判不出的情形一律不过滤，避免误伤内部模型。"""
-        assert cli_adapters.model_supported_by_cli("claude", "auto") is True
-        assert cli_adapters.model_supported_by_cli("claude", "") is True
-        assert cli_adapters.model_supported_by_cli("opencode", "gemini-3") is True
-        assert cli_adapters.model_supported_by_cli("claude", "gemini-3") is False
+        assert cli_providers.model_supported_by_cli("claude", "auto") is True
+        assert cli_providers.model_supported_by_cli("claude", "") is True
+        assert cli_providers.model_supported_by_cli("opencode", "gemini-3") is True
+        assert cli_providers.model_supported_by_cli("claude", "gemini-3") is False
 
 
 class TestEffectiveBaseUrl:
@@ -3208,12 +3210,12 @@ class TestEffectiveBaseUrl:
 
     def test_same_family_falls_back_to_the_cli_own_endpoint(self):
         """同族直连时两个改写函数都给 None，但界面不能就此显示空白。"""
-        assert cli_adapters.effective_base_url("claude", "claude-opus-5", "") == (
+        assert cli_providers.effective_base_url("claude", "claude-opus-5", "") == (
             "https://api.anthropic.com",
             "cli_default",
         )
         # codex 同族时连托管槽都要撤掉（订阅登录态），所以它只能靠 CLINative 兜底
-        assert cli_adapters.effective_base_url("codex", "gpt-5.6", "") == (
+        assert cli_providers.effective_base_url("codex", "gpt-5.6", "") == (
             "https://api.openai.com/v1",
             "cli_default",
         )
@@ -3223,15 +3225,15 @@ class TestEffectiveBaseUrl:
 
         这正是用户提的那件事：「切换模型的时候岂不是用不了？得跟随模型」。
         """
-        claude_glm = cli_adapters.effective_base_url("claude", "glm-5.2", "")
-        claude_kimi = cli_adapters.effective_base_url("claude", "kimi-k3", "")
+        claude_glm = cli_providers.effective_base_url("claude", "glm-5.2", "")
+        claude_kimi = cli_providers.effective_base_url("claude", "kimi-k3", "")
         assert claude_glm[0] == "https://open.bigmodel.cn/api/anthropic"
         assert claude_kimi[0] == "https://api.moonshot.cn/anthropic"
         assert claude_glm[0] != claude_kimi[0]
         assert {claude_glm[1], claude_kimi[1]} == {"model_vendor"}
 
         # codex 走托管槽（config.toml 里的 provider 块），一样要跟着模型走
-        assert cli_adapters.effective_base_url("codex", "deepseek-v4-pro", "") == (
+        assert cli_providers.effective_base_url("codex", "deepseek-v4-pro", "") == (
             "https://api.deepseek.com/v1",
             "model_vendor",
         )
@@ -3240,8 +3242,8 @@ class TestEffectiveBaseUrl:
         """手填的网关地址必须原样显示 —— 包括换模型时。"""
         custom = "https://my-gateway.corp/v1"
         for cli, model in (("claude", "glm-5.2"), ("codex", "deepseek-v4-pro")):
-            assert cli_adapters.effective_base_url(cli, model, custom) == (custom, "configured")
-            assert cli_adapters.effective_base_url(cli, "gpt-5.6", custom) == (custom, "configured")
+            assert cli_providers.effective_base_url(cli, model, custom) == (custom, "configured")
+            assert cli_providers.effective_base_url(cli, "gpt-5.6", custom) == (custom, "configured")
 
     def test_preset_address_is_shown_verbatim(self):
         """选了预置厂商时显示的必须就是预置声明的那个地址，且不属于「按模型改道」。
@@ -3250,12 +3252,12 @@ class TestEffectiveBaseUrl:
         本身就是该厂商在所需协议下的端点，两种情形都不该再被改写。
         """
         checked = 0
-        for preset in cli_adapters.list_provider_presets():
+        for preset in cli_providers.list_provider_presets():
             url = preset.get("api_base_url")
             if not url:
                 # google 预置没有 api_base_url（antigravity 只认自家原生协议）
                 continue
-            assert cli_adapters.effective_base_url(
+            assert cli_providers.effective_base_url(
                 preset["cli_name"], preset["model"], url
             ) == (url, "configured"), preset["id"]
             checked += 1
@@ -3269,34 +3271,34 @@ class TestEffectiveBaseUrl:
         打到 openai，界面上的地址也卡住不变。槽里那份地址与实际请求是同一个来源，
         所以这里显示的必须是改写后的端点。
         """
-        assert cli_adapters.effective_base_url(
+        assert cli_providers.effective_base_url(
             "codex", "deepseek-v4-pro", "https://api.openai.com/v1"
         ) == ("https://api.deepseek.com/v1", "model_vendor")
         # 同族不受影响：预置自家的模型本来就该走预置声明的那个地址
-        assert cli_adapters.effective_base_url(
+        assert cli_providers.effective_base_url(
             "codex", "gpt-5.6", "https://api.openai.com/v1"
         ) == ("https://api.openai.com/v1", "configured")
         # 用户手填的地址同样不受影响
-        assert cli_adapters.effective_base_url(
+        assert cli_providers.effective_base_url(
             "codex", "deepseek-v4-pro", "https://my-gw.corp/v1"
         ) == ("https://my-gw.corp/v1", "configured")
 
     def test_undecidable_cli_stays_honest(self):
         """没纳入路由的 CLI（cursor）不猜端点：没配就老实说不知道。"""
-        assert cli_adapters.effective_base_url("cursor", "glm-5.2", "") == (None, "cli_default")
+        assert cli_providers.effective_base_url("cursor", "glm-5.2", "") == (None, "cli_default")
         # 但它自己配了地址时，显示的就是那个地址
-        assert cli_adapters.effective_base_url(
+        assert cli_providers.effective_base_url(
             "cursor", "glm-5.2", "https://my-gateway.corp/v1"
         ) == ("https://my-gateway.corp/v1", "configured")
-        assert cli_adapters.effective_base_url(None, None, None) == (None, "cli_default")
+        assert cli_providers.effective_base_url(None, None, None) == (None, "cli_default")
 
     def test_empty_string_is_treated_as_unset(self):
         """落盘时空串会被归一成 null（session_manager），这里也要当没配处理。"""
-        assert cli_adapters.effective_base_url("claude", "glm-5.2", "") == (
+        assert cli_providers.effective_base_url("claude", "glm-5.2", "") == (
             "https://open.bigmodel.cn/api/anthropic",
             "model_vendor",
         )
-        assert cli_adapters.effective_base_url("claude", "glm-5.2", None) == (
+        assert cli_providers.effective_base_url("claude", "glm-5.2", None) == (
             "https://open.bigmodel.cn/api/anthropic",
             "model_vendor",
         )
@@ -3316,32 +3318,32 @@ class TestProviderRoutes:
         ],
     )
     def test_openrouter_route_selects_cli_protocol(self, cli, wire_api, base_url):
-        route = cli_adapters.provider_route("openrouter", cli)
+        route = cli_providers.provider_route("openrouter", cli)
         assert route["wire_api"] == wire_api
         assert route["api_base_url"] == base_url
         assert route["provider_id"] == "openrouter"
 
     def test_openrouter_credentials_are_cli_specific(self):
-        assert cli_adapters.provider_route("openrouter", "claude")["auth_env"] == "ANTHROPIC_AUTH_TOKEN"
-        assert cli_adapters.provider_route("openrouter", "codex")["api_key_env"] == "OPENROUTER_API_KEY"
-        assert cli_adapters.provider_route("openrouter", "codebuddy")["api_key_env"] == "OPENROUTER_API_KEY"
+        assert cli_providers.provider_route("openrouter", "claude")["auth_env"] == "ANTHROPIC_AUTH_TOKEN"
+        assert cli_providers.provider_route("openrouter", "codex")["api_key_env"] == "OPENROUTER_API_KEY"
+        assert cli_providers.provider_route("openrouter", "codebuddy")["api_key_env"] == "OPENROUTER_API_KEY"
 
     def test_openrouter_route_keeps_full_model_and_endpoint(self):
         model = "anthropic/claude-sonnet-4.5"
-        route = cli_adapters.provider_route("openrouter", "claude")
-        assert cli_adapters.effective_base_url("claude", model, route["api_base_url"], "openrouter") == (
+        route = cli_providers.provider_route("openrouter", "claude")
+        assert cli_providers.effective_base_url("claude", model, route["api_base_url"], "openrouter") == (
             "https://openrouter.ai/api", "configured"
         )
-        assert cli_adapters.native_base_url("claude", model, route["api_base_url"], "openrouter") is None
+        assert cli_providers.native_base_url("claude", model, route["api_base_url"], "openrouter") is None
 
     def test_unknown_or_disabled_route_does_not_fallback(self, monkeypatch):
-        presets = cli_adapters.list_provider_presets()
+        presets = cli_providers.list_provider_presets()
         patched = [dict(item) for item in presets]
         openrouter = next(item for item in patched if item["id"] == "openrouter")
         openrouter["routes"] = {"codex": {"enabled": False}}
-        monkeypatch.setattr(cli_adapters, "list_provider_presets", lambda: patched)
-        assert cli_adapters.provider_route("openrouter", "codex") is None
-        assert cli_adapters.provider_route("openrouter", "gemini") is None
+        monkeypatch.setattr(cli_providers, "list_provider_presets", lambda: patched)
+        assert cli_providers.provider_route("openrouter", "codex") is None
+        assert cli_providers.provider_route("openrouter", "gemini") is None
 
 
 class TestOpenRouterAgentEnvironment:

@@ -790,7 +790,7 @@ class TestRealRepositoryRoleAndMcpContracts:
         assert set(raw["servers"]) == {"echo-probe"}
         echo = raw["servers"]["echo-probe"]
         assert echo["command"] == "python3"
-        assert echo["args"] == ["tests/mcp_echo_server.py"]
+        assert echo["args"] == ["tools/mcp_echo_server.py"]
         assert echo["required"] is True
 
 

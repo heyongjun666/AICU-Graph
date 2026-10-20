@@ -36,6 +36,7 @@ from runtime.models import (
     Node,
     NodeStatus,
     Step,
+    TERMINAL_STATUSES,
     non_whitelisted_config_keys,
     non_whitelisted_config_message,
     strip_legacy_config,
@@ -276,12 +277,9 @@ class Runtime(RuntimeGateway, SchedulerDelegate):
                         and node.manager_phase == "waiting"
                     ):
                         kids = self.graph.children(node.id)
-                        terminal = {
-                            NodeStatus.COMPLETED,
-                            NodeStatus.FAILED,
-                            NodeStatus.STOPPED,
-                        }
-                        if kids and all(k.status in terminal for k in kids):
+                        if kids and all(
+                            k.status in TERMINAL_STATUSES for k in kids
+                        ):
                             self.graph.update_node(
                                 node.id,
                                 manager_phase="review",

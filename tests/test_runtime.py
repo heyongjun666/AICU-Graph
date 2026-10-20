@@ -1558,7 +1558,7 @@ def test_log_appended_sse_payload_carries_stable_id(tmp_path):
     HTTP 轮询拉到同一条日志应命中同一 key；若 SSE 载荷缺 id，前端会退化为 content 兜底
     key，与 HTTP 的 server key 不一致，导致同一事件渲染两遍。
     """
-    from runtime.session_server import _serialize_log
+    from runtime.session_serializers import _serialize_log
 
     runtime = Runtime(
         persistence=Persistence(file_path=str(tmp_path / "state.json")),

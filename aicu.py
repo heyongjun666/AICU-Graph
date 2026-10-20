@@ -1018,10 +1018,15 @@ class AICU:
             f"- {idx} 随产出更新：文件有增删时改清单，只保留现状，不累积历史。"
         )
 
-    def _format_output_instruction(self) -> str:
-        """Return the formatted per-request output contract."""
-        result = self._output_format_instruction
+    def _render_placeholders(self, template: str) -> str:
+        """替换 prompt 模板里的产物路径占位符。
+
+        用 ``str.replace`` 而非 ``str.format``：模板里带 JSON 花括号，format 会
+        把示例当成字段名并抛 KeyError。生成指令与输出契约共用同一张替换表，
+        避免两处对 ``{deliverable_dir}`` 的取值口径各自漂移。
+        """
         replacements = {
+            # V3-2.1 shared_target：{deliverable_dir}→分区；{output_file}→""（杜绝分区下再套 output）
             "{output_file}": "" if self.shared_target else (
                 str(self.output_file) if self.output_file is not None else ""
             ),
@@ -1034,8 +1039,12 @@ class AICU:
             ),
         }
         for placeholder, value in replacements.items():
-            result = result.replace(placeholder, value)
-        return result
+            template = template.replace(placeholder, value)
+        return template
+
+    def _format_output_instruction(self) -> str:
+        """Return the formatted per-request output contract."""
+        return self._render_placeholders(self._output_format_instruction)
 
     def _build_generation_prompt(
         self,
@@ -1062,30 +1071,8 @@ class AICU:
         return self._ask_solo(question, incremental=True)
 
     def _format_instruction(self) -> str:
-        """安全格式化 generate_instruction 模板。
-
-        使用 str.replace() 代替 str.format()，避免模板中含有 JSON 示例代码
-        中的 { 和 } 时引发 KeyError。
-        """
-        result = self.generate_instruction
-        replacements = {
-            # V3-2.1 shared_target：{deliverable_dir}→分区；{output_file}→""（杜绝分区下再套 output）
-            "{output_file}": (
-                "" if self.shared_target
-                else (str(self.output_file) if self.output_file is not None else "")
-            ),
-            "{index_rules}": self._index_rules(),
-            "{main_doc}": str(self.main_doc) if self.main_doc else "",
-            "{index_file}": str(self.index_file) if self.index_file else "",
-            "{final_file}": str(self.final_file) if self.final_file else "",
-            "{deliverable_dir}": (
-                str(self.shared_target) if self.shared_target
-                else (str(self.deliverable_dir) if self.deliverable_dir else ".")
-            ),
-        }
-        for placeholder, value in replacements.items():
-            result = result.replace(placeholder, value)
-        return result
+        """安全格式化 generate_instruction 模板（替换细节见 ``_render_placeholders``）。"""
+        return self._render_placeholders(self.generate_instruction)
 
     # ========== 进程管理 ==========
 

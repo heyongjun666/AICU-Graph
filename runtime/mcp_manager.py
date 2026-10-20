@@ -89,7 +89,7 @@ def _resolve_path(value: str) -> str:
 
     不含路径分隔符的值（如 ``python3``）不是路径，原样保留交由 PATH 查找；其余走
     「``~`` 展开 / 绝对原样 / 相对按仓库根」这条与角色 yaml ``skills_dir`` 共用的规则
-    （见 ``runtime/repo_paths.py``），所以 ``tests/mcp_echo_server.py`` 这种写法
+    （见 ``runtime/repo_paths.py``），所以 ``tools/mcp_echo_server.py`` 这种写法
     clone 下来即可用，不必改配置。
 
     两条**先于**上面规则的例外，因为它们在字面上含 ``/`` 却根本不是路径：
@@ -168,7 +168,7 @@ def _load_raw(path: Optional[Path] = None) -> dict:
 
     写路径必须从这里出发，不能从 ``load_registry`` 的返回值重建。后者已经把
     ``command`` / ``args`` 解析成绝对路径（``_resolve_path``），照它写回去，
-    注册表里 ``tests/mcp_echo_server.py`` 这种相对写法就会变成写死在本机的绝对路径 ——
+    注册表里 ``tools/mcp_echo_server.py`` 这种相对写法就会变成写死在本机的绝对路径 ——
     功能照常，换台机器才炸，是那种不会有人立刻发现的坏法。``_comment`` 同理，只能靠
     原样读回来才留得住。
     """
@@ -468,7 +468,7 @@ def launch_problems(spec: Any) -> list[dict]:
 
     返回 ``[{"kind": ..., "detail": ...}]``，空列表表示没发现问题。远程条目不查。
     ``-`` 开头的参数是选项而非路径，不检查；绝对路径参数可能是尚未创建的数据目录，
-    同样不检查，只检查按仓库根解析的相对路径（例如自带的 ``tests/mcp_echo_server.py``）。
+    同样不检查，只检查按仓库根解析的相对路径（例如自带的 ``tools/mcp_echo_server.py``）。
     """
     if not isinstance(spec, dict) or transport_of(spec) != TRANSPORT_STDIO:
         return []

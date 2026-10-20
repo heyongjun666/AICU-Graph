@@ -1922,7 +1922,7 @@ def test_deleting_a_pool_leaves_bound_sessions_untouched(session_manager, tmp_pa
 # =============================================================================
 
 #: 仓库自带的探针 server（注册表里的 echo-probe）：真起一次子进程就能验「测试连接」。
-ECHO_SPEC = {"name": "echo-probe", "command": "python3", "args": ["tests/mcp_echo_server.py"]}
+ECHO_SPEC = {"name": "echo-probe", "command": "python3", "args": ["tools/mcp_echo_server.py"]}
 
 
 def _mcp_app(session_manager, tmp_path: Path, servers: dict | None = None, roles=()):
@@ -2091,7 +2091,7 @@ class TestMcpRegistryEndpoints:
             assert client.post("/v1/mcp/servers", json=ECHO_SPEC).status_code == 201
 
         text = registry.read_text(encoding="utf-8")
-        assert "tests/mcp_echo_server.py" in text
+        assert "tools/mcp_echo_server.py" in text
         assert str(REPO_ROOT) not in text, "相对路径被写成了本机绝对路径"
         assert json.loads(text)["_comment"] == ["keep me"]
 
@@ -2429,7 +2429,7 @@ def _seed_exportable_pool(client, root: Path, name="博客开发"):
     (root / "skills" / "s1").mkdir(parents=True, exist_ok=True)
     (root / "skills" / "s1" / "SKILL.md").write_text("---\nname: s1\n---\nhi\n", encoding="utf-8")
     (root / "mcp_servers.json").write_text(
-        json.dumps({"servers": {"echo-probe": {"command": "python3", "args": ["tests/mcp_echo_server.py"],
+        json.dumps({"servers": {"echo-probe": {"command": "python3", "args": ["tools/mcp_echo_server.py"],
                                                "env": {"API_TOKEN": "sekrit-value"}}}}),
         encoding="utf-8",
     )

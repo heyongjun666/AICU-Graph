@@ -21,7 +21,7 @@ from runtime.roles_manager import RolesManager
 from runtime.skills_manager import SkillsManager
 
 REPO = Path(__file__).resolve().parent.parent
-ECHO = {"command": "python3", "args": ["tests/mcp_echo_server.py"], "required": True}
+ECHO = {"command": "python3", "args": ["tools/mcp_echo_server.py"], "required": True}
 
 
 def make_env(root: Path, *, worker_default_skills: str | None = None):
@@ -205,7 +205,7 @@ def test_dry_run_writes_nothing(tmp_path):
     plan = dst.bundle.import_bundle(data, dry_run=True)
     assert plan["dry_run"] is True
     assert [i["status"] for i in plan["roles"]] == ["new", "new"]
-    assert plan["mcp"][0]["command"] == "python3" and plan["mcp"][0]["args"] == ["tests/mcp_echo_server.py"]
+    assert plan["mcp"][0]["command"] == "python3" and plan["mcp"][0]["args"] == ["tools/mcp_echo_server.py"]
     assert dst.roles.list_roles() == [] and dst.pools.list_pools() == []
     assert not (dst.root / "skills/s1").exists() and mcp_servers(dst) == {}
 

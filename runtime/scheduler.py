@@ -29,7 +29,7 @@ from typing import Any, Optional, TYPE_CHECKING
 
 from executables.base import ExecutableContext, SchedulerDelegate
 from executables.registry import ExecutableRegistry
-from runtime.agent_events import _node_workspace
+from runtime.agent_events import event_queue_dirs
 from runtime.handoff import fresh_session_fields
 from runtime.concurrency import DEFAULT_MAX_CONCURRENCY, validate_max_concurrency
 
@@ -57,6 +57,7 @@ atexit.register(_shutdown_all_schedulers)
 from runtime.graph import Graph
 from runtime.models import (
     MAX_TASK_LENGTH,
+    TERMINAL_STATUSES,
     EventMessage,
     ManagerPhase,
     Node,
@@ -959,8 +960,7 @@ class Scheduler:
             return
 
         # 检查所有子节点是否均达到终端状态（COMPLETED / FAILED / STOPPED）
-        terminal_statuses = {NodeStatus.COMPLETED, NodeStatus.FAILED, NodeStatus.STOPPED}
-        all_terminal = all(s.status in terminal_statuses for s in siblings)
+        all_terminal = all(s.status in TERMINAL_STATUSES for s in siblings)
 
         if all_terminal:
             logger.info(
@@ -1283,7 +1283,7 @@ class Scheduler:
 
         返回 inbox 中的原始事件；scope 相关性由调用方统一预筛。
         """
-        inbox_dir = os.path.join(_node_workspace(node), "event_inbox")
+        inbox_dir = event_queue_dirs(node)["inbox"]
         matches = sorted(glob.glob(os.path.join(inbox_dir, "*.json")))
         out: list[tuple[str, dict, float]] = []
         for path in matches:
@@ -1509,11 +1509,10 @@ class Scheduler:
         # on_manager_children_completed 正常触发评审（不提前 review 未完成的子节点，
         # 也不 re-expand 清掉运行中的子节点）。
         children = self.graph.children(failed_node_id)
-        terminal_statuses = {NodeStatus.COMPLETED, NodeStatus.FAILED, NodeStatus.STOPPED}
         if (
             failed_node.exec_type == "manager"
             and children
-            and all(c.status in terminal_statuses for c in children)
+            and all(c.status in TERMINAL_STATUSES for c in children)
         ):
             self.reactivate(
                 failed_node_id,

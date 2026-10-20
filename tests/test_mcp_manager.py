@@ -23,7 +23,7 @@ from runtime.mcp_manager import (
     validate_server,
 )
 
-ECHO_ARGS = ["tests/mcp_echo_server.py"]
+ECHO_ARGS = ["tools/mcp_echo_server.py"]
 REMOTE_URL = "https://mcp.example.com/mcp"
 
 
@@ -43,7 +43,7 @@ class TestRegistry:
         """角色 yaml 里写相对路径、clone 下来即可用，不要求用户改成绝对路径。"""
         server = load_registry()["echo-probe"]
         assert server.args[0].startswith("/")
-        assert server.args[0].endswith("tests/mcp_echo_server.py")
+        assert server.args[0].endswith("tools/mcp_echo_server.py")
 
     def test_bare_command_left_to_path(self):
         """不含路径分隔符的值原样保留，交由 PATH 查找。"""
@@ -180,7 +180,7 @@ def _write_registry(tmp_path, servers: dict, comment: list[str] | None = None) -
 
 
 def _spec(**overrides) -> dict:
-    spec = {"command": "python3", "args": ["tests/mcp_echo_server.py"]}
+    spec = {"command": "python3", "args": ["tools/mcp_echo_server.py"]}
     spec.update(overrides)
     return spec
 
@@ -215,7 +215,7 @@ class TestValidateServer:
 
     def test_rejects_non_list_args(self):
         with pytest.raises(McpConfigError):
-            validate_server("echo-probe", _spec(args="tests/mcp_echo_server.py"))
+            validate_server("echo-probe", _spec(args="tools/mcp_echo_server.py"))
 
     def test_rejects_non_object_env(self):
         with pytest.raises(McpConfigError):
@@ -326,14 +326,14 @@ class TestSaveServer:
         """写回去的必须是**原始写法**，不能是解析后的绝对路径。
 
         load_registry 会把 command/args 解析成绝对路径。若写路径图省事拿它的返回值重建，
-        `tests/mcp_echo_server.py` 就会变成写死在本机的绝对路径 —— 功能照常，换台机器才炸，
+        `tools/mcp_echo_server.py` 就会变成写死在本机的绝对路径 —— 功能照常，换台机器才炸，
         是那种不会有人立刻发现的坏法。所以写路径从原始 JSON 文档出发。
         """
         path = _write_registry(tmp_path, {}, comment=COMMENT_LINES)
         save_server("echo-probe", _spec(), path)
 
         text = path.read_text(encoding="utf-8")
-        assert "tests/mcp_echo_server.py" in text
+        assert "tools/mcp_echo_server.py" in text
         assert str(REPO_ROOT) not in text, "相对路径被解析成了本机绝对路径"
         # 读侧仍然照常解析成绝对路径，功能不受影响
         assert load_registry(path)["echo-probe"].args[0].startswith(str(REPO_ROOT))
@@ -410,7 +410,7 @@ class TestListServers:
         assert item == {
             "name": "echo-probe",
             "command": "python3",
-            "args": ["tests/mcp_echo_server.py"],
+            "args": ["tools/mcp_echo_server.py"],
             "env": {},
             "description": "探针",
             "required": False,

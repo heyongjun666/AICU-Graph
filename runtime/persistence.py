@@ -11,6 +11,7 @@ import threading
 from typing import Optional
 
 from runtime.graph import Graph, GraphSnapshot
+from runtime.jsonio import atomic_write_json
 from runtime.models import Node, Edge
 
 logger = logging.getLogger(__name__)
@@ -41,10 +42,7 @@ class Persistence:
     def save(self, graph: Graph) -> None:
         """原子写盘保存 Graph 快照。
 
-        三步:
-          1. json.dump → .tmp 文件
-          2. os.fsync() 刷盘
-          3. os.rename() 覆盖正式文件
+        写盘细节见 ``runtime.jsonio.atomic_write_json``（tmp → fsync → os.replace）。
 
         通过 graph.snapshot() 获取快照（持有读锁），不丢变更。
         使用 mark_clean_if 避免 snapshot() 释放锁后并发 mutate 错误清脏。
@@ -60,13 +58,7 @@ class Persistence:
 
     def _save_snapshot(self, snapshot: GraphSnapshot) -> None:
         """将 GraphSnapshot 序列化并原子写入磁盘。"""
-        data = self._snapshot_to_dict(snapshot)
-        tmp_path = self.file_path + ".tmp"
-        with open(tmp_path, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
-            f.flush()
-            os.fsync(f.fileno())
-        os.rename(tmp_path, self.file_path)
+        atomic_write_json(self.file_path, self._snapshot_to_dict(snapshot))
 
     def _snapshot_to_dict(self, snapshot: GraphSnapshot) -> dict:
         """将 GraphSnapshot 转换为可 JSON 序列化的 dict。"""

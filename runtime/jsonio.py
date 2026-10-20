@@ -15,18 +15,20 @@ import os
 from typing import Any
 
 
-def atomic_write_json(path: str, payload: Any) -> None:
+def atomic_write_json(path: str, payload: Any, *, indent: int | None = 2) -> None:
     """把 payload 以 JSON 原子写入 path。
 
     写 tmp + flush + fsync + os.replace：半截文件会让整个文件读不出来，所以必须
-    落盘后再替换。``ensure_ascii=False`` + 两空格缩进 —— 这些都是给人看、也会进 git 的
-    配置文件，中文和 diff 可读性都要保住。
+    落盘后再替换。``ensure_ascii=False`` —— 中文可读性要保住。
+
+    ``indent`` 默认两空格，适合给人看、也会进 git 的配置文件；机器读的事件队列
+    文件传 ``None`` 保留紧凑格式。默认值必须稳定：这些文件的字节形态已被测试钉住。
 
     调用方自行负责并发（同一路径不会有两个写者）。
     """
     tmp_path = path + ".tmp"
     with open(tmp_path, "w", encoding="utf-8") as file:
-        json.dump(payload, file, ensure_ascii=False, indent=2)
+        json.dump(payload, file, ensure_ascii=False, indent=indent)
         file.flush()
         os.fsync(file.fileno())
     os.replace(tmp_path, path)

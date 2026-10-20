@@ -8,7 +8,6 @@ Manager 是 Executable 的具体实现，负责两段式生命周期：
 依赖关系：executables/base.py, runtime/models.py
 """
 
-import glob
 import json
 import logging
 import os
@@ -18,15 +17,24 @@ from datetime import datetime
 from typing import Any, Optional
 
 from executables.base import Executable, ExecutableContext
+from executables.manager_parsing import (
+    execution_plan_from_payload,
+    extract_plan_json,
+    ledger_fix_entry,
+    parse_markdown_plan,
+    parse_review_assessments,
+    read_final_output,
+    resolve_review_content,
+)
 from executables.worker import _aicu_cc_ids, _log_cc_lifecycle
+from runtime.agent_events import list_inbox
 from runtime.models import (
     ErrorObject,
     ExecutionPlan,
     LogEntry,
     LogLevel,
-    Node,
     NodeStatus,
-    Step,
+    TERMINAL_STATUSES,
 )
 from runtime.closed_loop import (
     build_closed_loop_report,
@@ -34,6 +42,7 @@ from runtime.closed_loop import (
     write_closed_loop_report,
     write_deliverable_manifest,
 )
+from runtime.text_utils import truncate
 from runtime.workspace_resolver import partition_of
 
 logger = logging.getLogger(__name__)
@@ -45,86 +54,12 @@ def _L(ctx: ExecutableContext, zh: str, en: str) -> str:
     return zh if lang == "zh" else en
 
 
-def _extract_review_json(text: str) -> Optional[dict]:
-    """从 review 文本中提取 JSON 对象（供 _parse_review_assessments 使用）。
-
-    review CC 的产出可能包含多种形态：
-    - 纯 JSON（推荐）
-    - markdown ``` 代码围栏包裹的 JSON
-    - 叙述性 markdown + 末尾嵌入的 JSON（review CC 常见输出）
-
-    提取策略依次尝试：
-    1. 围栏提取 → json.loads
-    2. 整体 json.loads
-    3. 反向扫描最后一个平衡大括号块 → json.loads
-    （反向扫描而非正向，是因为叙述部分可能包含 { } 等花括号字符，
-     而 JSON 结构通常位于文本末尾。）
-
-    Args:
-        text: review 输出文本。
-
-    Returns:
-        解析出的 JSON dict，或 None。
-    """
-    text = text.strip()
-
-    # 1. markdown fence 包裹
-    if "```" in text:
-        lines = text.split("\n")
-        json_lines = []
-        in_fence = False
-        for line in lines:
-            if line.strip().startswith("```"):
-                if in_fence:
-                    break
-                in_fence = True
-                continue
-            if in_fence:
-                json_lines.append(line)
-        if json_lines:
-            try:
-                data = json.loads("\n".join(json_lines).strip())
-                if isinstance(data, dict):
-                    return data
-            except json.JSONDecodeError:
-                pass
-
-    # 2. 整体解析
-    try:
-        data = json.loads(text)
-        if isinstance(data, dict):
-            return data
-    except json.JSONDecodeError:
-        pass
-
-    # 3. 反向扫描最后一个平衡大括号块
-    depth = 0
-    close_idx = -1
-    for i in range(len(text) - 1, -1, -1):
-        ch = text[i]
-        if ch == "}":
-            if depth == 0:
-                close_idx = i
-            depth += 1
-        elif ch == "{":
-            depth -= 1
-            if depth == 0:
-                try:
-                    data = json.loads(text[i:close_idx + 1])
-                    if isinstance(data, dict):
-                        return data
-                except json.JSONDecodeError:
-                    pass
-                break
-    return None
-
-
 class Manager(Executable):
     """Manager 执行单元 — 两段式生命周期（expand → review）。
 
     生命周期:
         run() → _expand() → WAITING（等待子节点完成）
-        → on_children_completed() → READY(review)
+        → 子节点全部终态后由 Runtime 置 READY(review)   [见 runtime/runtime.py 的等待扫描]
         → run() → _review() → COMPLETED / FAILED / 迭代
     """
 
@@ -266,14 +201,11 @@ class Manager(Executable):
                     "plan at least one step"
                 )
             children = ctx.runtime.get_children(ctx.node.id)
-            terminal = {
-                NodeStatus.COMPLETED,
-                NodeStatus.FAILED,
-                NodeStatus.STOPPED,
-            }
             next_status = (
                 NodeStatus.READY
-                if children and all(child.status in terminal for child in children)
+                if children and all(
+                    child.status in TERMINAL_STATUSES for child in children
+                )
                 else NodeStatus.WAITING
             )
             next_phase = "review" if next_status == NodeStatus.READY else "waiting"
@@ -384,10 +316,10 @@ class Manager(Executable):
         #     真实契约内容在 content/content_parsed 或 final_output_path 文件中）。
         #     同一份 content 喂给 _parse_review_assessments / _write_review_output，
         #     杜绝"各解析器各自重读、漏读即挂"的抽象泄漏。
-        review_content = self._resolve_review_content(raw_output)
+        review_content = resolve_review_content(raw_output)
 
         # 4. 解析 AICU 结构化评估结果
-        assessments, parse_status = self._parse_review_assessments(review_content, children_info)
+        assessments, parse_status = parse_review_assessments(review_content, children_info)
 
         # 4.1 格式失败（JSON 契约未满足）不是质量信号：先给一次修复性重试，
         #     重试仍失败则按 AICU 元数据降级，避免"格式失败→重建→再格式失败"
@@ -404,8 +336,8 @@ class Manager(Executable):
                 )
                 repaired_raw = None
             if repaired_raw is not None:
-                repaired_content = self._resolve_review_content(repaired_raw)
-                assessments, parse_status = self._parse_review_assessments(
+                repaired_content = resolve_review_content(repaired_raw)
+                assessments, parse_status = parse_review_assessments(
                     repaired_content, children_info
                 )
                 if parse_status == "parsed":
@@ -443,7 +375,7 @@ class Manager(Executable):
             "overall_passed": not bool(failed_assessments),
             "passed": [a["step_ref"] for a in assessments if a.get("passed", False)],
             "failed": [a["step_ref"] for a in failed_assessments],
-            "fixes": [Manager._ledger_fix_entry(a) for a in failed_assessments],
+            "fixes": [ledger_fix_entry(a) for a in failed_assessments],
         }
         ledger = list(getattr(ctx.node, "collaboration_ledger", []) or [])
         ledger.append(ledger_round)
@@ -620,97 +552,6 @@ class Manager(Executable):
         )
         return NodeStatus.FAILED
 
-    @staticmethod
-    def _ledger_fix_entry(a: dict) -> dict:
-        """从单条失败评估中提取闭环修复条目（含 B1 契约扩展字段透传）。"""
-        fix = a.get("fix") or {}
-        entry = {
-            "step_ref": a.get("step_ref", ""),
-            "role": fix.get("role", ""),
-            "task": fix.get("task", ""),
-        }
-        for key in ("file", "line", "desc", "expected_action", "check"):
-            if fix.get(key):
-                entry[key] = fix[key]
-        return entry
-
-    @staticmethod
-    def _resolve_review_content(raw_output: Any) -> Any:
-        """统一解析 review 输出的一等内容，消除"各解析器各自重读 final_output_path
-        文件、漏读即挂"的抽象泄漏。
-
-        real 模式下 aicu.ask() 返回元数据 dict（scores/final_output_path/...），真正
-        review 契约内容（overall_passed / assessments）在
-        content / content_parsed 字段或 final_output_path 指向的文件里。此处只解析
-        一次，产出同一份内容供 _parse_review_assessments / _write_review_output
-        消费（单一事实来源）。
-
-        优先级：
-        1. content_parsed（已是 dict）→ 直接返回
-        2. content（str/dict）→ str 时尝试提取 review JSON，成功返回 dict，否则返回原 str
-        3. final_output_path（文件可读）→ 读取文本 → 同样尝试提取 JSON
-        4. 原样返回（stub / 单测直传 dict 兼容）
-
-        Args:
-            raw_output: aicu.ask() 的原始返回。
-
-        Returns:
-            dict（可解析出契约）或 str（仅文本）。
-        """
-        if not isinstance(raw_output, dict):
-            return raw_output
-
-        content = raw_output.get("content_parsed")
-        if isinstance(content, dict):
-            return content
-
-        content = raw_output.get("content")
-        if isinstance(content, dict):
-            return content
-        if isinstance(content, str) and content.strip():
-            data = _extract_review_json(content)
-            return data if data is not None else content
-
-        output_path = raw_output.get("final_output_path")
-        if (
-            output_path
-            and isinstance(output_path, str)
-            and os.path.isfile(output_path)
-        ):
-            try:
-                with open(output_path, "r", encoding="utf-8") as f:
-                    text = f.read()
-            except OSError as exc:
-                logger.warning(
-                    "_resolve_review_content: failed to read review output "
-                    "file %s: %s", output_path, exc,
-                )
-            else:
-                data = _extract_review_json(text)
-                return data if data is not None else text
-
-        return raw_output
-
-    # ------------------------------------------------------------------
-    # Callback: on_children_completed
-    # ------------------------------------------------------------------
-
-    @staticmethod
-    def on_children_completed(node: Node, runtime: Any) -> None:
-        """由 Runtime 在检测到所有子节点 Completed 时回调。
-
-        1. 设置 manager_phase = "review"
-        2. 设置 status = READY（Scheduler 将在下一 tick 调度）
-
-        Args:
-            node: Manager 节点对象。
-            runtime: RuntimeGateway 实例。
-        """
-        runtime.update_node_status(
-            node.id,
-            NodeStatus.READY,
-            manager_phase="review",
-        )
 
     # ------------------------------------------------------------------
     # Internal: AICU 调用
@@ -824,74 +665,6 @@ class Manager(Executable):
     # Internal: Plan 解析
     # ------------------------------------------------------------------
 
-    @staticmethod
-    def _extract_plan_json(text: str) -> Optional[dict]:
-        """从文本中提取 plan JSON（尝试直接解析或从 execution_plan_json 字段提取）。"""
-        import json as _json
-        text = text.strip()
-        # 直接解析 JSON
-        try:
-            data = _json.loads(text)
-            if isinstance(data, dict):
-                return data
-        except _json.JSONDecodeError:
-            pass
-        # 尝试从 execution_plan_json 字段提取（文本可能包含该字段的 JSON 字符串值）
-        try:
-            data = _json.loads(text)
-            if isinstance(data, str):
-                return _json.loads(data)
-        except _json.JSONDecodeError:
-            pass
-        # 尝试用平衡大括号提取
-        start = text.find('{')
-        if start >= 0:
-            depth = 0
-            for i in range(start, len(text)):
-                if text[i] == '{':
-                    depth += 1
-                elif text[i] == '}':
-                    depth -= 1
-                if depth == 0:
-                    try:
-                        return _json.loads(text[start:i+1])
-                    except _json.JSONDecodeError:
-                        break
-        return None
-
-    @staticmethod
-    def _with_no_action_reason(plan: ExecutionPlan, payload: Any) -> ExecutionPlan:
-        """空计划时带上 LLM 给出的理由（``reason`` / ``no_action_reason``）。
-
-        「本轮不需要行动」是 Manager 自己的判断，理由只用于节点日志留痕（让用户
-        看得见为什么没派活），不参与任何判定。
-        """
-        if plan.steps or not isinstance(payload, dict):
-            return plan
-        reason = payload.get("no_action_reason") or payload.get("reason")
-        if isinstance(reason, str) and reason.strip():
-            plan.no_action_reason = reason.strip()
-        return plan
-
-    @staticmethod
-    def _execution_plan_from_payload(payload: Any) -> Optional[ExecutionPlan]:
-        """从已解析的 AICU payload 提取执行计划。"""
-        if not isinstance(payload, dict):
-            return None
-
-        if "steps" in payload and isinstance(payload["steps"], list):
-            return Manager._with_no_action_reason(
-                Manager._dict_to_execution_plan(payload["steps"]), payload
-            )
-
-        nested = payload.get("execution_plan_json")
-        if isinstance(nested, dict):
-            return Manager._execution_plan_from_payload(nested)
-        if isinstance(nested, str) and nested.strip():
-            nested_data = Manager._extract_plan_json(nested)
-            if nested_data is not None:
-                return Manager._execution_plan_from_payload(nested_data)
-        return None
 
     def _parse_plan(self, raw_output: Any) -> ExecutionPlan:
         """从 AICU 输出解析 ExecutionPlan。
@@ -910,9 +683,6 @@ class Manager(Executable):
         Raises:
             ValueError: 无法解析时抛出。
         """
-        import json as _json
-        import os as _os
-
         # 通过实例属性记录当前节点 id（由 run() 设置），供静态分支日志引用
         node_id_hint = getattr(self, "_current_node_id", "?")
 
@@ -920,39 +690,38 @@ class Manager(Executable):
             # Real AICU returns aggregate metadata. Its plan is nested in the
             # parsed content, while legacy stubs may put it at the top level.
             content_parsed = raw_output.get("content_parsed")
-            plan = self._execution_plan_from_payload(content_parsed)
+            plan = execution_plan_from_payload(content_parsed)
             if plan is not None:
                 return plan
 
             content = raw_output.get("content")
             if isinstance(content, dict):
-                plan = self._execution_plan_from_payload(content)
+                plan = execution_plan_from_payload(content)
             elif isinstance(content, str) and content.strip():
-                plan_data = self._extract_plan_json(content)
-                plan = self._execution_plan_from_payload(plan_data)
+                plan_data = extract_plan_json(content)
+                plan = execution_plan_from_payload(plan_data)
             else:
                 plan = None
             if plan is not None:
                 return plan
 
-            plan = self._execution_plan_from_payload(raw_output)
+            plan = execution_plan_from_payload(raw_output)
             if plan is not None:
                 return plan
 
             # 尝试从 final_output_path 读取文件
             output_path = raw_output.get("final_output_path")
-            if output_path and _os.path.isfile(output_path):
+            content = read_final_output(raw_output, log_tag="parse_plan")
+            if content is not None:
                 try:
-                    with open(output_path, 'r', encoding='utf-8') as f:
-                        content = f.read()
-                    plan_data = self._extract_plan_json(content)
+                    plan_data = extract_plan_json(content)
                     if not plan_data:
                         # 兜底1: CLI 偶尔会少输出一个闭合 }，导致 JSON 不合法，
                         # 逐个追加 } 试探最多补 3 个大括号 — 这是高频已知问题。
                         candidate = content
                         for _ in range(3):
                             try:
-                                inner_data = _json.loads(candidate)
+                                inner_data = json.loads(candidate)
                                 if isinstance(inner_data, dict):
                                     logger.info(
                                         "Recovered malformed plan for node '%s' "
@@ -964,11 +733,11 @@ class Manager(Executable):
                             except Exception:
                                 candidate = candidate + "}"
 
-                    plan = self._execution_plan_from_payload(plan_data)
+                    plan = execution_plan_from_payload(plan_data)
                     if plan is not None:
                         return plan
                     # Fallback: 尝试从非 JSON 文本中解析 Markdown 表格格式
-                    steps = self._parse_markdown_plan(content)
+                    steps = parse_markdown_plan(content)
                     if steps:
                         logger.info(
                             "Parsed plan from markdown table for node '%s' (%d steps)",
@@ -994,119 +763,6 @@ class Manager(Executable):
             f"Cannot parse plan from output type: {type(raw_output).__name__}"
         )
 
-    @staticmethod
-    def _dict_to_execution_plan(steps_data: list[dict]) -> ExecutionPlan:
-        """从 dict 列表构造 ExecutionPlan。"""
-        steps = []
-        for s in steps_data:
-            steps.append(Step(
-                step_id=s["step_id"],
-                exec_type=s.get("exec_type", "worker"),
-                role=s.get("role", "default"),
-                task=s.get("task", ""),
-                task_summary=s.get("task_summary", ""),
-                config=s.get("config", {}),
-                depends_on=s.get("depends_on", []),
-                reuse_step_ref=s.get("reuse_step_ref"),
-            ))
-        return ExecutionPlan(steps=steps)
-
-    # 列名别名映射（大小写不敏感）
-    _STEP_ID_KEYS = ('id', 'step', 'name', 'step_id', 'step name', 'node', 'node_id')
-    _EXEC_TYPE_KEYS = ('类型', 'type', 'exec_type', 'kind', '节点类型')
-    _ROLE_KEYS = ('角色', 'role', 'assignee', 'responsible')
-    _DEPENDS_KEYS = ('依赖', 'depends_on', 'depends', 'depends on', 'dependencies', 'prerequisite')
-    _TASK_KEYS = ('task', 'description', 'covers', 'covers requirements', 'notes', 'details', 'responsibilities')
-
-    @staticmethod
-    def _normalize_header(h: str) -> str:
-        """标准化表头名称（去空格/去星号/全小写）。"""
-        return h.strip().strip('*').strip().lower()
-
-    @staticmethod
-    def _parse_markdown_plan(text: str) -> list[Step]:
-        """从 Markdown 表格文本中解析 Step 列表（LLM 未按要求输出 JSON 时的兜底方案）。
-
-        支持的格式:
-        | Step | ID | 类型 | 角色 | 依赖 |
-        |------|----|------|------|------|
-        | 1 | **design_spec** | Manager | default | — |
-
-        也支持无 ID 列的表（通过 Step 列或行号生成 step_id）。
-        """
-        steps = []
-        lines = text.strip().split('\n')
-        in_table = False
-        headers = []
-        for line in lines:
-            line = line.strip()
-            # 检测表格行
-            if line.startswith('|') and line.endswith('|'):
-                cells = [c.strip() for c in line.split('|')[1:-1]]
-                if not in_table:
-                    # 表头行
-                    headers = cells
-                    in_table = True
-                    continue
-                # 分隔行（|---|----|）
-                if all(set(c.strip('- :')) == set() or all(ch in '- :' for ch in c) for c in cells):
-                    continue
-                # 数据行
-                if headers:
-                    row = dict(zip(headers, cells))
-                    norm_row = {Manager._normalize_header(k): v for k, v in row.items()}
-
-                    # step_id: 多别名查找，找不到用行号生成
-                    step_id = ''
-                    for key in Manager._STEP_ID_KEYS:
-                        if key in norm_row:
-                            step_id = norm_row[key].strip('*').strip('**').strip()
-                            break
-                    if not step_id:
-                        step_id = f'step_{len(steps)}'
-
-                    # exec_type
-                    exec_type_raw = 'worker'
-                    for key in Manager._EXEC_TYPE_KEYS:
-                        if key in norm_row:
-                            exec_type_raw = norm_row[key].lower()
-                            break
-                    exec_type = 'manager' if 'manager' in exec_type_raw else 'worker'
-
-                    # role
-                    role = 'default'
-                    for key in Manager._ROLE_KEYS:
-                        if key in norm_row:
-                            role = norm_row[key].strip('*').strip('**').strip()
-                            break
-
-                    # depends_on
-                    depends_raw = ''
-                    for key in Manager._DEPENDS_KEYS:
-                        if key in norm_row:
-                            depends_raw = norm_row[key]
-                            break
-                    depends = [d.strip().strip('*').strip('**').strip() for d in depends_raw.split(',') if d.strip() and d.strip() != '—']
-
-                    # task
-                    task = step_id
-                    for key in Manager._TASK_KEYS:
-                        if key in norm_row:
-                            task = norm_row[key].strip('*').strip('**').strip()
-                            break
-
-                    steps.append(Step(
-                        step_id=step_id,
-                        exec_type=exec_type,
-                        role=role or 'default',
-                        task=task,
-                        task_summary=task,
-                        config={},
-                        depends_on=depends,
-                    ))
-            elif in_table and line == '':
-                break  # 表格结束
-        return steps
 
     # ------------------------------------------------------------------
     # Internal: Prompt 构造
@@ -1268,7 +924,7 @@ class Manager(Executable):
                 f"- step_ref: `{step_ref}` | node_id: `{child.id}` | "
                 f"role: {child.role} | status: {status}"
             )
-            summary = (child.task_summary or "").strip() or self._truncate(child.task or "", 100)
+            summary = (child.task_summary or "").strip() or truncate(child.task or "", 100)
             if summary:
                 lines.append(f"  task_summary: {summary}")
         lines.append("")
@@ -1320,20 +976,13 @@ class Manager(Executable):
     def _collab_from_event_inbox(ctx: ExecutableContext):
         """Read all renderable inbox events for the running Manager fallback."""
         try:
-            ws = ctx.runtime.get_node_workspace(ctx.node.id)
-            inbox = os.path.join(ws, "event_inbox")
-            files = sorted(glob.glob(os.path.join(inbox, "*.json")))
+            # Runtime 可能按自己的布局解析工作区（测试替身尤其如此），以它的
+            # 返回值为准；节点 config 里没有 _workspace_relpath 时不能退回 cwd。
+            workspace = ctx.runtime.get_node_workspace(ctx.node.id)
         except Exception:  # noqa: BLE001
             return None
         events = []
-        for pf in files:
-            try:
-                with open(pf, "r", encoding="utf-8") as f:
-                    ev = json.load(f)
-            except Exception:  # noqa: BLE001
-                continue
-            if not isinstance(ev, dict):
-                continue
+        for ev in list_inbox(ctx.node, workspace=workspace):
             content = ev.get("objective") or ev.get("content")
             if not content:
                 continue
@@ -1447,23 +1096,15 @@ class Manager(Executable):
         lines.append("")
         return "\n".join(lines)
 
-    @staticmethod
-    def _truncate(text: str, limit: int = 140) -> str:
-        """截断文本到指定长度并加省略号."""
-        s = (text or "").strip().replace("\n", " ")
-        if len(s) <= limit:
-            return s
-        return s[:limit].rstrip() + "…"
 
     @staticmethod
     def _status_emoji(status) -> str:
         """把 NodeStatus 映射成可视化emoji便于一眼看清状态."""
-        from runtime.models import NodeStatus as NS
         mapping = {
-            NS.RUNNING: "🔄",
-            NS.WAITING: "⏸️",
-            NS.COMPLETED: "✅",
-            NS.FAILED: "❌",
+            NodeStatus.RUNNING: "🔄",
+            NodeStatus.WAITING: "⏸️",
+            NodeStatus.COMPLETED: "✅",
+            NodeStatus.FAILED: "❌",
         }
         return mapping.get(status, "?")
 
@@ -1525,7 +1166,7 @@ class Manager(Executable):
                 role_s = getattr(anc, 'role', '-') or '-'
                 step_ref = getattr(anc, 'step_ref', '-') or '(root)'
                 stt = self._status_emoji(getattr(anc, 'status', None))
-                tt = self._truncate(getattr(anc, 'task', ''), 130)
+                tt = truncate(getattr(anc, 'task', ''), 130)
                 indent = "  " * i
                 marker = ""
                 lines.append(f"{indent}[d{i}]{marker} {stt} [{etype_short.upper()}|role={role_s}|step={step_ref}]")
@@ -1573,7 +1214,7 @@ class Manager(Executable):
                 ket = (getattr(k,'exec_type','?')[:3]).upper()
                 kr = getattr(k,'role','-') or '-'
                 ksr = getattr(k,'step_ref','-') or '-'
-                kt = self._truncate(k.task,120)
+                kt = truncate(k.task,120)
 
                 line = f"- {ks} [{ket}|role={kr}|step={ksr}] status={str(k.status).lower().split('.')[-1]}"
                 line += f"\n     task摘要:{kt}"
@@ -1586,7 +1227,6 @@ class Manager(Executable):
                     if k_shared:
                         line += f"\n     📁 共享工作区: {k_shared}"
                     # 同时尝试推断workspace目录作为复用入口
-                    import os.path as osp
                     workspaces_root_marker = '/workspaces/'
                     idx = ap.find(workspaces_root_marker)
                     ws_hint = ''
@@ -1598,7 +1238,7 @@ class Manager(Executable):
                             ws_hint = (
                                 f"\n     可参考目录(workspaces/{node_uuid}/)"
                                 f": 下含 cc_output.md / best_solution_summary.txt / "
-                                f"{osp.basename(ws_full)} 等产出物"
+                                f"{os.path.basename(ws_full)} 等产出物"
                             )
                             line += ws_hint
                 elif k.status in (NodeStatus.WAITING,):
@@ -1623,7 +1263,7 @@ class Manager(Executable):
                 'sibling_role': getattr(sib,'role','-'),
                 'sibling_exec_type': getattr(sib,'exec_type','?'),
                 'artifact_path': ap,
-                'task_summary': self._truncate(sib.task,100),
+                'task_summary': truncate(sib.task,100),
                 'shared_workspace': (sib.config or {}).get('_shared_workspace'),
             }
             if not ap:
@@ -2033,158 +1673,6 @@ class Manager(Executable):
         )
         return filepath
 
-    @staticmethod
-    def _parse_review_assessments(
-        raw_output: Any,
-        children_info: list[dict],
-    ) -> tuple[list[dict], str]:
-        """解析 AICU 的结构化评估输出。
-
-        期望格式:
-        {
-          "overall_passed": false,
-          "assessments": [
-            {"step_ref": "s1", "passed": true, "reason": "..."},
-            {"step_ref": "s2", "passed": false, "reason": "...",
-             "fix": {"role": "default", "task": "fix X by doing Y"}}
-          ]
-        }
-
-        Returns:
-            (assessments, status)：
-              - status="parsed"       已成功解析出逐子节点评估（可能含失败项）。
-              - status="unparseable"  无法解析出 assessments（JSON 缺失/空/非法）。
-                此时返回全量失败清单；调用方应触发修复性重试或按 AICU 元数据降级，
-                避免"格式失败→重建→再格式失败"的无效循环（历史问题：Review AICU
-                输出成 markdown/产物回显而非 JSON 契约，导致 Manager 反复重建至
-                max_iterations 而 FAILED）。
-        """
-        # 提取 JSON（可能被 markdown fences 包裹 / 文末嵌入 / AICU result 元数据 dict）
-        if isinstance(raw_output, dict):
-            # AICU.ask() 在 real 模式返回的是 result 元数据 dict（scores/final_output_path
-            # 等，不含 assessments）。若 dict 无 assessments 但带 final_output_path 且文件
-            # 可读，先读取实际 review 产出内容再解析（与 _parse_plan 的 final_output_path
-            # 分支同模式）——否则 assessments 恒为空，永远降级为全量失败。
-            if not raw_output.get("assessments"):
-                output_path = raw_output.get("final_output_path")
-                if (
-                    output_path
-                    and isinstance(output_path, str)
-                    and os.path.isfile(output_path)
-                ):
-                    try:
-                        with open(output_path, "r", encoding="utf-8") as f:
-                            raw_output = f.read()
-                    except OSError as exc:
-                        logger.warning(
-                            "_parse_review_assessments: failed to read review output "
-                            "file %s: %s", output_path, exc,
-                        )
-            if isinstance(raw_output, dict):
-                data = raw_output
-            else:
-                data = _extract_review_json(str(raw_output))
-        elif isinstance(raw_output, str):
-            data = _extract_review_json(raw_output)
-        else:
-            data = None
-
-        if data is None:
-            logger.warning(
-                "_parse_review_assessments: failed to parse AICU output as JSON, "
-                "returning full-failure (status=unparseable)"
-            )
-            return (
-                [
-                    {
-                        "step_ref": c["step_ref"],
-                        "passed": False,
-                        "reason": "AICU output unparseable",
-                        "fix": {"role": c.get("role", "default"), "task": c.get("task", "")},
-                    }
-                    for c in children_info
-                ],
-                "unparseable",
-            )
-
-        assessments = data.get("assessments", [])
-
-        # 无逐项 assessments，但输出 dict 携带明确整体结论（legacy review_passed /
-        # passed / overall_passed）：按整体结论构造逐子节点评估。这是真实判定
-        # （review 确实给出了结论），不应误入"格式失败"降级路径。
-        if not assessments and isinstance(data, dict):
-            verdict = data.get("review_passed", data.get("passed"))
-            if verdict is None and "overall_passed" in data:
-                verdict = bool(data.get("overall_passed"))
-            if verdict is not None:
-                defects = data.get("defects") or data.get("audit_defects") or []
-                if verdict:
-                    return (
-                        [
-                            {"step_ref": c["step_ref"], "passed": True,
-                             "reason": "Overall review passed"}
-                            for c in children_info
-                        ],
-                        "parsed",
-                    )
-                reason = "; ".join(str(d) for d in defects) if defects else "Overall review failed"
-                return (
-                    [
-                        {
-                            "step_ref": c["step_ref"],
-                            "passed": False,
-                            "reason": reason,
-                            "fix": {"role": c.get("role", "default"), "task": c.get("task", "")},
-                        }
-                        for c in children_info
-                    ],
-                    "parsed",
-                )
-
-        # 若 assessments 为空或缺失且无整体结论，视为格式失败（非质量信号），
-        # 交由调用方修复重试 / 按元数据降级，而不是直接触发全量重建。
-        if not assessments:
-            logger.warning(
-                "_parse_review_assessments: empty assessments array, "
-                "returning full-failure (status=unparseable)"
-            )
-            return (
-                [
-                    {
-                        "step_ref": c["step_ref"],
-                        "passed": False,
-                        "reason": "No assessment provided",
-                        "fix": {"role": c.get("role", "default"), "task": c.get("task", "")},
-                    }
-                    for c in children_info
-                ],
-                "unparseable",
-            )
-
-        # 补全缺失的 step_ref（AICU 可能遗漏某些子节点）
-        assessed_refs = {a.get("step_ref", "") for a in assessments}
-        for c in children_info:
-            if c["step_ref"] not in assessed_refs:
-                assessments.append({
-                    "step_ref": c["step_ref"],
-                    "passed": False,
-                    "reason": "Not assessed by reviewer",
-                    "fix": {"role": c.get("role", "default"), "task": c.get("task", "")},
-                })
-
-        # 为每个 assessment 确保 fix 字段存在
-        for a in assessments:
-            if not a.get("passed", False) and "fix" not in a:
-                original = next(
-                    (c for c in children_info if c["step_ref"] == a.get("step_ref")),
-                    None,
-                )
-                a["fix"] = {
-                    "role": original.get("role", "default") if original else "default",
-                    "task": original.get("task", a.get("reason", "Fix issue")) if original else "Fix issue",
-                }
-
-        return assessments, "parsed"
 
     @staticmethod
     def _build_repair_review_prompt(original_prompt: str) -> str:

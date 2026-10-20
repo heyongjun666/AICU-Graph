@@ -35,6 +35,7 @@ from runtime.persistence import Persistence
 from runtime.runtime import Runtime
 from executables.base import ExecutableContext, RuntimeGateway
 from executables.manager import Manager
+from executables.manager_parsing import resolve_review_content
 
 
 # ============================================================================
@@ -45,7 +46,7 @@ class TestResolveReviewContent:
     def test_content_parsed_takes_priority(self):
         """content_parsed（dict）优先于 content（str）与 final_output_path。"""
         contract = {"overall_passed": True, "assessments": []}
-        resolved = Manager._resolve_review_content({
+        resolved = resolve_review_content({
             "content": "unused — content_parsed wins",
             "content_parsed": contract,
             "final_output_path": "/tmp/nope",
@@ -54,7 +55,7 @@ class TestResolveReviewContent:
 
     def test_content_json_string_returns_dict(self):
         """content 为纯 JSON 字符串 → 解析为 dict。"""
-        resolved = Manager._resolve_review_content({
+        resolved = resolve_review_content({
             "content": json.dumps({
                 "overall_passed": True,
                 "assessments": [{"step_ref": "c1", "passed": True}],
@@ -66,7 +67,7 @@ class TestResolveReviewContent:
 
     def test_content_markdown_with_embedded_json_returns_dict(self):
         """content 为叙述性 markdown + 末尾 JSON → 提取为 dict。"""
-        resolved = Manager._resolve_review_content({
+        resolved = resolve_review_content({
             "content": (
                 "## Review\nc1 通过。\n"
                 '{"overall_passed": true, "assessments": '
@@ -78,7 +79,7 @@ class TestResolveReviewContent:
 
     def test_content_plain_text_returns_str(self):
         """content 为不可解析文本 → 原样返回 str（交由降级路径处理）。"""
-        resolved = Manager._resolve_review_content({
+        resolved = resolve_review_content({
             "content": "// artifact echo\nconst x = 1;\n",
             "final_output_path": "/tmp/nope",
         })
@@ -92,7 +93,7 @@ class TestResolveReviewContent:
             "overall_passed": True,
             "assessments": [{"step_ref": "c1", "passed": True}],
         }), encoding="utf-8")
-        resolved = Manager._resolve_review_content({"final_output_path": str(fpath)})
+        resolved = resolve_review_content({"final_output_path": str(fpath)})
         assert isinstance(resolved, dict)
         assert resolved["overall_passed"] is True
         assert resolved["assessments"][0]["step_ref"] == "c1"
@@ -101,12 +102,12 @@ class TestResolveReviewContent:
         """stub/单测直传契约 dict（无 content/path）→ 原样返回。"""
         contract = {"overall_passed": True,
                     "assessments": [{"step_ref": "c1", "passed": True}]}
-        resolved = Manager._resolve_review_content(contract)
+        resolved = resolve_review_content(contract)
         assert resolved is contract
 
     def test_str_passthrough(self):
         """非 dict 输入（str）→ 原样返回。"""
-        assert Manager._resolve_review_content("raw text") == "raw text"
+        assert resolve_review_content("raw text") == "raw text"
 
 
 # ============================================================================

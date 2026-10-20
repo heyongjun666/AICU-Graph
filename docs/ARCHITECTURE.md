@@ -130,7 +130,7 @@ AICU-Graph 的核心运行服务由 `main.py` 启动，使用 `runtime/` 提供�
 ┌────────────────────────────────────────────────────────────────────────┐
 │ 展示层    FastAPI REST + SSE            React 工作台（frontend/src）     │
 │          runtime/session_server.py     GraphCanvas / NodeInspector / …   │
-│          runtime/server.py             SSEProvider (EventSource)         │
+│          runtime/sse_http.py           SSEProvider (EventSource)         │
 ├────────────────────────────────────────────────────────────────────────┤
 │ 会话层    SessionManager（多会话生命周期）                                │
 │          runtime/session_manager.py                                       │
@@ -305,7 +305,7 @@ Shared FS（共享分区）是产物单一事实源。
 | `runtime/repo_paths.py` | `REPO_ROOT` 与 `resolve_repo_relative`（`~` 展开 / 绝对原样 / 相对按仓库根）—— 角色 yaml `skills_dir` 与 MCP 注册表路径共用的唯一一份实现 |
 | `runtime/persistence.py` | `graph.json` 快照的 save/load；graph_version 单调性 |
 | `runtime/sse_manager.py` | `SSEManager` 订阅 EventBus `"*"`，`deque(maxlen=10000, ttl=1800)`，微批合并（同 type <200ms 合并），`get_events_since`（空 → snapshot 回退）、`get_snapshot_event`、`get_stats`、`format_sse` |
-| `runtime/server.py` | `create_app(runtime, sse_manager)` 单会话 app：`CONFIG_WHITELIST{model,skills,max_iterations}`、task≤5000、graph/manager/plan/stats、pause/resume/stop/clear、node CRUD + start/pause/stop/continue/task/delete/external-input、`/v1/logs`、`/v1/roles`、SSE `/v1/graph/events`（含 `/since/{seq}`，snapshot/catch-up、1s poll、15s keepalive） |
+| `runtime/sse_http.py` | SSE 传输层：`_sse_stream`（catchup / 快照兜底 / 首连三个分支）+ `_sse_generator`（1s poll、15s keepalive、断线检测）。只依赖 `SSEManager`，不持有业务状态 |
 | `runtime/session_server.py` | `create_session_app(session_manager)` 多会话 app：roles（list/schema/get/create/update）、skills（list/get/create/update）、sessions CRUD + settings（api_key_env 凭据检查）、graph（snapshot/link-candidates/pause/resume/stop/clear）、nodes（**手动建节点 create**/update/delete 级联 + control pause/**resume**/stop/continue/revise + **activity（cc_activity）**）、workspace/shared/results/artifact 浏览、edges add/delete（手动建依赖边）、**agent-events（事件日志查询）**、SSE per-session |
 
 ### 6.11 角色池导入 / 导出
@@ -357,12 +357,12 @@ Shared FS（共享分区）是产物单一事实源。
   - `_expand`：装配 expand prompt → `_call_aiCU_with_retry` → `_parse_plan` → `submit_plan`（或 `submit_revision_plan` 若 `pending_revise`）→ 置 WAITING + waiting。
   - `_review`：收集子节点（含产物内容/目录索引）→ 装配 review prompt → `_parse_review_assessments`（返回 assessments+status）→ 全通过 → COMPLETED + closed_loop；有失败且迭代未超 → `submit_fix_plan` 定向修复。
 - **关键内部方法**：
-  - `_parse_plan`：dict/str/final_output_path 三种形态解析，尾部花括号修复 + `_parse_markdown_plan` 兜底。
+  - `_parse_plan`：dict/str/final_output_path 三种形态入口；纯解析与兜底（尾部花括号修复、Markdown 表格）在 `executables/manager_parsing.py`。
   - `_build_expand_prompt`：上下文快照 + event_context_block + event inbox/publish + revise_candidates + task。
   - `_build_review_prompt`：逐子节点 pass/fail + fix JSON 契约；协作走事件（不声明目标，Router 决策）。
   - `_build_event_context_block`：主读 pending_context（桥激活写入的 event_objective/event_producer）+ fallback 读 inbox 事件（覆盖"目标先于事件 READY/RUNNING"竞态）。
   - `_build_execution_context_snapshot`：祖先链 + 兄弟节点（按状态排序）+ 可复用产物。
-  - `_resolve_review_content` / `_write_review_output` / `_parse_review_assessments`：评审输出的内容归一化、落盘、pass/fail 判定。
+  - `_write_review_output` + `manager_parsing.resolve_review_content` / `parse_review_assessments`：评审输出的落盘、内容归一化、pass/fail 判定。
   - `_build_repair_context_block` / `_build_repair_review_prompt` / `_degrade_review`：定向修复上下文注入、修复态评审 prompt、评审降级（无可用评审时兜底）。
 - **Manager 也是 Producer + Consumer**：expand/review prompt 注入事件发布/收件箱指令（`_build_event_publish_instructions`），阶段完成后 `flush_node_events`。
 
@@ -445,13 +445,13 @@ Shared FS（共享分区）是产物单一事实源。
 | 12 | 共享工作区（会话级单根 + 每节点写分区 + 防穿越） | `runtime/workspace_resolver.py` | — |
 | 14 | 角色/技能配置驱动 | `runtime/roles_manager.py` `runtime/skills_manager.py` | — |
 | 15 | 多会话 Runtime（SessionManager） | `runtime/session_manager.py` | 默认开 |
-| 16 | FastAPI REST + SSE（单/多会话两套 app） | `runtime/server.py` `runtime/session_server.py` | — |
+| 16 | FastAPI REST + SSE（多会话 app + 独立 SSE 传输层） | `runtime/session_server.py` `runtime/sse_http.py` | — |
 | 17 | React 工作台前端（图可视化 + 会话管理 + 事件流） | `frontend/src/` | — |
 | 18 | 崩溃恢复（graph.json 快照 + sessions.json + 事件确定性重投） | `runtime/persistence.py` `runtime/session_manager.py` `agent_events._redeliver_routed_locked` | — |
 | 19 | 统一真实 AICU 执行 | `aicu.py` / `claude_code_agent.py` | 由 CLI 与模型配置决定 |
 | 20 | **事件格式校验 + 拒收反馈** | `runtime/agent_events.py` `_prepare_event_raws`/`_reject_event` | 默认开 |
 | 21 | **手动建节点 + 依赖边编辑（link-candidates）** | `runtime/runtime.py` `create_manual_node`/`add_dependency`/`get_link_candidates`、`session_server.py` | — |
-| 22 | **外部输入等待/投递（external-input）** | `runtime/runtime.py` `register_external_input_wait`/`deliver_external_input`、`server.py` `POST /v1/nodes/{node_id}/external-input`（body.wait_token） | — |
+| 22 | **外部输入等待/投递（external-input）** | `runtime/runtime.py` `register_external_input_wait`/`deliver_external_input` | 仅 Runtime API，HTTP 入口随单会话 app 一起退役 |
 | 23 | **CC 活动视图（cc_activity 追踪 + 多会话 activity 端点）** | `runtime/runtime.py` `update_cc_activity/get_cc_activity`、`executables/worker.py` `_handle_cc_stream_output`、`runtime/session_server.py` `GET /v1/sessions/{session_id}/nodes/{node_id}/activity` | — |
 | 24 | **依赖按需读取（on-demand dependency reading）** | `executables/worker.py` `_build_dependency_reading_instructions` | 默认开（有依赖即生效） |
 | 25 | **CC 流式日志分流（粗粒度 log + 细粒度开关）** | `executables/worker.py` `_handle_cc_stream_output` | `AICU_NODE_LOG_STREAMING=1` 才全量写 |
@@ -470,6 +470,10 @@ Shared FS（共享分区）是产物单一事实源。
 | `main.py` | **服务入口**：置 `真实 CLI 配置=real`，注册 Manager/Worker 到 ExecutableRegistry，创建 SessionManager + `create_session_app`，uvicorn 默认起 `127.0.0.1:8080`（`HOST`/`PORT` 可改），SIGINT/SIGTERM 优雅停机 |
 | `aicu.py` | **AI 执行引擎**：单 CC 执行、角色配置加载、CC 工作区创建、single-writer 约束、结果产物管理 |
 | `claude_code_agent.py` | **AI Coding CLI 程序化封装**：多轮对话（--resume）、stdin 提示、超时 killpg、`CCExecutionError` |
+| `cli_adapters.py` | **多 CLI 适配层**：`CliAdapter` 基类与各 CLI 的探测/命令/环境/输出适配；对外再导出拆分出去的厂商与解析函数 |
+| `cli_providers.py` | 厂商路由与端点：`vendor_of_model` 侧的 `_CLI_NATIVE`、`native_base_url` / `provider_slot_base_url` / `effective_base_url`、codex/qwen/pi 的托管配置槽 `_provision_*`/`_release_*` |
+| `cli_results.py` | CLI 输出归一：`_result_events` / `_claude_style_result` / `_render_openai_content` / `_format_json_event` 等纯函数 |
+| `mcp_codecs.py` | MCP 配置序列化：claude/codex/qwen/grok/opencode 各家的配置形状、能力探测、kimi/pi 信任记录落盘 |
 | `config/` | 可编辑的数据配置：`cli_models.json`（各 CLI 的已知模型清单与协议端点）、`mcp_servers.json`（MCP server 注册表，设置页增删改查会写回这里） |
 | `docs/` | 文档：`INSTALL.md`（安装与故障排查）、`ARCHITECTURE.md`（本文）、`README_CN.md`（中文 README，英文版在根目录 `README.md`）、`THIRD_PARTY_NOTICES.md`（内置第三方 skill 的许可证声明） |
 | `conftest.py` | pytest 根级 fixture（测试 fake、临时工作区等） |
@@ -506,16 +510,19 @@ Shared FS（共享分区）是产物单一事实源。
 | `credentials.py` | 凭据存储（明文）与模型厂商映射：`CredentialStore` / `set_credential_store` / `resolve_sk_for_model` / `vendor_of_model` / `api_key_env_for_vendor` |
 | `i18n.py` | 后端面向用户消息的轻量 i18n：`t` / `localized_detail` / `LanguageMiddleware` |
 | `sse_manager.py` | SSE 事件流：环形缓冲、微批合并、`get_events_since`（空→snapshot 回退）、`get_snapshot_event` |
-| `server.py` | `create_app` 单会话 FastAPI app（CONFIG_WHITELIST、节点 CRUD、日志查询、SSE `/v1/graph/events`） |
 | `session_manager.py` | 多会话生命周期：create/list/pause/resume/stop/delete、`sessions.json` 原子持久化、`_summary` 状态推导 |
-| `session_server.py` | `create_session_app` 多会话 app（roles/skills/sessions/nodes/workspace/edges/SSE per-session） |
+| `session_server.py` | `create_session_app` 多会话 app：路由与请求模型（roles/skills/role-pools/mcp/config/sessions/nodes/workspace/edges/SSE per-session） |
+| `session_serializers.py` | 节点 / Agent 事件 / 日志的 API 展示形状（`_node_detail` / `_serialize_agent_event` / `_serialize_log`），路由与 SSE 共用 |
+| `terminal_ws.py` | 会话底部终端：PTY ↔ WebSocket 双向桥、resize、断开时杀进程组（`serve_terminal`） |
+| `text_utils.py` | 跨模块小工具：`truncate`（Router 快照与 Manager 摘要共用） |
 
 ### 10.5 executables/
 
 | 文件 | 职责 |
 |---|---|
 | `base.py` | `Executable` ABC（抽象方法 run）+ 协议（RuntimeGateway/SchedulerDelegate/ExecutableRegistry）+ `BaseContext` |
-| `manager.py` | **Manager 执行体**：expand/review 状态机、prompt 装配（事件上下文/事件 inbox/revise 候选/repair context）、plan 解析、评审输出归一化（`_resolve_review_content`/`_parse_review_assessments`）、评审降级（`_degrade_review`） |
+| `manager.py` | **Manager 执行体**：expand/review 状态机、prompt 装配（事件上下文/事件 inbox/revise 候选/repair context）、AICU 调用与重试、评审降级（`_degrade_review`） |
+| `manager_parsing.py` | Manager 的纯解析层：plan JSON / Markdown 表格 → `ExecutionPlan`、评审 JSON → assessments、`final_output_path` 读取；不读节点状态、不发事件 |
 | `handoff_prompts.py` | **新会话交接文案**：`render_checkpoint`（检查点）、`render_notes_instructions`（工作笔记写入指令） |
 | `worker.py` | **Worker 执行体**：首跑/续跑/revise-resume、产物归一、事件发布/收件箱、缓存生命周期、**依赖按需读取（`_build_dependency_reading_instructions`）**、**CC 流式输出分流（`_handle_cc_stream_output`）**、模型名校验（`_validate_model`）、依赖产物路径解析（`_resolve_dep_artifact_path`） |
 | `registry.py` | `ExecutableRegistry` 工厂（`register`/`create`） |
@@ -540,7 +547,7 @@ MCP 联调 lab 角色使用 `roles/**/_mcp_lab_*.yaml` 命名，仅供仓库内�
 
 | 体系 | 位置 | 怎么跑 | 规模 | 依赖 |
 |---|---|---|---|---|
-| **pytest 套件** | `tests/` + `runtime/test_sse_push.py` | `python3 -m pytest tests` | 2100+ | `requirements-dev.txt` |
+| **pytest 套件** | `tests/` | `python3 -m pytest tests` | 2100+ | `requirements-dev.txt` |
 | **自带测试套件** | `run_tests.py`（单文件） | `python3 run_tests.py` | 137 | `requirements.txt`（不需要 pytest） |
 | **前端测试** | `frontend/src/**/*.test.tsx` | `cd frontend && npm test -- --run` | 300+ | `npm ci` |
 
@@ -550,7 +557,7 @@ MCP 联调 lab 角色使用 `roles/**/_mcp_lab_*.yaml` 命名，仅供仓库内�
 - **`tests/` —— 覆盖面更宽、粒度更细的 pytest 套件。** 用 `conftest.py` 的 fixture 与显式 fake 顶替真实 CLI，覆盖 FastAPI app（`server` / `session_server`）、Scheduler 重试、Router 生命周期、Event Bus 投递语义、Manager/Worker 协作、共享工作区、CLI 适配器等。需要额外装 pytest 与 httpx。
 - **前端 —— vitest + Testing Library**，跑在 jsdom 里；`npx tsc --noEmit` 另做一遍全量类型检查。
 
-**`pytest.ini` 把测试发现范围钉死为 `testpaths = tests runtime`。** 不钉的话，从仓库根裸跑 `pytest` 会漫游进 `runtime_sessions/`——那是 AICU 自己的会话工作区，里面可能带着被测项目自己的 `test_*.py`，会让「本地跑过」和「CI 跑过」不是同一个集合。`norecursedirs` 另外挡住 `nodes/` `workspaces/` 等运行时数据目录。
+**`pytest.ini` 把测试发现范围钉死为 `testpaths = tests`。** 不钉的话，从仓库根裸跑 `pytest` 会漫游进 `runtime_sessions/`——那是 AICU 自己的会话工作区，里面可能带着被测项目自己的 `test_*.py`，会让「本地跑过」和「CI 跑过」不是同一个集合。`norecursedirs` 另外挡住 `nodes/` `workspaces/` 等运行时数据目录。
 
 **只跑单文件 / 单个用例：**
 
@@ -591,7 +598,7 @@ cd frontend && npx vitest run src/components/__tests__/NodeInspector.test.tsx
 | `tests/test_plan_validator.py` | 结构校验单测 |
 | `tests/test_closed_loop.py` | 闭环台账单测 |
 | `tests/test_runtime.py` `test_scheduler.py` `test_scheduler_retry.py` `test_scheduler_manager.py` `test_manager.py` `test_worker.py` `test_convergence_budget.py` `test_manager_collaboration.py` `test_rootcause_fixes.py` `test_root_revise.py` `test_routing_reactivation.py` `test_concurrency_robustness.py` | 核心运行时单测（含调度重试 `test_scheduler_retry.py`） |
-| `tests/test_session_shared.py` `test_shared_target.py` `test_shared_workspace.py` `test_workspace_resolver.py` `test_session_server.py` `test_server.py` `test_sse_manager.py` `test_registry.py` `test_executable_base.py` | 周边单测 |
+| `tests/test_session_shared.py` `test_shared_target.py` `test_shared_workspace.py` `test_workspace_resolver.py` `test_session_server.py` `test_sse_manager.py` `test_registry.py` `test_executable_base.py` | 周边单测 |
 
 ### 10.8 frontend/（Vite+React 工作台）
 
@@ -631,8 +638,8 @@ cd frontend && npx vitest run src/components/__tests__/NodeInspector.test.tsx
 
 | 想做什么 | 读这些文件 |
 |---|---|
-| 改 Manager 出计划的规则/提示词 | `executables/manager.py`（`_build_expand_prompt`、`_parse_plan`）、`roles/Manager/default.yaml` |
-| 改 Manager 评审逻辑 | `executables/manager.py`（`_review`、`_build_review_prompt`、`_parse_review_assessments`） |
+| 改 Manager 出计划的规则/提示词 | `executables/manager.py`（`_build_expand_prompt`、`_parse_plan`）、`executables/manager_parsing.py`、`roles/Manager/default.yaml` |
+| 改 Manager 评审逻辑 | `executables/manager.py`（`_review`、`_build_review_prompt`）+ `executables/manager_parsing.py`（`parse_review_assessments`） |
 | 改计划结构校验规则 | `runtime/plan_validator.py` + `runtime/planner.py`（`validate_plan`） |
 | 改单层 worker 上限 | `runtime/planner.py` 的 `MAX_DIRECT_WORKERS` |
 | 改 Revise 增量续跑逻辑 | `executables/manager.py`（`pending_revise`）+ `runtime/planner.py`（`translate_revision`） |
@@ -670,15 +677,14 @@ cd frontend && npx vitest run src/components/__tests__/NodeInspector.test.tsx
 | 改多会话生命周期 | `runtime/session_manager.py` |
 | 改崩溃恢复逻辑 | `runtime/persistence.py`、`runtime/runtime.py`、`runtime/session_manager.py`、`runtime/agent_events.py`（`_redeliver_routed_locked` / `_reconcile_statuses_locked`） |
 | 改手动建节点/删节点/依赖边编辑 | `runtime/runtime.py`（`create_manual_node`/`update_manual_node`/`delete_manual_node`/`add_dependency`/`remove_dependency`/`get_link_candidates`）+ `runtime/session_server.py` |
-| 改外部输入等待/投递 | `runtime/runtime.py`（`register_external_input_wait`/`deliver_external_input`）+ `runtime/server.py`（`POST /v1/nodes/{node_id}/external-input`，body.wait_token） |
 | 改 CC 活动视图（cc_activity） | `runtime/runtime.py`（`update_cc_activity`/`get_cc_activity`）、`runtime/models.py`（Node.cc_activity）、`executables/worker.py`（`_handle_cc_stream_output`） |
 
 ### F. Web / 前端相关
 
 | 想做什么 | 读这些文件 |
 |---|---|
-| 加 REST 端点 | `runtime/server.py`（单会话）/ `runtime/session_server.py`（多会话） |
-| 改 SSE 事件流格式/缓冲 | `runtime/sse_manager.py` |
+| 加 REST 端点 | `runtime/session_server.py`（多会话） |
+| 改 SSE 事件流格式/缓冲 | `runtime/sse_manager.py`；HTTP 流行为在 `runtime/sse_http.py` |
 | 改前端图渲染 | `frontend/src/components/GraphCanvas.tsx` `TreeNode.tsx` |
 | 加前端标签页 | `frontend/src/components/NodeInspector.tsx` + 对应新组件 |
 | 改前端状态管理 | `frontend/src/stores/*.ts` |
@@ -729,7 +735,7 @@ cd frontend && npx vitest run src/components/__tests__/NodeInspector.test.tsx
 | 想跑完整测试 / 想知道两套测试的关系 | 见 §10.7 测试体系 |
 | 事件没到达目标节点 | 看 `runtime/agent_events.py` 的 `_route_locked`/`_deliver`；检查 `runtime/router.py`（Router 是否返回目标、目标 node_id 是否正确） |
 | 节点没被重激活 | 看 `runtime/scheduler.py` 的 `_process_reactivation_events`；确认事件已投递到目标 inbox 且目标非 RUNNING；检查 C1 协作预算 |
-| Manager 评审卡住 | 看 `executables/manager.py` 的 `_review` 与 `_parse_review_assessments`；事件是否被 `flush_node_events` 兜底 |
+| Manager 评审卡住 | 看 `executables/manager.py` 的 `_review` 与 `manager_parsing.parse_review_assessments`；事件是否被 `flush_node_events` 兜底 |
 | 产物没落到共享分区 | 看 `executables/worker.py` 的 `_normalize_worker_artifact` 与 `runtime/workspace_resolver.py` 的分区解析 |
 | 想看真实事件流转 | `events.json` 全局日志 + 前端 Event Stream / `runtime/sse_manager.py` |
 | 想运行确定性测试 | `python3 run_tests.py`（核心原语，自带 runner，产出 `test_report.md`） |

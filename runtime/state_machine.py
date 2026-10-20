@@ -12,7 +12,7 @@ StateMachine.validate_transition 提供完整的状态转换规则校验（含 M
 
 from typing import Optional
 
-from runtime.models import NodeStatus
+from runtime.models import TERMINAL_STATUSES, NodeStatus
 
 
 class IllegalTransitionError(Exception):
@@ -176,7 +176,7 @@ class StateMachine:
             )
 
         # === 4. 终端状态不允许转换 ===
-        if current_status in (NodeStatus.COMPLETED, NodeStatus.FAILED, NodeStatus.STOPPED):
+        if current_status in TERMINAL_STATUSES:
             raise IllegalTransitionError(
                 from_status=current_status,
                 to_status=target_status,

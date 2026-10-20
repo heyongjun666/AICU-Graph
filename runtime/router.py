@@ -26,6 +26,7 @@ import threading
 from typing import Any, Optional
 
 from runtime.models import EventMessage, NodeStatus
+from runtime.text_utils import truncate
 
 logger = logging.getLogger(__name__)
 
@@ -327,22 +328,14 @@ class AICURouter:
                 "role": node.role,
                 "status": status,
                 "org_path": self._org_path(node),
-                "task": self._truncate(node.task or ""),
+                "task": truncate(node.task or ""),
                 # 职责索引：优先 task_summary（manager expand 时产出），缺失回退 task 截断
                 "task_summary": getattr(node, "task_summary", None)
-                or self._truncate(node.task or ""),
+                or truncate(node.task or ""),
             })
         self._snapshot_version = version
         self._cached_snapshot = out
         return out
-
-    @staticmethod
-    def _truncate(text: str, limit: int = 140) -> str:
-        """截断文本到指定长度并加省略号。"""
-        s = (text or "").strip().replace("\n", " ")
-        if len(s) <= limit:
-            return s
-        return s[:limit].rstrip() + "…"
 
     # ------------------------------------------------------------------
     # prompt 构建与目标解析
@@ -364,7 +357,7 @@ class AICURouter:
                     f"id=`{pnode.id}` · step_ref=`{pnode.step_ref or '-'}` · "
                     f"exec_type=`{pnode.exec_type}` · role=`{pnode.role}` · "
                     f"status=`{status}` · org_path=`{self._org_path(pnode)}` · "
-                    f"task=`{self._truncate(pnode.task or '')}`"
+                    f"task=`{truncate(pnode.task or '')}`"
                 )
 
         intent = getattr(event, "intent", "") or "notification"

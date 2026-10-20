@@ -24,7 +24,7 @@
       "description": "AICU 自带的 MCP 通道探针：一个回显工具，用于验证 MCP 链路是否打通。",
       "command": "python3",
       "args": [
-        "tests/mcp_echo_server.py"
+        "tools/mcp_echo_server.py"
       ],
       "required": true
     }

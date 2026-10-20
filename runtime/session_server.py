@@ -3,21 +3,15 @@
 from __future__ import annotations
 
 import asyncio
-import fcntl
-import json
 import os
 import posixpath
-import pty
-import signal
-import struct
 import subprocess
 import tempfile
-import termios
 import urllib.parse
 from pathlib import Path
 from typing import Any, Literal, Optional
 
-from fastapi import FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Query, Request, WebSocket
 from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
@@ -41,22 +35,22 @@ from runtime.mcp_manager import (
     server_names,
     save_server as save_mcp_server,
 )
-from runtime.models import LogLevel
 from runtime.repo_paths import REPO_ROOT
 from runtime.roles_manager import RolesManager
 from runtime.role_pool_bundle import BundleTooLarge, MAX_BUNDLE_BYTES, RolePoolBundle
 from runtime.role_pools_manager import RolePoolsManager
-from runtime.server import _sse_stream
+from runtime.sse_http import _sse_stream
+from runtime.session_serializers import (
+    _node_detail,
+    _serialize_agent_event,
+    _serialize_log,
+)
+from runtime.terminal_ws import serve_terminal
 from runtime.shared_io import mime_type_for
 from runtime.session_manager import SessionHandle, SessionManager
 from runtime.skills_manager import SkillsManager
-from cli_adapters import (
-    detect_default,
-    effective_base_url,
-    get_adapter,
-    list_clis,
-    list_provider_presets,
-)
+from cli_adapters import detect_default, get_adapter, list_clis
+from cli_providers import effective_base_url, list_provider_presets
 from claude_code_agent import CCExecutionError, ClaudeCodeAgent
 
 
@@ -1253,97 +1247,11 @@ def create_session_app(
     async def session_terminal(ws: WebSocket, session_id: str):
         """会话底部终端：在会话「项目目录」（shared 根）启动交互式 bash（PTY）。
 
-        默认 cwd = 会话项目目录（未配置时为 {workspace_root}/shared，见
-        Runtime.get_shared_workspace）。前端用 xterm.js 连接；上行消息 = 键盘输入
-        原始文本，`{"type":"resize",cols,rows}` 用于窗口尺寸同步；下行消息 = PTY
-        输出。WebSocket 断开时杀掉整个进程组。
+        传输细节（PTY 读写、resize、进程组清理）在 ``runtime.terminal_ws``；这里只把
+        会话项目目录解析出来。
         """
         handle = resolve(session_id)
-        cwd = handle.runtime.get_shared_workspace()
-        os.makedirs(cwd, exist_ok=True)
-
-        await ws.accept()
-
-        pid, fd = pty.fork()
-        if pid == 0:  # 子进程：切到共享工作区后 exec bash
-            try:
-                os.chdir(cwd)
-                os.environ.setdefault("TERM", "xterm-256color")
-            except OSError:
-                os._exit(127)
-            try:
-                os.execvp("bash", ["bash", "-l"])
-            except OSError:
-                os._exit(127)
-
-        loop = asyncio.get_running_loop()
-        closed = False
-
-        def cleanup() -> None:
-            nonlocal closed
-            if closed:
-                return
-            closed = True
-            # pty.fork 的子进程是会话首进程，pgid == pid；杀整组覆盖 bash 派生的子命令。
-            for sig in (signal.SIGHUP, signal.SIGKILL):
-                try:
-                    os.killpg(pid, sig)
-                except (ProcessLookupError, PermissionError):
-                    pass
-            try:
-                os.waitpid(pid, 0)
-            except ChildProcessError:
-                pass
-            try:
-                os.close(fd)
-            except OSError:
-                pass
-
-        async def pty_to_ws() -> None:
-            try:
-                while True:
-                    try:
-                        data = await loop.run_in_executor(None, os.read, fd, 65536)
-                    except OSError:  # 子进程退出 → 读 master 返回 EIO
-                        break
-                    if not data:
-                        break
-                    await ws.send_text(data.decode("utf-8", errors="replace"))
-            except (WebSocketDisconnect, RuntimeError):
-                pass
-            finally:
-                cleanup()
-
-        reader = asyncio.create_task(pty_to_ws())
-
-        try:
-            while True:
-                message = await ws.receive_text()
-                if message.startswith('{"type":"resize"'):
-                    try:
-                        payload = json.loads(message)
-                        cols = int(payload.get("cols", 0))
-                        rows = int(payload.get("rows", 0))
-                        if cols > 0 and rows > 0:
-                            fcntl.ioctl(
-                                fd,
-                                termios.TIOCSWINSZ,
-                                struct.pack("HHHH", rows, cols, 0, 0),
-                            )
-                            os.kill(pid, signal.SIGWINCH)
-                    except (ValueError, OSError):
-                        pass
-                    continue
-                try:
-                    await loop.run_in_executor(
-                        None, os.write, fd, message.encode("utf-8")
-                    )
-                except OSError:
-                    break
-        except (WebSocketDisconnect, RuntimeError):
-            pass
-        finally:
-            cleanup()
+        await serve_terminal(ws, handle.runtime.get_shared_workspace())
 
     # Keep this mount last so the explicitly declared /v1 and WebSocket routes
     # above always take precedence.  When the optional React build exists, the
@@ -1376,75 +1284,3 @@ def _merge_session_connection(
     return prepared
 
 
-def _node_label(runtime: Any, node_id: str) -> str:
-    """节点展示标签（role/exec_type + 短 id），与 _node_detail 的 label 同源。"""
-    node = runtime.get_node(node_id)
-    if node is None:
-        return f"missing {node_id[:8]}"
-    return f"{node.role or node.exec_type} {node.id[:8]}"
-
-
-def _coerce_event_content(content: Any) -> str:
-    """事件 content 规范化为字符串（Manager review 类事件 content 为 dict，前端直接渲染会白屏）。"""
-    if isinstance(content, str):
-        return content
-    try:
-        return json.dumps(content, ensure_ascii=False, default=str)
-    except (TypeError, ValueError):
-        return str(content)
-
-
-def _serialize_agent_event(runtime: Any, msg: Any) -> dict[str, Any]:
-    """Agent 事件 → 前端可读 dict（producer/目标解析为节点标签）。"""
-    targets = [
-        {"node_id": target_id, "label": _node_label(runtime, target_id)}
-        for target_id in (msg.routed_to or [])
-    ]
-    objective = getattr(msg, "objective", "") or ""
-    if not objective:
-        # 兼容旧 EventMessage（content 字段）
-        objective = getattr(msg, "content", "") or ""
-    return {
-        "event_id": msg.event_id,
-        "producer": msg.producer,
-        "producer_label": _node_label(runtime, msg.producer),
-        "objective": _coerce_event_content(objective),
-        "intent": getattr(msg, "intent", "notification"),
-        "affected_roles": list(getattr(msg, "affected_roles", None) or []),
-        "scope": getattr(msg, "scope", "related"),
-        "action": getattr(msg, "action", ""),
-        "created_at": msg.created_at,
-        "status": msg.status,
-        "routed_to": list(msg.routed_to or []),
-        "targets": targets,
-    }
-
-
-def _node_detail(runtime: Any, node_id: str) -> dict[str, Any]:
-    node = runtime.get_node(node_id)
-    data = json.loads(node.to_json())
-    data["config"] = {
-        key: value for key, value in (node.config or {}).items()
-        if not key.startswith("_")
-    }
-    data["workspace_path"] = (node.config or {}).get("_workspace_relpath")
-    data["label"] = f"{node.role or node.exec_type} {node.id[:8]}"
-    data["children"] = [item.id for item in runtime.graph.children(node_id)]
-    data["dependencies"] = [item.id for item in runtime.graph.dependencies(node_id)]
-    data["dependents"] = [item.id for item in runtime.graph.dependents(node_id)]
-    return data
-
-
-def _serialize_log(node_id: str, entry: Any) -> dict[str, Any]:
-    return {
-        "id": id(entry) & 0x7FFFFFFF,
-        "node_id": node_id,
-        "ts": str(entry.ts),
-        "timestamp": str(entry.ts),
-        "level": entry.level.value if isinstance(entry.level, LogLevel) else str(entry.level),
-        "message": entry.message,
-        "cc_id": getattr(entry, "cc_id", None),
-        "phase": getattr(entry, "phase", None),
-        "event": getattr(entry, "event", None),
-        "task": getattr(entry, "task", None),
-    }

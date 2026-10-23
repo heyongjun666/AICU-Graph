@@ -398,9 +398,14 @@ class Runtime(RuntimeGateway, SchedulerDelegate):
         # 仍做防御性简单标识符校验（防穿越），向后兼容旧 plan。
         if prepared.get("shared_workspace") is not None:
             self._validate_shared_group_id(prepared["shared_workspace"])
-        output_path = self._validate_shared_output_path(
-            prepared.get("output_path")
-        )
+        raw_output_path = prepared.get("output_path")
+        output_path = self._validate_shared_output_path(raw_output_path)
+        # 回写规范化后的分区（剥掉误写的文件名），使节点 config 里的 output_path
+        # 与 _output_path 一致，下游（children_info 渲染、失败续接的共享配置捕获）
+        # 才不会再把文件名当分区传播。仅在调用方显式给了 output_path 时回写，
+        # 避免给缺省节点凭空多出一个空 output_path 键。
+        if raw_output_path is not None:
+            prepared["output_path"] = output_path
         prepared["_output_path"] = output_path
         shared_root = self.get_shared_workspace()
         prepared["_shared_workspace"] = shared_root
@@ -463,7 +468,32 @@ class Runtime(RuntimeGateway, SchedulerDelegate):
                 f"output_path must be a relative path without '..' segments, "
                 f"got: {output_path!r}"
             )
+        # 防御：Manager 的 plan 偶尔把「交付文件名」误写进 output_path（如
+        # "context/survey.md"）。框架把 output_path 当作分区做 os.makedirs，
+        # 带文件名的分区会触发 File exists / 目录嵌套，令 Worker 卡死。
+        # 这里剥掉尾段「形似文件名」的段，使 output_path 始终是目录；
+        # 具体文件名由 Worker 自己的交付契约（output_file / 交付说明）决定。
+        segs = norm.split("/")
+        if segs and Runtime._looks_like_file_segment(segs[-1]):
+            segs = segs[:-1]
+            norm = "/".join(segs).strip("/")
         return norm
+
+    @staticmethod
+    def _looks_like_file_segment(seg: str) -> bool:
+        """尾段是否形似文件名（含扩展名），用于把误写进分区的文件名剥掉。
+
+        判据：非空、非隐藏（不以 '.' 开头）、存在一个非首位的 '.' 且其后跟
+        1~10 位字母/数字的扩展名（覆盖 .md/.json/.py/.tex/.pdf 等交付后缀）。
+        罕见误伤（如分区名 `v1.0`）仅导致多一层嵌套，不影响运行正确性。
+        """
+        if not seg or seg.startswith("."):
+            return False
+        dot = seg.rfind(".")
+        if dot <= 0 or dot == len(seg) - 1:
+            return False
+        ext = seg[dot + 1:]
+        return 1 <= len(ext) <= 10 and ext.isalnum()
 
     @staticmethod
     def _normalize_events_config(events_cfg: Any) -> dict:
